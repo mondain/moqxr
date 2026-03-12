@@ -24,9 +24,16 @@ struct CmsfObject {
     std::vector<std::uint8_t> owned_payload;
 };
 
+struct TrackInitialization {
+    std::string track_name;
+    std::vector<std::uint8_t> codec_payload;
+    std::vector<std::uint8_t> init_segment;
+};
+
 struct PublishPlan {
     DraftProfile draft;
     std::vector<TrackDescription> tracks;
+    std::vector<TrackInitialization> track_initializations;
     std::vector<CmsfObject> objects;
 };
 
