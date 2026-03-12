@@ -32,6 +32,7 @@ struct PublishPlan {
 
 PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion version);
 std::string render_publish_plan(const PublishPlan& plan);
+PublishPlan materialize_publish_plan(const PublishPlan& plan, std::span<const std::uint8_t> bytes);
 void emit_plan_objects(const PublishPlan& plan,
                        std::span<const std::uint8_t> bytes,
                        const std::filesystem::path& output_dir);

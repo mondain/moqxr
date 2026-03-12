@@ -60,15 +60,65 @@ This keeps the project aligned with CMAF-style publication while avoiding unnece
 - `src`: library and CLI implementation
 - `tests`: CTest-based unit coverage
 - `docs`: protocol notes and design references
+- `docs/transport-plan.md`: picoquic integration plan and implementation checklist
 - `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux and macOS
 
 ## Build
 
+### Baseline build
+
+This is the default path if you only want the packaging and session-layer code:
+
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+### Build with local picoquic and picotls
+
+If you have local checkouts at:
+
+- `/media/mondain/terrorbyte/workspace/github/picoquic`
+- `/media/mondain/terrorbyte/workspace/github/picotls`
+
+then the project will automatically compile against them.
+
+Required picotls setup:
+
+```bash
+git -C /media/mondain/terrorbyte/workspace/github/picotls submodule update --init --recursive
+```
+
+Then configure and build normally:
+
+```bash
+cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Useful CMake options:
+
+- `-DOPENMOQ_ENABLE_PICOQUIC=ON|OFF`
+- `-DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic`
+- `-DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON|OFF`
+
+### Optional picoquic smoke test
+
+There is an in-repo loopback smoke test target for the picoquic transport path, but it is disabled by default:
+
+```bash
+cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON
+cmake --build build --target openmoq-publisher-picoquic-smoke-tests
+ctest --test-dir build --output-on-failure
+```
+
+Current status:
+
+- the smoke test compiles
+- the end-to-end loopback handshake currently times out
+- keep this option off for routine development until that runtime issue is fixed
 
 ## Usage
 
@@ -89,6 +139,23 @@ Try the draft-16 compatibility profile:
 ```bash
 ./build/openmoq-publisher --input sample.mp4 --draft 16 --dump-plan
 ```
+
+Transport-oriented CLI flags are also present now:
+
+```bash
+./build/openmoq-publisher \
+  --input sample.mp4 \
+  --endpoint localhost:4433 \
+  --alpn moqt \
+  --insecure
+```
+
+Current status:
+
+- the packaging pipeline is fully usable today
+- the session and transport interfaces are now scaffolded in code
+- `--endpoint` now enters the real picoquic-backed transport path when the project is built with local picoquic and picotls support
+- the compile-time transport integration works, but live handshake validation is still incomplete
 
 ## Creating Fragmented MP4 with FFmpeg
 
@@ -127,6 +194,15 @@ GitHub Actions is configured to build and test the project on:
 - `macos-latest`
 
 The workflow currently runs the same CMake configure, build, and CTest steps on both platforms.
+
+## Picoquic status
+
+The repository now includes a transport abstraction and a picoquic-backed client wrapper.
+
+- if local picoquic and picotls source trees are available, CMake can compile the real picoquic transport path into this project
+- if those dependencies are not available, the project still builds and tests normally, and the transport layer falls back cleanly
+- in this workspace, picoquic and picotls compile successfully as subprojects
+- the remaining transport issue is runtime: the loopback smoke test handshake still times out
 
 ## Contributing
 

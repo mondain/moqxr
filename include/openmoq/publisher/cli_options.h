@@ -5,12 +5,15 @@
 #include <string>
 
 #include "openmoq/publisher/moq_draft.h"
+#include "openmoq/publisher/transport/publisher_transport.h"
 
 namespace openmoq::publisher {
 
 struct CliOptions {
     std::filesystem::path input_path;
     std::optional<std::filesystem::path> emit_dir;
+    std::optional<transport::EndpointConfig> endpoint;
+    transport::TlsConfig tls;
     DraftVersion draft_version = DraftVersion::kDraft14;
     bool dump_plan = false;
 };

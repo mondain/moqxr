@@ -18,6 +18,23 @@ DraftVersion parse_draft(std::string_view value) {
     throw std::runtime_error("unsupported draft value: expected 14 or 16");
 }
 
+transport::EndpointConfig parse_endpoint(std::string_view value) {
+    const std::size_t colon = value.rfind(':');
+    if (colon == std::string_view::npos || colon == 0 || colon + 1 >= value.size()) {
+        throw std::runtime_error("endpoint must be in host:port form");
+    }
+
+    transport::EndpointConfig endpoint;
+    endpoint.host = std::string(value.substr(0, colon));
+    const std::string port_text(value.substr(colon + 1));
+    const int port = std::stoi(port_text);
+    if (port <= 0 || port > 65535) {
+        throw std::runtime_error("endpoint port must be between 1 and 65535");
+    }
+    endpoint.port = static_cast<std::uint16_t>(port);
+    return endpoint;
+}
+
 }  // namespace
 
 CliOptions parse_cli_options(int argc, char** argv) {
@@ -36,6 +53,21 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
         if (argument == "--input") {
             options.input_path = require_value("--input");
+        } else if (argument == "--endpoint") {
+            options.endpoint = parse_endpoint(require_value("--endpoint"));
+        } else if (argument == "--alpn") {
+            if (!options.endpoint.has_value()) {
+                options.endpoint = transport::EndpointConfig{};
+            }
+            options.endpoint->alpn = std::string(require_value("--alpn"));
+        } else if (argument == "--cert") {
+            options.tls.certificate_path = std::string(require_value("--cert"));
+        } else if (argument == "--key") {
+            options.tls.private_key_path = std::string(require_value("--key"));
+        } else if (argument == "--ca") {
+            options.tls.ca_path = std::string(require_value("--ca"));
+        } else if (argument == "--insecure") {
+            options.tls.insecure_skip_verify = true;
         } else if (argument == "--draft") {
             options.draft_version = parse_draft(require_value("--draft"));
         } else if (argument == "--emit-dir") {
@@ -53,12 +85,17 @@ CliOptions parse_cli_options(int argc, char** argv) {
         throw std::runtime_error("missing required --input argument");
     }
 
+    if (options.endpoint.has_value() && options.endpoint->host.empty()) {
+        throw std::runtime_error("--alpn requires --endpoint to be provided first");
+    }
+
     return options;
 }
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <fragmented.mp4> [--draft 14|16] [--dump-plan] [--emit-dir <dir>]";
+           " --input <mp4> [--draft 14|16] [--dump-plan] [--emit-dir <dir>]"
+           " [--endpoint host:port] [--alpn value] [--cert file] [--key file] [--ca file] [--insecure]";
 }
 
 }  // namespace openmoq::publisher

@@ -2,6 +2,8 @@
 #include "openmoq/publisher/cli_options.h"
 #include "openmoq/publisher/cmsf_packager.h"
 #include "openmoq/publisher/mp4_box.h"
+#include "openmoq/publisher/transport/moqt_session.h"
+#include "openmoq/publisher/transport/picoquic_client.h"
 
 #include <exception>
 #include <iostream>
@@ -21,6 +23,24 @@ int main(int argc, char** argv) {
 
         if (options.emit_dir.has_value()) {
             emit_plan_objects(plan, parsed_mp4.bytes, *options.emit_dir);
+        }
+
+        if (options.endpoint.has_value()) {
+            using namespace openmoq::publisher::transport;
+
+            const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
+            PicoquicClient transport;
+            MoqtSession session(transport);
+
+            TransportStatus status = session.connect(*options.endpoint, options.tls);
+            if (!status.ok) {
+                throw std::runtime_error("transport connect failed: " + status.message);
+            }
+
+            status = session.publish(materialized_plan);
+            if (!status.ok) {
+                throw std::runtime_error("transport publish failed: " + status.message);
+            }
         }
     } catch (const std::exception& exception) {
         if (std::string_view(exception.what()).empty()) {

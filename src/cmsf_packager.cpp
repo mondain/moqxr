@@ -72,6 +72,22 @@ std::string render_publish_plan(const PublishPlan& plan) {
     return stream.str();
 }
 
+PublishPlan materialize_publish_plan(const PublishPlan& plan, std::span<const std::uint8_t> bytes) {
+    PublishPlan materialized = plan;
+
+    for (auto& object : materialized.objects) {
+        if (!object.owned_payload.empty() || object.payload.size == 0) {
+            continue;
+        }
+
+        const auto payload = slice_bytes(bytes, object.payload);
+        object.owned_payload.assign(payload.begin(), payload.end());
+        object.payload = {};
+    }
+
+    return materialized;
+}
+
 void emit_plan_objects(const PublishPlan& plan,
                        std::span<const std::uint8_t> bytes,
                        const std::filesystem::path& output_dir) {
