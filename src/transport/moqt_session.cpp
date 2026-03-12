@@ -15,8 +15,6 @@ namespace openmoq::publisher::transport {
 
 namespace {
 
-constexpr std::string_view kDefaultTrackNamespaceValue = "media";
-
 bool control_message_complete(std::span<const std::uint8_t> bytes, std::size_t& message_size) {
     return next_control_message(bytes, message_size);
 }
@@ -183,14 +181,15 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                                     std::uint64_t control_stream_id,
                                     const openmoq::publisher::PublishPlan& plan,
                                     const std::map<std::string, PublishedTrack>& tracks_by_name,
-                                    openmoq::publisher::DraftVersion draft) {
+                                    openmoq::publisher::DraftVersion draft,
+                                    std::string_view track_namespace) {
     std::vector<std::uint8_t> buffer;
     std::set<std::uint64_t> completed_request_ids;
     bool fin = false;
     bool served_any_subscription = false;
     NamespaceMessage namespace_message{
         .draft = draft,
-        .track_namespace = std::string(kDefaultTrackNamespaceValue),
+        .track_namespace = std::string(track_namespace),
         .request_id = 0,
     };
 
@@ -236,7 +235,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 if (!decode_subscribe_namespace_message(message_bytes, subscribe_namespace)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_NAMESPACE");
                 }
-                if (!namespace_prefix_matches(subscribe_namespace.track_namespace_prefix, kDefaultTrackNamespaceValue)) {
+                if (!namespace_prefix_matches(subscribe_namespace.track_namespace_prefix, track_namespace)) {
                     return TransportStatus::failure("peer requested unsupported namespace prefix");
                 }
                 const TransportStatus write_status =
@@ -255,7 +254,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 if (!decode_subscribe_message(message_bytes, subscribe)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE");
                 }
-                if (!namespace_matches(subscribe.track_namespace, kDefaultTrackNamespaceValue)) {
+                if (!namespace_matches(subscribe.track_namespace, track_namespace)) {
                     return TransportStatus::failure("peer requested unsupported track namespace");
                 }
 
@@ -338,7 +337,8 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
 }  // namespace
 
-MoqtSession::MoqtSession(PublisherTransport& transport) : transport_(transport) {}
+MoqtSession::MoqtSession(PublisherTransport& transport, std::string track_namespace)
+    : transport_(transport), track_namespace_(std::move(track_namespace)) {}
 
 TransportStatus MoqtSession::connect(const EndpointConfig& endpoint, const TlsConfig& tls) {
     endpoint_ = endpoint;
@@ -372,7 +372,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
 
     NamespaceMessage namespace_message{
         .draft = plan.draft.version,
-        .track_namespace = std::string(kDefaultTrackNamespace),
+        .track_namespace = track_namespace_,
         .request_id = 0,
     };
     status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
@@ -390,7 +390,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
         tracks_by_name.emplace(track.name, track);
     }
 
-    return serve_subscriptions(transport_, control_stream_id_, plan, tracks_by_name, plan.draft.version);
+    return serve_subscriptions(transport_, control_stream_id_, plan, tracks_by_name, plan.draft.version, track_namespace_);
 }
 
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {

@@ -22,14 +22,15 @@ It is buildable and testable today, but it is not yet a full interoperable MOQT 
 - Isolates MOQT draft-version mapping from the media packaging code
 - Builds a picoquic-backed QUIC transport path when local `picoquic` and `picotls` checkouts are available
 - Publishes a draft-aware control stream plus per-object streams in the current session layer
+- Supports a configurable published track namespace for relay and interop testing
 
 ## Current limitations
 
-- No OpenMOQ relay interoperability coverage yet
+- External relay interoperability is still incomplete
 - Progressive MP4 remux support is intentionally narrow
 - Edit lists, richer interleaving cases, and broader timing edge cases are not fully handled yet
 - The current remux path synthesizes fragments from `stbl` sample tables but does not attempt a full general-purpose MP4 muxer implementation
-- The current MOQT control stream is still a contribution-oriented session mapping, not a finalized interoperable draft wire implementation
+- Current Cloudflare relay tests complete setup and namespace announcement, but do not yet result in inbound subscriptions
 
 ## Design overview
 
@@ -124,7 +125,7 @@ This covers:
 - fragmented MP4 packaging
 - progressive MP4 remux into CMAF-style objects
 - MOQT setup encoding and decoding
-- binary publish control/object sequencing
+- binary namespace announcement plus subscribe-serving control/object sequencing
 - QUIC varint boundary coverage
 
 ### Picoquic loopback smoke test
@@ -170,19 +171,20 @@ To attempt a live publish against a relay:
 ```bash
 OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --input sample.mp4 \
-  --endpoint moqt://moq-relay.red5.net:8443/moq \
+  --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
+  --namespace interop \
   --insecure
 ```
 
 Current status as of March 12, 2026:
 
-- QUIC handshake succeeds against `moq-relay.red5.net:8443`
-- the client sends `CLIENT_SETUP`
-- the client does not currently receive `SERVER_SETUP`
-- the publish attempt times out waiting for control-stream data
-- repeated tests against that relay have also been reported to crash the relay process
+- QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443` and `interop-relay.cloudflare.mediaoverquic.com:443`
+- `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
+- `PUBLISH_NAMESPACE` is accepted with `PUBLISH_NAMESPACE_OK`
+- the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
+- those Cloudflare endpoints did not issue subscriptions during these tests, so the publish attempt timed out waiting for control-stream data
 
-Because of that, treat the external relay path as unsafe for routine testing until setup interoperability is resolved.
+The older `moq-relay.red5.net:8443` endpoint behaved worse in earlier testing: setup did not complete reliably, and repeated malformed-control testing was reported to crash the relay. Prefer the Cloudflare endpoints for routine interop checks.
 
 ### Optional picoquic smoke test
 
@@ -226,6 +228,7 @@ Transport-oriented CLI flags are also present now:
 ./build/openmoq-publisher \
   --input sample.mp4 \
   --endpoint localhost:4433 \
+  --namespace media \
   --alpn moq-00 \
   --insecure
 ```
@@ -233,10 +236,12 @@ Transport-oriented CLI flags are also present now:
 Current status:
 
 - the packaging pipeline is fully usable today
-- the session layer now emits typed control messages for setup, namespace publication, and track publication
+- the session layer now emits typed control messages for setup, namespace publication, and subscription servicing
 - `--endpoint` now enters the real picoquic-backed transport path when the project is built with local picoquic and picotls support
 - the local picoquic loopback handshake works, including object publication over QUIC streams
-- interoperability against an external OpenMOQ-capable endpoint is still the next transport milestone
+- `--namespace` lets you choose the advertised track namespace during transport tests
+- after setup completes, the CLI prints `connection_id=<hex>` to stdout
+- interoperability against external relays is partially working at setup and namespace announce, but not yet at end-to-end subscription delivery
 
 ## Creating Fragmented MP4 with FFmpeg
 

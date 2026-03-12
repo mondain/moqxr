@@ -84,6 +84,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
             options.tls.insecure_skip_verify = true;
         } else if (argument == "--draft") {
             options.draft_version = parse_draft(require_value("--draft"));
+        } else if (argument == "--namespace") {
+            options.track_namespace = std::string(require_value("--namespace"));
         } else if (argument == "--emit-dir") {
             options.emit_dir = std::filesystem::path(require_value("--emit-dir"));
         } else if (argument == "--dump-plan") {
@@ -102,13 +104,16 @@ CliOptions parse_cli_options(int argc, char** argv) {
     if (options.endpoint.has_value() && options.endpoint->host.empty()) {
         throw std::runtime_error("--alpn requires --endpoint to be provided first");
     }
+    if (options.track_namespace.empty()) {
+        throw std::runtime_error("--namespace must not be empty");
+    }
 
     return options;
 }
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <mp4> [--draft 14|16] [--dump-plan] [--emit-dir <dir>]"
+           " --input <mp4> [--draft 14|16] [--namespace <value>] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path] [--alpn value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }

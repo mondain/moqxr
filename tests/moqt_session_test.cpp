@@ -141,13 +141,13 @@ std::vector<std::uint8_t> encode_publish_namespace_ok_message(std::uint64_t requ
     return message;
 }
 
-std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t request_id, std::string_view track_namespace) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
     const std::vector<std::uint8_t> tuple_len = encode_varint(1);
-    const std::vector<std::uint8_t> component_len = encode_varint(5);
+    const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
     payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
     payload.insert(payload.end(), component_len.begin(), component_len.end());
-    payload.insert(payload.end(), {'m', 'e', 'd', 'i', 'a'});
+    payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
     const std::vector<std::uint8_t> parameter_count = encode_varint(0);
     payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
 
@@ -158,13 +158,15 @@ std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t reque
     return message;
 }
 
-std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id, std::string_view track_name) {
+std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
+                                                   std::string_view track_namespace,
+                                                   std::string_view track_name) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
     const std::vector<std::uint8_t> tuple_len = encode_varint(1);
-    const std::vector<std::uint8_t> component_len = encode_varint(5);
+    const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
     payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
     payload.insert(payload.end(), component_len.begin(), component_len.end());
-    payload.insert(payload.end(), {'m', 'e', 'd', 'i', 'a'});
+    payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
     const std::vector<std::uint8_t> track_name_length = encode_varint(track_name.size());
     payload.insert(payload.end(), track_name_length.begin(), track_name_length.end());
     payload.insert(payload.end(), track_name.begin(), track_name.end());
@@ -201,11 +203,13 @@ std::vector<std::uint8_t> encode_publish_ok_message(std::uint64_t request_id) {
     return message;
 }
 
-void queue_subscribe_requests(MockTransport& transport, std::initializer_list<std::pair<std::uint64_t, std::string>> requests) {
+void queue_subscribe_requests(MockTransport& transport,
+                              std::string_view track_namespace,
+                              std::initializer_list<std::pair<std::uint64_t, std::string>> requests) {
     transport.reads[0].push_back(encode_publish_namespace_ok_message(0));
-    transport.reads[0].push_back(encode_subscribe_namespace_message(1));
+    transport.reads[0].push_back(encode_subscribe_namespace_message(1, track_namespace));
     for (const auto& [request_id, track_name] : requests) {
-        transport.reads[0].push_back(encode_subscribe_message(request_id, track_name));
+        transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name));
     }
 }
 
@@ -350,14 +354,15 @@ PublishPlan make_span_backed_plan(DraftVersion draft) {
 
 int main() {
     bool ok = true;
+    constexpr std::string_view kTestTrackNamespace = "interop";
 
     MockTransport transport;
     transport.reads[0].push_back(encode_server_setup_message({
         .draft = DraftVersion::kDraft14,
         .max_request_id = 8,
     }));
-    queue_subscribe_requests(transport, {{2, "catalog"}, {4, "vide_1"}});
-    MoqtSession session(transport);
+    queue_subscribe_requests(transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    MoqtSession session(transport, std::string(kTestTrackNamespace));
 
     const EndpointConfig endpoint{
         .host = "example.com",
@@ -392,6 +397,9 @@ int main() {
     ok &= expect(path == "/", "expected draft-14 CLIENT_SETUP path");
     ok &= expect(max_request_id == 0, "expected draft-14 CLIENT_SETUP max_request_id");
     ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE");
+    ok &= expect(transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07, 0x69, 0x6e,
+                                                                         0x74, 0x65, 0x72, 0x6f, 0x70, 0x00}),
+                 "expected namespace write to use the configured track namespace");
     ok &= expect(message_type(transport.writes[2].bytes) == 0x12, "expected SUBSCRIBE_NAMESPACE_OK");
     ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected first SUBSCRIBE_OK");
     ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
@@ -406,12 +414,12 @@ int main() {
     ok &= expect(transport.writes[7].fin, "expected second object stream write to set FIN");
     ok &= expect(message_type(transport.writes[8].bytes) == 0x0b, "expected second PUBLISH_DONE");
     ok &= expect(message_type(transport.writes[9].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
-    ok &= expect(transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x07, 0x01, 0x05, 0x6d, 0x65,
-                                                                         0x64, 0x69, 0x61}),
-                 "expected draft-14 PUBLISH_NAMESPACE_DONE to contain only the track namespace");
+    ok &= expect(transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
+                                                                         0x74, 0x65, 0x72, 0x6f, 0x70}),
+                 "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
 
     MockTransport failing_transport;
-    MoqtSession failing_session(failing_transport);
+    MoqtSession failing_session(failing_transport, std::string(kTestTrackNamespace));
     status = failing_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected second session connect to succeed");
 
@@ -423,8 +431,8 @@ int main() {
         .draft = DraftVersion::kDraft16,
         .max_request_id = 8,
     }));
-    queue_subscribe_requests(draft16_transport, {{2, "catalog"}, {4, "vide_1"}});
-    MoqtSession draft16_session(draft16_transport);
+    queue_subscribe_requests(draft16_transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    MoqtSession draft16_session(draft16_transport, std::string(kTestTrackNamespace));
     status = draft16_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected draft-16 session connect to succeed");
 
@@ -445,6 +453,10 @@ int main() {
     ok &= expect(path == "/", "expected draft-16 CLIENT_SETUP path");
     ok &= expect(max_request_id == 0, "expected draft-16 CLIENT_SETUP max_request_id");
     ok &= expect(message_type(draft16_transport.writes[1].bytes) == 0x06, "expected draft-16 PUBLISH_NAMESPACE");
+    ok &= expect(draft16_transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07,
+                                                                                  0x69, 0x6e, 0x74, 0x65, 0x72, 0x6f,
+                                                                                  0x70, 0x00}),
+                 "expected draft-16 namespace write to use the configured track namespace");
     ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x12, "expected draft-16 SUBSCRIBE_NAMESPACE_OK");
     ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
     ok &= expect(draft16_transport.writes[4].stream_id == 2, "expected first draft-16 object stream");
@@ -466,8 +478,8 @@ int main() {
         std::vector<std::uint8_t>(split_server_setup.begin(), split_server_setup.begin() + 3));
     segmented_transport.reads[0].push_back(
         std::vector<std::uint8_t>(split_server_setup.begin() + 3, split_server_setup.end()));
-    queue_subscribe_requests(segmented_transport, {{2, "catalog"}, {4, "vide_1"}});
-    MoqtSession segmented_session(segmented_transport);
+    queue_subscribe_requests(segmented_transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    MoqtSession segmented_session(segmented_transport, std::string(kTestTrackNamespace));
     status = segmented_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected segmented setup connect to succeed");
     status = segmented_session.publish(materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));

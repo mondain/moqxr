@@ -1,5 +1,6 @@
 # Build output
 /build/
+/build-*/
 /out/
 /cmake-build-*/
 
@@ -17,3 +18,5 @@ Testing/
 # Tooling
 compile_commands.json
 
+# Local test artifacts
+/tmp-*.mp4
