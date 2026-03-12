@@ -90,6 +90,35 @@ Try the draft-16 compatibility profile:
 ./build/openmoq-publisher --input sample.mp4 --draft 16 --dump-plan
 ```
 
+## Creating Fragmented MP4 with FFmpeg
+
+The publisher’s preferred fast path is already fragmented MP4 input. You can generate that with `ffmpeg` by copying compatible AAC-LC or H.264 streams and enabling CMAF-style fragmentation flags:
+
+```bash
+ffmpeg -i input.mp4 \
+  -c:v copy \
+  -c:a copy \
+  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
+  -f mp4 fragmented.mp4
+```
+
+If the source codecs are not already compatible, re-encode instead of copying. For example:
+
+```bash
+ffmpeg -i input.mov \
+  -c:v libx264 -preset medium -g 48 -keyint_min 48 \
+  -c:a aac -profile:a aac_low -b:a 128k \
+  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
+  -f mp4 fragmented.mp4
+```
+
+Practical notes:
+
+- `+frag_keyframe` starts a new fragment on keyframes
+- `+empty_moov` writes initialization metadata up front
+- `+default_base_moof` and `+separate_moof` produce a layout that is easier for fragmented-MP4 pipelines to consume
+- if you start from a progressive MP4, this project can remux it internally, but pre-fragmented input is still the simpler and more efficient path
+
 ## CI
 
 GitHub Actions is configured to build and test the project on:
