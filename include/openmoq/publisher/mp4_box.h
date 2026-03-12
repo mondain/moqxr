@@ -22,8 +22,10 @@ struct Mp4Box {
 };
 
 struct TrackDescription {
+    std::uint32_t track_id = 0;
     std::string handler_type;
     std::string codec;
+    std::string track_name;
 };
 
 struct ParsedMp4 {
@@ -39,6 +41,7 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
 
 const Mp4Box* find_first_box(const std::vector<Mp4Box>& boxes, std::string_view type);
 std::vector<const Mp4Box*> find_boxes(const std::vector<Mp4Box>& boxes, std::string_view type);
+const Mp4Box* find_child_box(const Mp4Box& box, std::string_view type);
 std::span<const std::uint8_t> slice_bytes(std::span<const std::uint8_t> bytes, const ByteSpan& span);
 
 }  // namespace openmoq::publisher

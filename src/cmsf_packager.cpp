@@ -37,17 +37,18 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
         .track_name = "init",
         .group_id = 0,
         .object_id = 0,
-        .payload = segmented_mp4.initialization_segment,
+        .payload = segmented_mp4.initialization_segment.span,
+        .owned_payload = segmented_mp4.initialization_segment.owned_bytes,
     });
 
     for (const auto& fragment : segmented_mp4.fragments) {
-        const std::size_t media_size = fragment.moof.size + fragment.mdat.size;
         plan.objects.push_back({
             .kind = CmsfObjectKind::kMedia,
-            .track_name = "media",
+            .track_name = fragment.track_name,
             .group_id = fragment.sequence,
             .object_id = 0,
-            .payload = {.offset = fragment.moof.offset, .size = media_size},
+            .payload = fragment.payload.span,
+            .owned_payload = fragment.payload.owned_bytes,
         });
     }
 
@@ -63,7 +64,8 @@ std::string render_publish_plan(const PublishPlan& plan) {
 
     for (const auto& object : plan.objects) {
         stream << object.track_name << " group=" << object.group_id << " object=" << object.object_id
-               << " bytes=" << object.payload.size << " kind="
+               << " bytes=" << (object.owned_payload.empty() ? object.payload.size : object.owned_payload.size())
+               << " kind="
                << (object.kind == CmsfObjectKind::kInitialization ? "init" : "media") << '\n';
     }
 
@@ -76,7 +78,11 @@ void emit_plan_objects(const PublishPlan& plan,
     std::filesystem::create_directories(output_dir);
 
     for (const auto& object : plan.objects) {
-        write_bytes(output_dir / object_filename(object), slice_bytes(bytes, object.payload));
+        if (object.owned_payload.empty()) {
+            write_bytes(output_dir / object_filename(object), slice_bytes(bytes, object.payload));
+        } else {
+            write_bytes(output_dir / object_filename(object), object.owned_payload);
+        }
     }
 
     std::ofstream manifest(output_dir / "publish-plan.txt");

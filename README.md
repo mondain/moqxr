@@ -1,49 +1,66 @@
 # OpenMOQ Publisher
 
-Greenfield C++20 contribution project for an OpenMOQ publisher that targets Linux and macOS.
+`moqxr` is a C++20 contribution project for an OpenMOQ publisher targeting Linux and macOS.
 
-Current focus:
+The current codebase focuses on the media packaging side of a publisher:
 
-- Primary MOQT behavior modeled after `draft-ietf-moq-transport-14`
-- Secondary compatibility surface for `draft-ietf-moq-transport-16`
+- primary MOQT behavior modeled after `draft-ietf-moq-transport-14`
+- secondary compatibility surface for `draft-ietf-moq-transport-16`
 - MP4 ingest for AAC-LC or Opus audio and H.264 or H.265 video
-- CMSF-oriented packaging with a zero-copy bias from ISO BMFF boxes into initialization/media objects
+- CMSF-oriented object planning for MOQT publication
 
-## Status
+It is buildable and testable today, but it is not yet a full end-to-end network publisher.
 
-This repository currently provides a buildable publisher core and CLI for:
+## Current capabilities
 
-- Parsing fragmented MP4 input (`ftyp` + `moov` + `moof`/`mdat`)
-- Detecting common sample-entry codecs from `stsd`
-- Building a CMSF-style object plan without remuxing media payloads
-- Emitting initialization and media objects to disk for inspection
-- Capturing draft-14 vs draft-16 mapping decisions in one place
+- Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`
+- Remuxes non-fragmented MP4 input into synthesized fragmented media objects
+- Extracts basic track metadata and codec identifiers from MP4 sample tables
+- Builds a publish plan consisting of initialization and media objects
+- Emits planned objects to disk for inspection
+- Keeps fragmented input on a zero-copy fast path where possible
+- Isolates MOQT draft-version mapping from the media packaging code
 
-It does **not** yet include a QUIC/WebTransport session implementation. The transport boundary is isolated so a future OpenMOQ transport implementation can publish the generated object stream without reworking the packaging pipeline.
+## Current limitations
 
-## Design Notes
+- No QUIC or WebTransport transport session yet
+- Progressive MP4 remux support is intentionally narrow
+- Edit lists, richer interleaving cases, and broader timing edge cases are not fully handled yet
+- The current remux path synthesizes fragments from `stbl` sample tables but does not attempt a full general-purpose MP4 muxer implementation
 
-### Input assumptions
+## Design overview
 
-- The fast path assumes **fragmented MP4** input.
-- For fragmented input, `moof`/`mdat` pairs are reused directly as media fragments.
-- `ftyp` + `moov` are reused directly as the initialization segment.
-- Non-fragmented MP4 is rejected for now because generating compliant CMAF fragments would require a full remux path.
+### Fragmented MP4 fast path
 
-### Packaging path
+For already fragmented input:
 
-The project avoids unnecessary copies:
+- `ftyp` + `moov` are reused as the initialization segment
+- each `moof`/`mdat` pair is reused directly as a media object payload
+- the pipeline preserves source-byte spans until optional file emission
 
-- Source bytes are loaded once.
-- Parsed boxes are represented as spans into the original buffer.
-- Initialization and media objects reference those spans until optional emission to files.
+### Progressive MP4 remux path
 
-### Project layout
+For non-fragmented input:
 
-- `include/openmoq/publisher`: public library headers
+- the tool reads `stbl` tables such as `stsz`, `stsc`, `stco` or `co64`, `stts`, and optional `ctts` and `stss`
+- it synthesizes a fragmented initialization segment by adding `mvex` and `trex`
+- it builds synthetic `moof` + `mdat` payloads from the original sample data
+
+This keeps the project aligned with CMAF-style publication while avoiding unnecessary redesign later when transport is added.
+
+### Draft handling
+
+- `draft-ietf-moq-transport-14` is the primary target
+- `draft-ietf-moq-transport-16` is represented as a secondary compatibility profile
+- draft-specific assumptions are documented in [docs/protocol-mapping.md](/media/mondain/terrorbyte/workspace/github/moqxr/docs/protocol-mapping.md)
+
+## Repository layout
+
+- `include/openmoq/publisher`: public headers
 - `src`: library and CLI implementation
-- `tests`: lightweight CTest-based coverage
-- `docs/protocol-mapping.md`: draft-14/draft-16 and CMAF packaging notes
+- `tests`: CTest-based unit coverage
+- `docs`: protocol notes and design references
+- `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux and macOS
 
 ## Build
 
@@ -55,14 +72,40 @@ ctest --test-dir build --output-on-failure
 
 ## Usage
 
+Inspect the publish plan for an already fragmented MP4:
+
 ```bash
 ./build/openmoq-publisher --input sample-fragmented.mp4 --draft 14 --dump-plan
-./build/openmoq-publisher --input sample-fragmented.mp4 --draft 16 --emit-dir out/
 ```
+
+Emit object payloads for a progressive MP4 after remux:
+
+```bash
+./build/openmoq-publisher --input sample-progressive.mp4 --draft 14 --emit-dir out/
+```
+
+Try the draft-16 compatibility profile:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --draft 16 --dump-plan
+```
+
+## CI
+
+GitHub Actions is configured to build and test the project on:
+
+- `ubuntu-latest`
+- `macos-latest`
+
+The workflow currently runs the same CMake configure, build, and CTest steps on both platforms.
+
+## Contributing
+
+See [CONTRIBUTING.md](/media/mondain/terrorbyte/workspace/github/moqxr/CONTRIBUTING.md) for contribution expectations and development notes.
 
 ## Roadmap
 
-1. Add a real MOQT transport publisher over QUIC/WebTransport.
-2. Expand CMSF metadata generation once the draft stabilizes further.
-3. Add optional remux support for non-fragmented MP4 sources.
-4. Validate object layout against interoperable OpenMOQ endpoints.
+1. Add a real MOQT transport publisher over QUIC or WebTransport.
+2. Validate generated object layouts against interoperable OpenMOQ endpoints.
+3. Expand progressive remux coverage for more sample-table layouts and edit-list cases.
+4. Refine CMSF metadata generation as the packaging draft evolves.

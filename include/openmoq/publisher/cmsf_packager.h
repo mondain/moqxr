@@ -21,6 +21,7 @@ struct CmsfObject {
     std::size_t group_id = 0;
     std::size_t object_id = 0;
     ByteSpan payload;
+    std::vector<std::uint8_t> owned_payload;
 };
 
 struct PublishPlan {

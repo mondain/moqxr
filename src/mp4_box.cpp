@@ -151,6 +151,7 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
 
         const Mp4Box* hdlr = find_child(*mdia, "hdlr");
         const Mp4Box* minf = find_child(*mdia, "minf");
+        const Mp4Box* tkhd = find_child(trak, "tkhd");
         if (hdlr == nullptr || minf == nullptr) {
             continue;
         }
@@ -164,10 +165,20 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
         const std::size_t handler_offset = hdlr->payload.offset + 8;
         const std::string handler_type(reinterpret_cast<const char*>(bytes.data() + handler_offset), 4);
         const std::string codec = codec_from_stsd(*stsd, bytes);
+        std::uint32_t track_id = 0;
+        if (tkhd != nullptr && tkhd->payload.size >= 20) {
+            const std::uint8_t version = bytes[tkhd->payload.offset];
+            const std::size_t track_id_offset = tkhd->payload.offset + (version == 1 ? 20 : 12);
+            if (track_id_offset + 4 <= bytes.size()) {
+                track_id = read_be32(bytes, track_id_offset);
+            }
+        }
 
         tracks.push_back({
+            .track_id = track_id,
             .handler_type = handler_type,
             .codec = codec,
+            .track_name = handler_type + "_" + std::to_string(tracks.size() + 1),
         });
     }
 
@@ -191,6 +202,10 @@ std::vector<const Mp4Box*> find_boxes(const std::vector<Mp4Box>& boxes, std::str
         }
     }
     return matches;
+}
+
+const Mp4Box* find_child_box(const Mp4Box& box, std::string_view type) {
+    return find_child(box, type);
 }
 
 std::span<const std::uint8_t> slice_bytes(std::span<const std::uint8_t> bytes, const ByteSpan& span) {
