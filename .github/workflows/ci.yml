@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+

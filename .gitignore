@@ -1,0 +1,19 @@
+# Build output
+/build/
+/out/
+/cmake-build-*/
+
+# CMake
+CMakeUserPresets.json
+Testing/
+
+# Editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tooling
+compile_commands.json
+
