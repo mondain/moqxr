@@ -107,6 +107,83 @@ Useful CMake options:
 - `-DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic`
 - `-DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON|OFF`
 
+## How To Test
+
+### Packaging and session tests
+
+For routine development, run the packaging and session-layer tests:
+
+```bash
+cmake -S . -B build-nosmoke -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+cmake --build build-nosmoke
+ctest --test-dir build-nosmoke --output-on-failure
+```
+
+This covers:
+
+- fragmented MP4 packaging
+- progressive MP4 remux into CMAF-style objects
+- MOQT setup encoding and decoding
+- binary publish control/object sequencing
+- QUIC varint boundary coverage
+
+### Picoquic loopback smoke test
+
+When you want to exercise the live QUIC path locally, enable the smoke test target:
+
+```bash
+cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON
+cmake --build build --target openmoq-publisher-picoquic-smoke-tests
+./build/openmoq-publisher-picoquic-smoke-tests
+```
+
+For transport debugging, run it with tracing enabled:
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher-picoquic-smoke-tests
+```
+
+### CLI dry-run testing
+
+Use `--dump-plan` to inspect the generated publish plan without touching the network:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --draft 14 --dump-plan
+```
+
+Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --draft 14 --emit-dir out/
+```
+
+The output directory should currently contain:
+
+- `catalog.json`
+- one `.mp4` object file per media object
+- `publish-plan.txt`
+
+### Relay interoperability test
+
+To attempt a live publish against a relay:
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
+  --input sample.mp4 \
+  --endpoint moqt://moq-relay.red5.net:8443/moq \
+  --insecure
+```
+
+Current status as of March 12, 2026:
+
+- QUIC handshake succeeds against `moq-relay.red5.net:8443`
+- the client sends `CLIENT_SETUP`
+- the client does not currently receive `SERVER_SETUP`
+- the publish attempt times out waiting for control-stream data
+- repeated tests against that relay have also been reported to crash the relay process
+
+Because of that, treat the external relay path as unsafe for routine testing until setup interoperability is resolved.
+
 ### Optional picoquic smoke test
 
 There is an in-repo loopback smoke test target for the picoquic transport path, but it is disabled by default:
