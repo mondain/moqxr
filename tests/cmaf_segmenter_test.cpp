@@ -126,7 +126,8 @@ int main() {
     ok &= expect(fragmented.tracks.size() == 1, "expected one extracted fragmented track");
     ok &= expect(fragmented.tracks.front().codec == "avc1", "expected avc1 codec");
     ok &= expect(segmented.fragments.size() == 1, "expected one fragmented media fragment");
-    ok &= expect(plan.objects.size() == 2, "expected init plus one fragmented media object");
+    ok &= expect(plan.objects.size() == 2, "expected catalog plus one fragmented media object");
+    ok &= expect(plan.objects.front().track_name == "catalog", "expected catalog object first");
     ok &= expect(payload_size(segmented.initialization_segment) > 0, "expected fragmented init payload");
     ok &= expect(payload_size(segmented.fragments.front().payload) > 0, "expected fragmented media payload");
 
@@ -145,7 +146,8 @@ int main() {
     ok &= expect(!remuxed.initialization_segment.owned_bytes.empty(), "expected synthesized init segment");
     ok &= expect(remuxed.fragments.size() == 1, "expected one remuxed fragment");
     ok &= expect(!remuxed.fragments.front().payload.owned_bytes.empty(), "expected synthesized media fragment");
-    ok &= expect(remuxed_plan.objects.size() == 2, "expected init and media objects for remuxed file");
+    ok &= expect(remuxed_plan.objects.size() == 2, "expected catalog and media objects for remuxed file");
+    ok &= expect(remuxed_plan.objects.front().track_name == "catalog", "expected remuxed catalog object first");
     ok &= expect(remuxed_plan.objects[1].track_name == "vide_1", "expected remuxed track naming");
 
     return ok ? 0 : 1;

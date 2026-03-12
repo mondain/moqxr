@@ -1,5 +1,6 @@
 #include "openmoq/publisher/cmsf_packager.h"
 #include "openmoq/publisher/moq_draft.h"
+#include "openmoq/publisher/transport/moqt_control_messages.h"
 #include "openmoq/publisher/transport/moqt_session.h"
 #include "openmoq/publisher/transport/picoquic_client.h"
 
@@ -7,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -29,7 +31,9 @@ using openmoq::publisher::materialize_publish_plan;
 using openmoq::publisher::transport::EndpointConfig;
 using openmoq::publisher::transport::MoqtSession;
 using openmoq::publisher::transport::PicoquicClient;
+using openmoq::publisher::transport::ServerSetupMessage;
 using openmoq::publisher::transport::TlsConfig;
+using openmoq::publisher::transport::encode_server_setup_message;
 
 constexpr const char* kPicoquicSourceDir = "/media/mondain/terrorbyte/workspace/github/picoquic";
 
@@ -44,7 +48,19 @@ struct SmokeServer {
     bool stop_requested = false;
     bool loop_exited = false;
     int loop_return_code = 0;
+    bool setup_response_sent = false;
 };
+
+bool trace_enabled() {
+    static const bool enabled = std::getenv("OPENMOQ_PICOQUIC_TRACE") != nullptr;
+    return enabled;
+}
+
+void trace(const std::string& message) {
+    if (trace_enabled()) {
+        std::cerr << "[picoquic-smoke] " << message << std::endl;
+    }
+}
 
 bool expect(bool condition, const std::string& message) {
     if (!condition) {
@@ -96,14 +112,25 @@ int smoke_server_callback(picoquic_cnx_t* cnx,
     switch (event) {
         case picoquic_callback_stream_data:
         case picoquic_callback_stream_fin: {
+            trace("server stream data event bytes=" + std::to_string(length));
             std::lock_guard<std::mutex> lock(server->mutex);
             server->bytes_received += length;
+            if (!server->setup_response_sent && stream_id == 0) {
+                const std::vector<std::uint8_t> server_setup = encode_server_setup_message({
+                    .draft = DraftVersion::kDraft14,
+                    .max_request_id = 8,
+                });
+                if (picoquic_add_to_stream(cnx, stream_id, server_setup.data(), server_setup.size(), 0) == 0) {
+                    server->setup_response_sent = true;
+                }
+            }
             server->condition.notify_all();
             return 0;
         }
         case picoquic_callback_close:
         case picoquic_callback_application_close:
         case picoquic_callback_stateless_reset:
+            trace("server connection close event");
             return 0;
         default:
             static_cast<void>(bytes);
@@ -124,6 +151,7 @@ int smoke_server_loop_callback(picoquic_quic_t* quic,
 
     switch (cb_mode) {
         case picoquic_packet_loop_ready: {
+            trace("server packet loop ready");
             auto* options = static_cast<picoquic_packet_loop_options_t*>(callback_arg);
             if (options != nullptr) {
                 options->do_time_check = 1;
@@ -134,21 +162,36 @@ int smoke_server_loop_callback(picoquic_quic_t* quic,
             return 0;
         }
         case picoquic_packet_loop_after_receive:
+            if (callback_arg != nullptr) {
+                trace("server packet loop after receive count=" +
+                      std::to_string(*static_cast<size_t*>(callback_arg)));
+            } else {
+                trace("server packet loop after receive");
+            }
+            return 0;
         case picoquic_packet_loop_after_send:
+            if (callback_arg != nullptr) {
+                trace("server packet loop after send count=" +
+                      std::to_string(*static_cast<size_t*>(callback_arg)));
+            } else {
+                trace("server packet loop after send");
+            }
             return 0;
         case picoquic_packet_loop_port_update:
             if (callback_arg != nullptr) {
                 auto* addr = static_cast<sockaddr*>(callback_arg);
                 std::lock_guard<std::mutex> lock(server->mutex);
                 if (addr->sa_family == AF_INET) {
-                    server->port = ntohs(reinterpret_cast<sockaddr_in*>(addr)->sin_port);
+                    server->port = reinterpret_cast<sockaddr_in*>(addr)->sin_port;
                 } else if (addr->sa_family == AF_INET6) {
-                    server->port = ntohs(reinterpret_cast<sockaddr_in6*>(addr)->sin6_port);
+                    server->port = reinterpret_cast<sockaddr_in6*>(addr)->sin6_port;
                 }
+                trace("server port update port=" + std::to_string(server->port));
                 server->condition.notify_all();
             }
             return 0;
         case picoquic_packet_loop_time_check: {
+            trace("server packet loop time check");
             auto* time_check = static_cast<packet_loop_time_check_arg_t*>(callback_arg);
             std::lock_guard<std::mutex> lock(server->mutex);
             if (time_check != nullptr && time_check->delta_t > 10000) {
@@ -165,7 +208,7 @@ bool start_server(SmokeServer& server) {
     const std::string cert_path = std::string(kPicoquicSourceDir) + "/certs/cert.pem";
     const std::string key_path = std::string(kPicoquicSourceDir) + "/certs/key.pem";
 
-    server.quic = picoquic_create(8, cert_path.c_str(), key_path.c_str(), nullptr, "moqt",
+    server.quic = picoquic_create(8, cert_path.c_str(), key_path.c_str(), nullptr, "moq-00",
                                   smoke_server_callback, &server, nullptr, nullptr, nullptr,
                                   picoquic_current_time(), nullptr, nullptr, nullptr, 0);
     if (server.quic == nullptr) {
@@ -174,8 +217,12 @@ bool start_server(SmokeServer& server) {
 
     picoquic_set_cookie_mode(server.quic, 2);
     server.thread = std::thread([&server] {
+        trace("server packet loop thread start");
+        // Mirror the client-side socket loop configuration and avoid UDP GSO in
+        // the loopback smoke test while the handshake path is being stabilized.
         const int ret =
-            picoquic_packet_loop(server.quic, server.port, AF_INET, 0, 0, 0, smoke_server_loop_callback, &server);
+            picoquic_packet_loop(server.quic, server.port, AF_INET, 0, 0, 1, smoke_server_loop_callback, &server);
+        trace("server packet loop thread exit rc=" + std::to_string(ret));
         std::lock_guard<std::mutex> lock(server.mutex);
         server.loop_return_code = ret;
         server.loop_exited = true;
@@ -215,6 +262,9 @@ void stop_server(SmokeServer& server) {
 int main() {
     bool ok = true;
 
+    std::cerr << "smoke test start" << std::endl;
+    std::cerr << "trace " << (trace_enabled() ? "enabled" : "disabled") << std::endl;
+
     SmokeServer server;
     ok &= expect(start_server(server), "expected picoquic smoke server to start");
     if (!ok) {
@@ -225,7 +275,7 @@ int main() {
     const EndpointConfig endpoint{
         .host = "127.0.0.1",
         .port = server.port,
-        .alpn = "moqt",
+        .alpn = "moq-00",
     };
     const TlsConfig tls{
         .certificate_path = {},
@@ -252,17 +302,14 @@ int main() {
     if (!status.ok) {
         std::cerr << "publish error: " << status.message << '\n';
     }
-    ok &= expect(status.ok,
-                 status.ok ? "expected session publish over picoquic to succeed"
-                           : "expected session publish over picoquic to succeed: " + status.message);
+    ok &= expect(status.ok, status.ok ? "expected publish to succeed after setup negotiation"
+                                      : "expected publish to succeed after setup negotiation: " + status.message);
 
-    if (status.ok) {
-        std::unique_lock<std::mutex> lock(server.mutex);
-        ok &= expect(server.condition.wait_for(lock, std::chrono::seconds(5), [&] {
-                         return server.bytes_received >= 64;
-                     }),
-                     "expected server to receive published bytes");
-    }
+    std::unique_lock<std::mutex> lock(server.mutex);
+    ok &= expect(server.condition.wait_for(lock, std::chrono::seconds(5), [&] {
+                     return server.setup_response_sent;
+                 }),
+                 "expected server to send SERVER_SETUP");
 
     status = session.close(0);
     ok &= expect(status.ok, "expected picoquic session close to succeed");

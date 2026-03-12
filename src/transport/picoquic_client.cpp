@@ -4,6 +4,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <cstdlib>
+#include <iostream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -26,9 +29,15 @@ struct PicoquicClient::Impl {
         bool fin = false;
     };
 
+    struct ReceivedStreamData {
+        std::vector<std::uint8_t> bytes;
+        bool fin = false;
+    };
+
     std::mutex mutex;
     std::condition_variable condition;
     std::deque<PendingWrite> pending_writes;
+    std::map<std::uint64_t, ReceivedStreamData> received_streams;
     bool connected = false;
     bool failed = false;
     bool disconnected = false;
@@ -49,6 +58,17 @@ struct PicoquicClient::Impl {
 #ifdef OPENMOQ_HAS_PICOQUIC
 namespace {
 
+bool trace_enabled() {
+    static const bool enabled = std::getenv("OPENMOQ_PICOQUIC_TRACE") != nullptr;
+    return enabled;
+}
+
+void trace(const std::string& message) {
+    if (trace_enabled()) {
+        std::cerr << "[picoquic-client] " << message << std::endl;
+    }
+}
+
 int apply_pending_operations(PicoquicClient::Impl& impl) {
     if (impl.cnx == nullptr) {
         return 0;
@@ -67,6 +87,7 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
         const int ret = picoquic_add_to_stream(
             impl.cnx, write.stream_id, write.bytes.data(), write.bytes.size(), write.fin ? 1 : 0);
         if (ret != 0) {
+            trace("add_to_stream failed for stream " + std::to_string(write.stream_id));
             std::lock_guard<std::mutex> lock(impl.mutex);
             impl.failed = true;
             impl.last_error = "picoquic_add_to_stream failed";
@@ -76,6 +97,7 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
     }
 
     if (close_requested) {
+        trace("close requested");
         const int ret = picoquic_close(impl.cnx, 0);
         if (ret != 0) {
             std::lock_guard<std::mutex> lock(impl.mutex);
@@ -97,9 +119,6 @@ int client_callback(picoquic_cnx_t* cnx,
                     void* callback_ctx,
                     void* stream_ctx) {
     static_cast<void>(cnx);
-    static_cast<void>(stream_id);
-    static_cast<void>(bytes);
-    static_cast<void>(length);
     static_cast<void>(stream_ctx);
 
     auto* impl = static_cast<PicoquicClient::Impl*>(callback_ctx);
@@ -108,8 +127,22 @@ int client_callback(picoquic_cnx_t* cnx,
     }
 
     switch (event) {
+        case picoquic_callback_stream_data:
+        case picoquic_callback_stream_fin: {
+            std::lock_guard<std::mutex> lock(impl->mutex);
+            auto& received = impl->received_streams[stream_id];
+            if (bytes != nullptr && length != 0) {
+                received.bytes.insert(received.bytes.end(), bytes, bytes + length);
+            }
+            if (event == picoquic_callback_stream_fin) {
+                received.fin = true;
+            }
+            impl->condition.notify_all();
+            return 0;
+        }
         case picoquic_callback_almost_ready:
         case picoquic_callback_ready: {
+            trace(event == picoquic_callback_ready ? "callback ready" : "callback almost_ready");
             std::lock_guard<std::mutex> lock(impl->mutex);
             impl->connected = true;
             impl->condition.notify_all();
@@ -118,6 +151,7 @@ int client_callback(picoquic_cnx_t* cnx,
         case picoquic_callback_close:
         case picoquic_callback_application_close:
         case picoquic_callback_stateless_reset: {
+            trace("callback connection closed");
             std::lock_guard<std::mutex> lock(impl->mutex);
             impl->disconnected = true;
             if (!impl->connected) {
@@ -146,6 +180,7 @@ int loop_callback(picoquic_quic_t* quic,
 
     switch (cb_mode) {
         case picoquic_packet_loop_ready: {
+            trace("packet loop ready");
             auto* options = static_cast<picoquic_packet_loop_options_t*>(callback_arg);
             if (options != nullptr) {
                 options->do_time_check = 1;
@@ -156,10 +191,18 @@ int loop_callback(picoquic_quic_t* quic,
             return 0;
         }
         case picoquic_packet_loop_after_receive:
+            if (callback_arg != nullptr) {
+                trace("packet loop after receive count=" +
+                      std::to_string(*static_cast<size_t*>(callback_arg)));
+            } else {
+                trace("packet loop after receive");
+            }
             return 0;
         case picoquic_packet_loop_wake_up:
+            trace("packet loop wake up");
             return apply_pending_operations(*impl);
         case picoquic_packet_loop_time_check: {
+            trace("packet loop time check");
             auto* time_check = static_cast<packet_loop_time_check_arg_t*>(callback_arg);
             if (time_check != nullptr && time_check->delta_t > 10000) {
                 time_check->delta_t = 10000;
@@ -167,6 +210,12 @@ int loop_callback(picoquic_quic_t* quic,
             return apply_pending_operations(*impl);
         }
         case picoquic_packet_loop_after_send: {
+            if (callback_arg != nullptr) {
+                trace("packet loop after send count=" +
+                      std::to_string(*static_cast<size_t*>(callback_arg)));
+            } else {
+                trace("packet loop after send");
+            }
             std::lock_guard<std::mutex> lock(impl->mutex);
             if (impl->disconnected) {
                 return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
@@ -233,6 +282,8 @@ TransportStatus PicoquicClient::connect() {
     const char* sni = is_name ? endpoint_->host.c_str() : "localhost";
     const char* alpn = endpoint_->alpn.c_str();
     const uint64_t current_time = picoquic_current_time();
+    trace("connect start host=" + endpoint_->host + " port=" + std::to_string(endpoint_->port) +
+          " sni=" + sni + " alpn=" + alpn);
 
     impl_->quic =
         picoquic_create(1, nullptr, nullptr, nullptr, alpn, nullptr, nullptr, nullptr, nullptr, nullptr,
@@ -267,8 +318,13 @@ TransportStatus PicoquicClient::connect() {
     }
 
     impl_->packet_loop_thread = std::thread([impl = impl_.get()] {
+        trace("client packet loop thread start");
+        // Disable UDP GSO in the default socket loop. Some Linux driver paths can
+        // report a successful send while dropping coalesced UDP packets, which
+        // looks exactly like a handshake black hole in local loopback tests.
         impl->packet_loop_return_code =
-            picoquic_packet_loop(impl->quic, 0, impl->server_address.ss_family, 0, 0, 0, loop_callback, impl);
+            picoquic_packet_loop(impl->quic, 0, impl->server_address.ss_family, 0, 0, 1, loop_callback, impl);
+        trace("client packet loop thread exit rc=" + std::to_string(impl->packet_loop_return_code));
         std::lock_guard<std::mutex> lock(impl->mutex);
         impl->loop_exited = true;
         if (!impl->connected && !impl->failed && !impl->disconnected) {
@@ -286,6 +342,7 @@ TransportStatus PicoquicClient::connect() {
         });
 
         if (!completed) {
+            trace("handshake wait timed out");
             impl_->failed = true;
             impl_->last_error = "timed out waiting for picoquic handshake";
         }
@@ -336,6 +393,8 @@ TransportStatus PicoquicClient::write_stream(std::uint64_t stream_id,
 #else
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
+        trace("queue write stream=" + std::to_string(stream_id) + " bytes=" + std::to_string(bytes.size()) +
+              " fin=" + std::to_string(fin ? 1 : 0));
         impl_->pending_writes.push_back({
             .stream_id = stream_id,
             .bytes = std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
@@ -343,6 +402,44 @@ TransportStatus PicoquicClient::write_stream(std::uint64_t stream_id,
         });
     }
 
+    return TransportStatus::success();
+#endif
+}
+
+TransportStatus PicoquicClient::read_stream(std::uint64_t stream_id,
+                                            std::vector<std::uint8_t>& bytes,
+                                            bool& fin,
+                                            std::chrono::milliseconds timeout) {
+    if (state_ != ConnectionState::kConnected) {
+        return TransportStatus::failure("transport is not connected");
+    }
+
+#ifndef OPENMOQ_HAS_PICOQUIC
+    static_cast<void>(stream_id);
+    static_cast<void>(bytes);
+    static_cast<void>(fin);
+    static_cast<void>(timeout);
+    return TransportStatus::failure("picoquic support is not enabled in this build");
+#else
+    std::unique_lock<std::mutex> lock(impl_->mutex);
+    const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
+        const auto it = impl_->received_streams.find(stream_id);
+        return it != impl_->received_streams.end() || impl_->failed || impl_->disconnected;
+    });
+
+    if (!ready) {
+        return TransportStatus::failure("timed out waiting for stream data");
+    }
+
+    const auto it = impl_->received_streams.find(stream_id);
+    if (it == impl_->received_streams.end()) {
+        return TransportStatus::failure(impl_->last_error.empty() ? "stream closed before data arrived"
+                                                                  : impl_->last_error);
+    }
+
+    bytes = std::move(it->second.bytes);
+    fin = it->second.fin;
+    impl_->received_streams.erase(it);
     return TransportStatus::success();
 #endif
 }
@@ -356,6 +453,7 @@ TransportStatus PicoquicClient::close(std::uint64_t application_error_code) {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             impl_->close_requested = true;
         }
+        trace("joining client packet loop thread");
         if (impl_->packet_loop_thread.joinable()) {
             impl_->packet_loop_thread.join();
         }

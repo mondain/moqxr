@@ -1,7 +1,9 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "openmoq/publisher/transport/publisher_transport.h"
 
@@ -19,6 +21,10 @@ public:
     TransportStatus write_stream(std::uint64_t stream_id,
                                  std::span<const std::uint8_t> bytes,
                                  bool fin) override;
+    TransportStatus read_stream(std::uint64_t stream_id,
+                                std::vector<std::uint8_t>& bytes,
+                                bool& fin,
+                                std::chrono::milliseconds timeout) override;
     TransportStatus close(std::uint64_t application_error_code) override;
 
 private:

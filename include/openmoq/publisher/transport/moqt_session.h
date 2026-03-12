@@ -3,6 +3,12 @@
 #include "openmoq/publisher/cmsf_packager.h"
 #include "openmoq/publisher/transport/publisher_transport.h"
 
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
 namespace openmoq::publisher::transport {
 
 class MoqtSession {
@@ -14,12 +20,18 @@ public:
     TransportStatus close(std::uint64_t application_error_code = 0);
 
 private:
+    static constexpr std::string_view kDefaultTrackNamespace = "media";
+
+    TransportStatus ensure_setup(openmoq::publisher::DraftVersion draft);
     TransportStatus ensure_control_stream();
-    TransportStatus write_text_frame(std::uint64_t stream_id, std::string_view frame, bool fin);
+    TransportStatus write_frame(std::uint64_t stream_id, std::span<const std::uint8_t> frame, bool fin);
 
     PublisherTransport& transport_;
+    std::optional<EndpointConfig> endpoint_;
     std::uint64_t control_stream_id_ = 0;
+    std::uint64_t peer_max_request_id_ = 0;
     bool control_stream_open_ = false;
+    bool setup_complete_ = false;
 };
 
 }  // namespace openmoq::publisher::transport

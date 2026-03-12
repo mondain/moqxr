@@ -34,6 +34,24 @@ std::uint32_t read_be32(std::span<const std::uint8_t> bytes, std::size_t offset)
            static_cast<std::uint32_t>(bytes[offset + 3]);
 }
 
+std::string fragment_track_name(const Mp4Box& moof,
+                                const std::vector<TrackDescription>& tracks,
+                                std::span<const std::uint8_t> bytes) {
+    const Mp4Box* traf = find_child_box(moof, "traf");
+    const Mp4Box* tfhd = traf == nullptr ? nullptr : find_child_box(*traf, "tfhd");
+    if (tfhd == nullptr || tfhd->payload.size < 8) {
+        return "media";
+    }
+
+    const std::uint32_t track_id = read_be32(bytes, tfhd->payload.offset + 4);
+    for (const auto& track : tracks) {
+        if (track.track_id == track_id) {
+            return track.track_name;
+        }
+    }
+    return "media";
+}
+
 std::uint64_t read_be64(std::span<const std::uint8_t> bytes, std::size_t offset) {
     std::uint64_t value = 0;
     for (int index = 0; index < 8; ++index) {
@@ -404,6 +422,11 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
     const std::vector<const Mp4Box*> mdats = find_boxes(parsed_mp4.top_level_boxes, "mdat");
 
     if (!moofs.empty()) {
+        segmented.initialization_segment.owned_bytes.assign(
+            slice_bytes(parsed_mp4.bytes, segmented.initialization_segment.span).begin(),
+            slice_bytes(parsed_mp4.bytes, segmented.initialization_segment.span).end());
+        segmented.initialization_segment.span = {};
+
         if (moofs.size() != mdats.size()) {
             throw std::runtime_error("fragmented MP4 must contain matched moof/mdat pairs");
         }
@@ -415,7 +438,7 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
 
             segmented.fragments.push_back({
                 .sequence = index,
-                .track_name = "media",
+                .track_name = fragment_track_name(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes),
                 .payload = {.span = {.offset = moofs[index]->span.offset,
                                      .size = moofs[index]->span.size + mdats[index]->span.size},
                             .owned_bytes = {}},

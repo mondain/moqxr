@@ -62,23 +62,23 @@ This separation is important because MOQT draft churn should be isolated to the 
 
 ### Phase 3: MOQT control plane
 
-- [ ] Open a control stream after handshake
-- [ ] Implement setup and session negotiation
-- [ ] Implement namespace or publish announcement flow
-- [ ] Represent draft-14 and draft-16 control-plane differences behind one abstraction
+- [x] Open a control stream after handshake
+- [x] Implement setup and session negotiation scaffolding
+- [x] Implement namespace or publish announcement flow
+- [x] Represent draft-14 and draft-16 control-plane differences behind one abstraction
 
 ### Phase 4: object publication
 
-- [ ] Publish initialization object first
-- [ ] Publish media objects according to `PublishPlan`
+- [x] Publish initialization object first
+- [x] Publish media objects according to `PublishPlan`
 - [ ] Decide and document one stream mapping policy
 - [ ] Handle transport write backpressure
 
 ### Phase 5: observability and testing
 
 - [ ] Add structured logs for handshake, stream lifecycle, and object publication
-- [ ] Add unit tests for session-to-transport mapping
-- [ ] Add loopback integration tests for transport
+- [x] Add unit tests for session-to-transport mapping
+- [x] Add loopback integration tests for transport
 - [ ] Add interoperability tests against an OpenMOQ-capable endpoint
 
 ## Proposed stream mapping
@@ -147,7 +147,8 @@ Owns:
 - CLI flags for endpoint, ALPN, and TLS-related parameters are present.
 - The build can integrate local picoquic and picotls source checkouts directly.
 - The current workspace now compiles picoquic and picotls successfully.
-- A loopback smoke test was added for live handshake validation, but it is not enabled by default because the current handshake attempt still times out.
+- A loopback smoke test now validates the local picoquic handshake and object publication path when it is run outside restricted sandboxes.
+- The session layer now uses a dedicated control-message encoder that keeps draft-14 and draft-16 naming differences out of the transport adapter.
 
 ## Key risks
 

@@ -44,6 +44,7 @@ add_library(openmoq_publisher_lib
     src/cmsf_packager.cpp
     src/moq_draft.cpp
     src/mp4_box.cpp
+    src/transport/moqt_control_messages.cpp
     src/transport/moqt_session.cpp
     src/transport/picoquic_client.cpp
     src/transport/publisher_transport.cpp

@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace openmoq::publisher::transport {
 
@@ -24,7 +26,8 @@ enum class ConnectionState {
 struct EndpointConfig {
     std::string host;
     std::uint16_t port = 0;
-    std::string alpn = "moqt";
+    std::string alpn = "moq-00";
+    std::string path = "/";
 };
 
 struct TlsConfig {
@@ -53,6 +56,10 @@ public:
     virtual TransportStatus write_stream(std::uint64_t stream_id,
                                          std::span<const std::uint8_t> bytes,
                                          bool fin) = 0;
+    virtual TransportStatus read_stream(std::uint64_t stream_id,
+                                        std::vector<std::uint8_t>& bytes,
+                                        bool& fin,
+                                        std::chrono::milliseconds timeout) = 0;
     virtual TransportStatus close(std::uint64_t application_error_code) = 0;
 };
 

@@ -9,7 +9,7 @@ The current codebase focuses on the media packaging side of a publisher:
 - MP4 ingest for AAC-LC or Opus audio and H.264 or H.265 video
 - CMSF-oriented object planning for MOQT publication
 
-It is buildable and testable today, but it is not yet a full end-to-end network publisher.
+It is buildable and testable today, but it is not yet a full interoperable MOQT publisher.
 
 ## Current capabilities
 
@@ -20,13 +20,16 @@ It is buildable and testable today, but it is not yet a full end-to-end network 
 - Emits planned objects to disk for inspection
 - Keeps fragmented input on a zero-copy fast path where possible
 - Isolates MOQT draft-version mapping from the media packaging code
+- Builds a picoquic-backed QUIC transport path when local `picoquic` and `picotls` checkouts are available
+- Publishes a draft-aware control stream plus per-object streams in the current session layer
 
 ## Current limitations
 
-- No QUIC or WebTransport transport session yet
+- No OpenMOQ relay interoperability coverage yet
 - Progressive MP4 remux support is intentionally narrow
 - Edit lists, richer interleaving cases, and broader timing edge cases are not fully handled yet
 - The current remux path synthesizes fragments from `stbl` sample tables but does not attempt a full general-purpose MP4 muxer implementation
+- The current MOQT control stream is still a contribution-oriented session mapping, not a finalized interoperable draft wire implementation
 
 ## Design overview
 
@@ -116,9 +119,9 @@ ctest --test-dir build --output-on-failure
 
 Current status:
 
-- the smoke test compiles
-- the end-to-end loopback handshake currently times out
-- keep this option off for routine development until that runtime issue is fixed
+- the smoke test passes when run in an environment that allows real UDP sockets
+- restricted sandboxes can still fail early during socket setup
+- keep this option off for routine packaging-only development, and run the smoke binary directly when validating transport changes
 
 ## Usage
 
@@ -146,16 +149,17 @@ Transport-oriented CLI flags are also present now:
 ./build/openmoq-publisher \
   --input sample.mp4 \
   --endpoint localhost:4433 \
-  --alpn moqt \
+  --alpn moq-00 \
   --insecure
 ```
 
 Current status:
 
 - the packaging pipeline is fully usable today
-- the session and transport interfaces are now scaffolded in code
+- the session layer now emits typed control messages for setup, namespace publication, and track publication
 - `--endpoint` now enters the real picoquic-backed transport path when the project is built with local picoquic and picotls support
-- the compile-time transport integration works, but live handshake validation is still incomplete
+- the local picoquic loopback handshake works, including object publication over QUIC streams
+- interoperability against an external OpenMOQ-capable endpoint is still the next transport milestone
 
 ## Creating Fragmented MP4 with FFmpeg
 
@@ -202,7 +206,9 @@ The repository now includes a transport abstraction and a picoquic-backed client
 - if local picoquic and picotls source trees are available, CMake can compile the real picoquic transport path into this project
 - if those dependencies are not available, the project still builds and tests normally, and the transport layer falls back cleanly
 - in this workspace, picoquic and picotls compile successfully as subprojects
-- the remaining transport issue is runtime: the loopback smoke test handshake still times out
+- the loopback smoke test now completes successfully when run outside restricted sandboxes
+- the current session layer uses a draft-aware control-message module instead of ad hoc string formatting
+- the next remaining transport step is external interoperability, not local handshake bring-up
 
 ## Contributing
 
