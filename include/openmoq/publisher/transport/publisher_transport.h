@@ -60,6 +60,7 @@ public:
                                         std::vector<std::uint8_t>& bytes,
                                         bool& fin,
                                         std::chrono::milliseconds timeout) = 0;
+    virtual std::string connection_id() const = 0;
     virtual TransportStatus close(std::uint64_t application_error_code) = 0;
 };
 

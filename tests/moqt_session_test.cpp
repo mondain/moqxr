@@ -5,8 +5,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,8 @@ using openmoq::publisher::TrackDescription;
 using openmoq::publisher::materialize_publish_plan;
 using openmoq::publisher::transport::ConnectionState;
 using openmoq::publisher::transport::ServerSetupMessage;
+using openmoq::publisher::transport::SubscribeMessage;
+using openmoq::publisher::transport::SubscribeNamespaceMessage;
 using openmoq::publisher::transport::EndpointConfig;
 using openmoq::publisher::transport::MoqtSession;
 using openmoq::publisher::transport::PublisherTransport;
@@ -28,6 +32,7 @@ using openmoq::publisher::transport::StreamDirection;
 using openmoq::publisher::transport::TlsConfig;
 using openmoq::publisher::transport::TransportStatus;
 using openmoq::publisher::transport::decode_varint;
+using openmoq::publisher::transport::encode_setup_message;
 using openmoq::publisher::transport::encode_server_setup_message;
 using openmoq::publisher::transport::encode_varint;
 
@@ -109,6 +114,10 @@ struct MockTransport final : PublisherTransport {
         return TransportStatus::success();
     }
 
+    std::string connection_id() const override {
+        return "mock-connection-id";
+    }
+
     EndpointConfig endpoint_;
     TlsConfig tls_;
     ConnectionState state_ = ConnectionState::kIdle;
@@ -119,8 +128,101 @@ struct MockTransport final : PublisherTransport {
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
 };
 
+void append_be16(std::vector<std::uint8_t>& out, std::uint16_t value) {
+    out.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
+    out.push_back(static_cast<std::uint8_t>(value & 0xffU));
+}
+
+std::vector<std::uint8_t> encode_publish_namespace_ok_message(std::uint64_t request_id) {
+    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    std::vector<std::uint8_t> message = encode_varint(0x07);
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t request_id) {
+    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    const std::vector<std::uint8_t> tuple_len = encode_varint(1);
+    const std::vector<std::uint8_t> component_len = encode_varint(5);
+    payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
+    payload.insert(payload.end(), component_len.begin(), component_len.end());
+    payload.insert(payload.end(), {'m', 'e', 'd', 'i', 'a'});
+    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+    payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+
+    std::vector<std::uint8_t> message = encode_varint(0x11);
+    const std::vector<std::uint8_t> length = encode_varint(payload.size());
+    message.insert(message.end(), length.begin(), length.end());
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id, std::string_view track_name) {
+    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    const std::vector<std::uint8_t> tuple_len = encode_varint(1);
+    const std::vector<std::uint8_t> component_len = encode_varint(5);
+    payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
+    payload.insert(payload.end(), component_len.begin(), component_len.end());
+    payload.insert(payload.end(), {'m', 'e', 'd', 'i', 'a'});
+    const std::vector<std::uint8_t> track_name_length = encode_varint(track_name.size());
+    payload.insert(payload.end(), track_name_length.begin(), track_name_length.end());
+    payload.insert(payload.end(), track_name.begin(), track_name.end());
+    payload.push_back(0x80);
+    payload.push_back(0x01);
+    payload.push_back(0x01);
+    const std::vector<std::uint8_t> filter_type = encode_varint(0x03);
+    const std::vector<std::uint8_t> start_group = encode_varint(0);
+    const std::vector<std::uint8_t> start_object = encode_varint(0);
+    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+    payload.insert(payload.end(), filter_type.begin(), filter_type.end());
+    payload.insert(payload.end(), start_group.begin(), start_group.end());
+    payload.insert(payload.end(), start_object.begin(), start_object.end());
+    payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+
+    std::vector<std::uint8_t> message = encode_varint(0x03);
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+std::vector<std::uint8_t> encode_publish_ok_message(std::uint64_t request_id) {
+    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    payload.push_back(0x01);
+    payload.push_back(0x80);
+    payload.push_back(0x01);
+    const std::vector<std::uint8_t> filter_type = encode_varint(0);
+    payload.insert(payload.end(), filter_type.begin(), filter_type.end());
+
+    std::vector<std::uint8_t> message = encode_varint(0x1e);
+    const std::vector<std::uint8_t> length = encode_varint(payload.size());
+    message.insert(message.end(), length.begin(), length.end());
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+void queue_subscribe_requests(MockTransport& transport, std::initializer_list<std::pair<std::uint64_t, std::string>> requests) {
+    transport.reads[0].push_back(encode_publish_namespace_ok_message(0));
+    transport.reads[0].push_back(encode_subscribe_namespace_message(1));
+    for (const auto& [request_id, track_name] : requests) {
+        transport.reads[0].push_back(encode_subscribe_message(request_id, track_name));
+    }
+}
+
 bool bytes_equal(const std::vector<std::uint8_t>& bytes, std::initializer_list<std::uint8_t> expected) {
     return std::vector<std::uint8_t>(expected) == bytes;
+}
+
+std::string hex_dump(const std::vector<std::uint8_t>& bytes) {
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        if (index != 0) {
+            out << ' ';
+        }
+        out << std::setw(2) << static_cast<unsigned int>(bytes[index]);
+    }
+    return out.str();
 }
 
 std::optional<std::uint64_t> message_type(const std::vector<std::uint8_t>& bytes) {
@@ -173,23 +275,32 @@ bool decode_setup_fields(const std::vector<std::uint8_t>& bytes,
 
     for (std::uint64_t index = 0; index < parameter_count; ++index) {
         std::uint64_t parameter_type = 0;
+        if (!decode_varint(bytes, offset, parameter_type)) {
+            return false;
+        }
+
+        if ((parameter_type & 0x1ULL) == 0) {
+            if (parameter_type != 0x02) {
+                return false;
+            }
+            std::size_t parameter_offset = offset;
+            if (!decode_varint(bytes, parameter_offset, max_request_id)) {
+                return false;
+            }
+            offset = parameter_offset;
+            continue;
+        }
+
         std::uint64_t parameter_length = 0;
-        if (!decode_varint(bytes, offset, parameter_type) || !decode_varint(bytes, offset, parameter_length) ||
-            offset + parameter_length > bytes.size()) {
+        if (!decode_varint(bytes, offset, parameter_length) || offset + parameter_length > bytes.size()) {
             return false;
         }
 
         const auto parameter_bytes = std::span<const std::uint8_t>(bytes).subspan(offset, parameter_length);
-        if (parameter_type == (expected_draft == DraftVersion::kDraft16 ? 0x05ULL : 0x03ULL)) {
+        if (parameter_type == 0x05ULL) {
             authority.assign(parameter_bytes.begin(), parameter_bytes.end());
         } else if (parameter_type == 0x01) {
             path.assign(parameter_bytes.begin(), parameter_bytes.end());
-        } else if (parameter_type == 0x02) {
-            std::size_t parameter_offset = 0;
-            if (!decode_varint(parameter_bytes, parameter_offset, max_request_id) ||
-                parameter_offset != parameter_bytes.size()) {
-                return false;
-            }
         }
         offset += parameter_length;
     }
@@ -245,6 +356,7 @@ int main() {
         .draft = DraftVersion::kDraft14,
         .max_request_id = 8,
     }));
+    queue_subscribe_requests(transport, {{2, "catalog"}, {4, "vide_1"}});
     MoqtSession session(transport);
 
     const EndpointConfig endpoint{
@@ -266,9 +378,9 @@ int main() {
     const PublishPlan materialized = materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
 
     status = session.publish(materialized);
-    ok &= expect(status.ok, "expected publish to succeed with binary MOQT publish messages");
-    ok &= expect(transport.writes.size() == 9,
-                 "expected setup, namespace, two track publishes, two object streams, two publish_done, namespace_done");
+    ok &= expect(status.ok, "expected publish to succeed with announce plus subscribe flow");
+    ok &= expect(transport.writes.size() == 10,
+                 "expected setup, namespace, subscribe_namespace_ok, two subscribe_ok, two object streams, two publish_done, namespace_done");
     ok &= expect(!transport.writes[0].bytes.empty() && transport.writes[0].bytes.front() == 0x20,
                  "expected binary CLIENT_SETUP message type");
     std::string authority;
@@ -280,15 +392,23 @@ int main() {
     ok &= expect(path == "/", "expected draft-14 CLIENT_SETUP path");
     ok &= expect(max_request_id == 0, "expected draft-14 CLIENT_SETUP max_request_id");
     ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE");
-    ok &= expect(message_type(transport.writes[2].bytes) == 0x1d, "expected first PUBLISH");
-    ok &= expect(message_type(transport.writes[3].bytes) == 0x1d, "expected second PUBLISH");
+    ok &= expect(message_type(transport.writes[2].bytes) == 0x12, "expected SUBSCRIBE_NAMESPACE_OK");
+    ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected first SUBSCRIBE_OK");
     ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
+    ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x14,
+                 "expected first object stream to use a subgroup header with explicit subgroup ID");
     ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
-    ok &= expect(transport.writes[5].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-    ok &= expect(transport.writes[5].fin, "expected second object stream write to set FIN");
-    ok &= expect(message_type(transport.writes[6].bytes) == 0x0b, "expected first PUBLISH_DONE");
-    ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second PUBLISH_DONE");
-    ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
+    ok &= expect(message_type(transport.writes[5].bytes) == 0x0b, "expected first PUBLISH_DONE");
+    ok &= expect(message_type(transport.writes[6].bytes) == 0x04, "expected second SUBSCRIBE_OK");
+    ok &= expect(transport.writes[7].stream_id == 6, "expected second object stream to be unidirectional stream 6");
+    ok &= expect(!transport.writes[7].bytes.empty() && transport.writes[7].bytes.front() == 0x14,
+                 "expected second object stream to use a subgroup header with explicit subgroup ID");
+    ok &= expect(transport.writes[7].fin, "expected second object stream write to set FIN");
+    ok &= expect(message_type(transport.writes[8].bytes) == 0x0b, "expected second PUBLISH_DONE");
+    ok &= expect(message_type(transport.writes[9].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
+    ok &= expect(transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x07, 0x01, 0x05, 0x6d, 0x65,
+                                                                         0x64, 0x69, 0x61}),
+                 "expected draft-14 PUBLISH_NAMESPACE_DONE to contain only the track namespace");
 
     MockTransport failing_transport;
     MoqtSession failing_session(failing_transport);
@@ -303,6 +423,7 @@ int main() {
         .draft = DraftVersion::kDraft16,
         .max_request_id = 8,
     }));
+    queue_subscribe_requests(draft16_transport, {{2, "catalog"}, {4, "vide_1"}});
     MoqtSession draft16_session(draft16_transport);
     status = draft16_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected draft-16 session connect to succeed");
@@ -311,7 +432,7 @@ int main() {
         materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft16), source_bytes);
     status = draft16_session.publish(draft16_materialized);
     ok &= expect(status.ok, "expected draft-16 publish to succeed");
-    ok &= expect(draft16_transport.writes.size() == 9, "expected draft-16 publish control/object sequence");
+    ok &= expect(draft16_transport.writes.size() == 10, "expected draft-16 announce/subscribe control/object sequence");
     ok &= expect(!draft16_transport.writes[0].bytes.empty() && draft16_transport.writes[0].bytes.front() == 0x20,
                  "expected draft-16 binary CLIENT_SETUP message type");
     authority.clear();
@@ -324,12 +445,17 @@ int main() {
     ok &= expect(path == "/", "expected draft-16 CLIENT_SETUP path");
     ok &= expect(max_request_id == 0, "expected draft-16 CLIENT_SETUP max_request_id");
     ok &= expect(message_type(draft16_transport.writes[1].bytes) == 0x06, "expected draft-16 PUBLISH_NAMESPACE");
-    ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x1d, "expected first draft-16 PUBLISH");
-    ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x1d, "expected second draft-16 PUBLISH");
-    ok &= expect(message_type(draft16_transport.writes[6].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
-    ok &= expect(message_type(draft16_transport.writes[7].bytes) == 0x0b, "expected second draft-16 PUBLISH_DONE");
-    ok &= expect(message_type(draft16_transport.writes[8].bytes) == 0x09,
+    ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x12, "expected draft-16 SUBSCRIBE_NAMESPACE_OK");
+    ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
+    ok &= expect(draft16_transport.writes[4].stream_id == 2, "expected first draft-16 object stream");
+    ok &= expect(message_type(draft16_transport.writes[5].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
+    ok &= expect(message_type(draft16_transport.writes[6].bytes) == 0x04, "expected second draft-16 SUBSCRIBE_OK");
+    ok &= expect(draft16_transport.writes[7].stream_id == 6, "expected second draft-16 object stream");
+    ok &= expect(message_type(draft16_transport.writes[8].bytes) == 0x0b, "expected second draft-16 PUBLISH_DONE");
+    ok &= expect(message_type(draft16_transport.writes[9].bytes) == 0x09,
                  "expected draft-16 PUBLISH_NAMESPACE_DONE");
+    ok &= expect(draft16_transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x01, 0x00}),
+                 "expected draft-16 PUBLISH_NAMESPACE_DONE to contain only the request ID");
 
     const std::vector<std::uint8_t> split_server_setup = encode_server_setup_message({
         .draft = DraftVersion::kDraft14,
@@ -340,6 +466,7 @@ int main() {
         std::vector<std::uint8_t>(split_server_setup.begin(), split_server_setup.begin() + 3));
     segmented_transport.reads[0].push_back(
         std::vector<std::uint8_t>(split_server_setup.begin() + 3, split_server_setup.end()));
+    queue_subscribe_requests(segmented_transport, {{2, "catalog"}, {4, "vide_1"}});
     MoqtSession segmented_session(segmented_transport);
     status = segmented_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected segmented setup connect to succeed");
@@ -354,6 +481,32 @@ int main() {
     ok &= expect(bytes_equal(encode_varint(1073741824ULL), {0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00}),
                  "expected eight-byte varint encoding");
     ok &= expect(encode_varint(4611686018427387904ULL).empty(), "expected oversized varint encoding to fail");
+
+    const auto draft14_setup = encode_setup_message({
+        .draft = DraftVersion::kDraft14,
+        .authority = "example.com:4433",
+        .path = "/moq",
+        .max_request_id = 0,
+    });
+    const auto draft16_setup = encode_setup_message({
+        .draft = DraftVersion::kDraft16,
+        .authority = "example.com:4433",
+        .path = "/moq",
+        .max_request_id = 0,
+    });
+    if (!bytes_equal(draft14_setup,
+                     {0x20, 0x00, 0x24, 0x01, 0xc0, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x0e, 0x03, 0x05, 0x10,
+                      0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x3a, 0x34, 0x34, 0x33,
+                      0x33, 0x01, 0x04, 0x2f, 0x6d, 0x6f, 0x71, 0x02, 0x00})) {
+        std::cerr << "draft14 actual: " << hex_dump(draft14_setup) << '\n';
+        ok = false;
+    }
+    if (!bytes_equal(draft16_setup,
+                     {0x20, 0x00, 0x1b, 0x03, 0x05, 0x10, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63,
+                      0x6f, 0x6d, 0x3a, 0x34, 0x34, 0x33, 0x33, 0x01, 0x04, 0x2f, 0x6d, 0x6f, 0x71, 0x02, 0x00})) {
+        std::cerr << "draft16 actual: " << hex_dump(draft16_setup) << '\n';
+        ok = false;
+    }
 
     status = session.close(7);
     ok &= expect(status.ok, "expected close to succeed");

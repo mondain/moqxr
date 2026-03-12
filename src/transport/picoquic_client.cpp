@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <deque>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -69,6 +71,18 @@ void trace(const std::string& message) {
     }
 }
 
+std::string hex_dump(std::span<const std::uint8_t> bytes) {
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        if (index != 0) {
+            out << ' ';
+        }
+        out << std::setw(2) << static_cast<unsigned int>(bytes[index]);
+    }
+    return out.str();
+}
+
 int apply_pending_operations(PicoquicClient::Impl& impl) {
     if (impl.cnx == nullptr) {
         return 0;
@@ -84,6 +98,7 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
     }
 
     for (auto& write : writes) {
+        trace("stream " + std::to_string(write.stream_id) + " bytes=[" + hex_dump(write.bytes) + "]");
         const int ret = picoquic_add_to_stream(
             impl.cnx, write.stream_id, write.bytes.data(), write.bytes.size(), write.fin ? 1 : 0);
         if (ret != 0) {
@@ -151,12 +166,20 @@ int client_callback(picoquic_cnx_t* cnx,
         case picoquic_callback_close:
         case picoquic_callback_application_close:
         case picoquic_callback_stateless_reset: {
-            trace("callback connection closed");
+            const std::uint64_t local_error = picoquic_get_local_error(cnx);
+            const std::uint64_t remote_error = picoquic_get_remote_error(cnx);
+            trace(std::string("callback connection closed event=") +
+                  (event == picoquic_callback_application_close
+                       ? "application_close"
+                       : (event == picoquic_callback_stateless_reset ? "stateless_reset" : "close")) +
+                  " local_error=" + std::to_string(local_error) + " remote_error=" + std::to_string(remote_error));
             std::lock_guard<std::mutex> lock(impl->mutex);
             impl->disconnected = true;
             if (!impl->connected) {
                 impl->failed = true;
                 impl->last_error = "connection closed before reaching ready state";
+            } else if (impl->last_error.empty() && remote_error != 0) {
+                impl->last_error = "peer closed connection with error " + std::to_string(remote_error);
             }
             impl->condition.notify_all();
             return 0;
@@ -441,6 +464,24 @@ TransportStatus PicoquicClient::read_stream(std::uint64_t stream_id,
     fin = it->second.fin;
     impl_->received_streams.erase(it);
     return TransportStatus::success();
+#endif
+}
+
+std::string PicoquicClient::connection_id() const {
+#ifndef OPENMOQ_HAS_PICOQUIC
+    return {};
+#else
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_ == nullptr || impl_->cnx == nullptr) {
+        return {};
+    }
+
+    char buffer[513] = {};
+    const picoquic_connection_id_t cid = picoquic_get_logging_cnxid(impl_->cnx);
+    if (picoquic_print_connection_id_hexa(buffer, sizeof(buffer), &cid) != 0) {
+        return {};
+    }
+    return buffer;
 #endif
 }
 

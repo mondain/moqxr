@@ -3,7 +3,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <iomanip>
 #include <map>
+#include <iostream>
+#include <sstream>
 #include <set>
 #include <vector>
 
@@ -11,22 +15,27 @@ namespace openmoq::publisher::transport {
 
 namespace {
 
+constexpr std::string_view kDefaultTrackNamespaceValue = "media";
+
 bool control_message_complete(std::span<const std::uint8_t> bytes, std::size_t& message_size) {
-    std::size_t offset = 0;
-    std::uint64_t message_type = 0;
-    if (!decode_varint(bytes, offset, message_type)) {
-        return false;
-    }
-    static_cast<void>(message_type);
+    return next_control_message(bytes, message_size);
+}
 
-    if (offset + 2 > bytes.size()) {
-        return false;
-    }
+bool trace_enabled() {
+    static const bool enabled = std::getenv("OPENMOQ_PICOQUIC_TRACE") != nullptr;
+    return enabled;
+}
 
-    const std::size_t payload_length =
-        (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
-    message_size = offset + 2 + payload_length;
-    return bytes.size() >= message_size;
+std::string hex_dump(std::span<const std::uint8_t> bytes) {
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        if (index != 0) {
+            out << ' ';
+        }
+        out << std::setw(2) << static_cast<unsigned int>(bytes[index]);
+    }
+    return out.str();
 }
 
 std::span<const std::uint8_t> object_payload(const openmoq::publisher::CmsfObject& object) {
@@ -39,7 +48,6 @@ std::span<const std::uint8_t> object_payload(const openmoq::publisher::CmsfObjec
 struct PublishedTrack {
     std::string name;
     std::uint64_t alias = 0;
-    std::uint64_t request_id = 0;
     std::size_t largest_group_id = 0;
     std::size_t largest_object_id = 0;
     bool content_exists = false;
@@ -74,6 +82,260 @@ std::vector<PublishedTrack> build_published_tracks(const openmoq::publisher::Pub
     return ordered_tracks;
 }
 
+TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
+                                                 std::uint64_t control_stream_id,
+                                                 std::size_t expected_namespace_responses,
+                                                 std::size_t expected_publish_responses) {
+    std::vector<std::uint8_t> buffer;
+    std::size_t namespace_responses = 0;
+    std::size_t publish_responses = 0;
+    bool fin = false;
+
+    while ((namespace_responses < expected_namespace_responses || publish_responses < expected_publish_responses) && !fin) {
+        std::vector<std::uint8_t> chunk;
+        const TransportStatus status = transport.read_stream(control_stream_id, chunk, fin, std::chrono::seconds(2));
+        if (!status.ok) {
+            return status;
+        }
+        if (trace_enabled()) {
+            std::cerr << "[moqt-session] control chunk fin=" << (fin ? 1 : 0) << " bytes=[" << hex_dump(chunk)
+                      << "]" << std::endl;
+        }
+        buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+
+        std::size_t message_size = 0;
+        while (next_control_message(buffer, message_size)) {
+            const std::vector<std::uint8_t> message_bytes(buffer.begin(), buffer.begin() + message_size);
+            std::size_t offset = 0;
+            std::uint64_t message_type = 0;
+            if (!decode_varint(message_bytes, offset, message_type)) {
+                return TransportStatus::failure("failed to parse control response type");
+            }
+            if (trace_enabled()) {
+                std::cerr << "[moqt-session] control message type=0x" << std::hex << message_type << std::dec
+                          << " bytes=[" << hex_dump(message_bytes) << "]" << std::endl;
+            }
+
+            if (message_type == 0x07) {
+                PublishNamespaceOk message;
+                if (!decode_publish_namespace_ok(message_bytes, message)) {
+                    return TransportStatus::failure("received invalid PUBLISH_NAMESPACE_OK");
+                }
+                ++namespace_responses;
+            } else if (message_type == 0x08) {
+                PublishNamespaceError message;
+                if (!decode_publish_namespace_error(message_bytes, message)) {
+                    return TransportStatus::failure("received invalid PUBLISH_NAMESPACE_ERROR");
+                }
+                return TransportStatus::failure("peer rejected namespace publish: " + message.reason);
+            } else if (message_type == 0x1e) {
+                PublishOk message;
+                if (!decode_publish_ok(message_bytes, message)) {
+                    return TransportStatus::failure("received invalid PUBLISH_OK");
+                }
+                ++publish_responses;
+            } else if (message_type == 0x1f) {
+                PublishError message;
+                if (!decode_publish_error(message_bytes, message)) {
+                    return TransportStatus::failure("received invalid PUBLISH_ERROR");
+                }
+                return TransportStatus::failure("peer rejected track publish: " + message.reason);
+            }
+
+            buffer.erase(buffer.begin(), buffer.begin() + message_size);
+        }
+    }
+
+    if (namespace_responses < expected_namespace_responses || publish_responses < expected_publish_responses) {
+        if (trace_enabled() && !buffer.empty()) {
+            std::cerr << "[moqt-session] unparsed control bytes=[" << hex_dump(buffer) << "]" << std::endl;
+        }
+        return TransportStatus::failure("timed out waiting for publish acknowledgements");
+    }
+
+    return TransportStatus::success();
+}
+
+bool namespace_matches(std::span<const std::string> track_namespace, std::string_view expected) {
+    return track_namespace.size() == 1 && track_namespace.front() == expected;
+}
+
+bool namespace_prefix_matches(std::span<const std::string> track_namespace_prefix, std::string_view expected) {
+    return track_namespace_prefix.empty() ||
+           (track_namespace_prefix.size() == 1 && track_namespace_prefix.front() == expected);
+}
+
+bool object_matches_filter(const openmoq::publisher::CmsfObject& object, const SubscribeMessage& subscribe) {
+    switch (subscribe.filter_type) {
+        case 0x03:
+            return object.group_id > subscribe.start_group_id ||
+                   (object.group_id == subscribe.start_group_id && object.object_id >= subscribe.start_object_id);
+        case 0x04:
+            return (object.group_id > subscribe.start_group_id ||
+                    (object.group_id == subscribe.start_group_id && object.object_id >= subscribe.start_object_id)) &&
+                   object.group_id <= subscribe.end_group_id;
+        default:
+            return true;
+    }
+}
+
+TransportStatus serve_subscriptions(PublisherTransport& transport,
+                                    std::uint64_t control_stream_id,
+                                    const openmoq::publisher::PublishPlan& plan,
+                                    const std::map<std::string, PublishedTrack>& tracks_by_name,
+                                    openmoq::publisher::DraftVersion draft) {
+    std::vector<std::uint8_t> buffer;
+    std::set<std::uint64_t> completed_request_ids;
+    bool fin = false;
+    bool served_any_subscription = false;
+    NamespaceMessage namespace_message{
+        .draft = draft,
+        .track_namespace = std::string(kDefaultTrackNamespaceValue),
+        .request_id = 0,
+    };
+
+    while (!fin) {
+        std::vector<std::uint8_t> chunk;
+        const TransportStatus read_status = transport.read_stream(control_stream_id, chunk, fin, std::chrono::seconds(3));
+        if (!read_status.ok) {
+            if (served_any_subscription &&
+                (read_status.message == "timed out waiting for stream data" ||
+                 read_status.message == "no queued read for stream")) {
+                break;
+            }
+            return read_status;
+        }
+
+        if (trace_enabled()) {
+            std::cerr << "[moqt-session] control chunk fin=" << (fin ? 1 : 0) << " bytes=[" << hex_dump(chunk)
+                      << "]" << std::endl;
+        }
+        buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+
+        std::size_t message_size = 0;
+        while (next_control_message(buffer, message_size)) {
+            const std::vector<std::uint8_t> message_bytes(buffer.begin(), buffer.begin() + message_size);
+            std::size_t offset = 0;
+            std::uint64_t message_type = 0;
+            if (!decode_varint(message_bytes, offset, message_type)) {
+                return TransportStatus::failure("failed to parse control request type");
+            }
+
+            if (trace_enabled()) {
+                std::cerr << "[moqt-session] control message type=0x" << std::hex << message_type << std::dec
+                          << " bytes=[" << hex_dump(message_bytes) << "]" << std::endl;
+            }
+
+            if (message_type == 0x12 || message_type == 0x07 || message_type == 0x1e) {
+                buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                continue;
+            }
+
+            if (message_type == 0x11) {
+                SubscribeNamespaceMessage subscribe_namespace;
+                if (!decode_subscribe_namespace_message(message_bytes, subscribe_namespace)) {
+                    return TransportStatus::failure("received invalid SUBSCRIBE_NAMESPACE");
+                }
+                if (!namespace_prefix_matches(subscribe_namespace.track_namespace_prefix, kDefaultTrackNamespaceValue)) {
+                    return TransportStatus::failure("peer requested unsupported namespace prefix");
+                }
+                const TransportStatus write_status =
+                    transport.write_stream(control_stream_id,
+                                           encode_subscribe_namespace_ok_message(subscribe_namespace.request_id),
+                                           false);
+                if (!write_status.ok) {
+                    return write_status;
+                }
+                buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                continue;
+            }
+
+            if (message_type == 0x03) {
+                SubscribeMessage subscribe;
+                if (!decode_subscribe_message(message_bytes, subscribe)) {
+                    return TransportStatus::failure("received invalid SUBSCRIBE");
+                }
+                if (!namespace_matches(subscribe.track_namespace, kDefaultTrackNamespaceValue)) {
+                    return TransportStatus::failure("peer requested unsupported track namespace");
+                }
+
+                const auto track_it = tracks_by_name.find(subscribe.track_name);
+                if (track_it == tracks_by_name.end()) {
+                    const TransportStatus write_status =
+                        transport.write_stream(control_stream_id,
+                                               encode_subscribe_error_message(subscribe.request_id,
+                                                                              0x2,
+                                                                              "track does not exist"),
+                                               false);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                    continue;
+                }
+
+                TransportStatus write_status =
+                    transport.write_stream(control_stream_id,
+                                           encode_subscribe_ok_message(subscribe.request_id,
+                                                                       track_it->second.alias,
+                                                                       subscribe.subscriber_priority,
+                                                                       0,
+                                                                       0,
+                                                                       false),
+                                           false);
+                if (!write_status.ok) {
+                    return write_status;
+                }
+
+                std::uint64_t stream_count = 0;
+                if (subscribe.forward != 0) {
+                    for (const auto& object : plan.objects) {
+                        if (object.track_name != subscribe.track_name || !object_matches_filter(object, subscribe)) {
+                            continue;
+                        }
+                        const auto payload = object_payload(object);
+                        if (payload.empty()) {
+                            return TransportStatus::failure("transport publish requires materialized object payloads");
+                        }
+                        std::uint64_t stream_id = 0;
+                        write_status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+                        if (!write_status.ok) {
+                            return write_status;
+                        }
+                        write_status = transport.write_stream(stream_id,
+                                                              encode_object_stream(track_it->second.alias, object, payload),
+                                                              true);
+                        if (!write_status.ok) {
+                            return write_status;
+                        }
+                        ++stream_count;
+                    }
+                }
+
+                write_status = transport.write_stream(control_stream_id,
+                                                      encode_publish_done_message(subscribe.request_id, stream_count),
+                                                      false);
+                if (!write_status.ok) {
+                    return write_status;
+                }
+
+                completed_request_ids.insert(subscribe.request_id);
+                served_any_subscription = true;
+                buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                continue;
+            }
+
+            return TransportStatus::failure("received unsupported control request");
+        }
+    }
+
+    if (!served_any_subscription) {
+        return TransportStatus::failure("timed out waiting for subscribe request");
+    }
+
+    return transport.write_stream(control_stream_id, encode_publish_namespace_done_message(namespace_message), false);
+}
+
 }  // namespace
 
 MoqtSession::MoqtSession(PublisherTransport& transport) : transport_(transport) {}
@@ -104,89 +366,31 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
     if (!status.ok) {
         return status;
     }
+    std::cout << "connection_id=" << transport_.connection_id() << '\n';
 
     const std::vector<PublishedTrack> tracks = build_published_tracks(plan);
-    const std::uint64_t namespace_request_id = 0;
-    const std::uint64_t largest_request_id = tracks.empty() ? namespace_request_id : namespace_request_id + tracks.size();
-    if (largest_request_id > peer_max_request_id_) {
-        return TransportStatus::failure("peer SERVER_SETUP max_request_id is too small for this publish");
-    }
 
     NamespaceMessage namespace_message{
         .draft = plan.draft.version,
         .track_namespace = std::string(kDefaultTrackNamespace),
-        .request_id = namespace_request_id,
+        .request_id = 0,
     };
     status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
     if (!status.ok) {
         return status;
     }
 
-    std::map<std::string, PublishedTrack> tracks_by_name;
-    std::uint64_t next_request_id = 1;
-    for (auto track : tracks) {
-        track.request_id = next_request_id++;
-        tracks_by_name.emplace(track.name, track);
-
-        status = write_frame(control_stream_id_,
-                             encode_track_message({
-                                 .draft = plan.draft.version,
-                                 .track_name = track.name,
-                                 .track_namespace = std::string(kDefaultTrackNamespace),
-                                 .request_id = track.request_id,
-                                 .track_alias = track.alias,
-                                 .largest_group_id = track.largest_group_id,
-                                 .largest_object_id = track.largest_object_id,
-                                 .content_exists = track.content_exists,
-                             }),
-                             false);
-        if (!status.ok) {
-            return status;
-        }
-    }
-
-    std::map<std::string, std::uint64_t> stream_count_by_track;
-    for (const auto& object : plan.objects) {
-        const auto track_it = tracks_by_name.find(object.track_name);
-        if (track_it == tracks_by_name.end()) {
-            return TransportStatus::failure("object track alias mapping is missing");
-        }
-
-        const auto payload = object_payload(object);
-        if (payload.empty()) {
-            return TransportStatus::failure("transport publish requires materialized object payloads");
-        }
-
-        std::uint64_t stream_id = 0;
-        status = transport_.open_stream(StreamDirection::kUnidirectional, stream_id);
-        if (!status.ok) {
-            return status;
-        }
-
-        status = write_frame(stream_id, encode_object_stream(track_it->second.alias, object, payload), true);
-        if (!status.ok) {
-            return status;
-        }
-
-        ++stream_count_by_track[object.track_name];
-    }
-
-    for (const auto& [track_name, track] : tracks_by_name) {
-        static_cast<void>(track_name);
-        status = write_frame(control_stream_id_,
-                             encode_publish_done_message(track.request_id, stream_count_by_track[track.name]),
-                             false);
-        if (!status.ok) {
-            return status;
-        }
-    }
-
-    status = write_frame(control_stream_id_, encode_publish_namespace_done_message(namespace_message), false);
+    status = collect_control_acknowledgements(transport_, control_stream_id_, 1, 0);
     if (!status.ok) {
         return status;
     }
 
-    return TransportStatus::success();
+    std::map<std::string, PublishedTrack> tracks_by_name;
+    for (auto track : tracks) {
+        tracks_by_name.emplace(track.name, track);
+    }
+
+    return serve_subscriptions(transport_, control_stream_id_, plan, tracks_by_name, plan.draft.version);
 }
 
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {
@@ -257,6 +461,9 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
 
     ServerSetupMessage server_setup;
     if (!decode_server_setup_message(response, server_setup)) {
+        if (trace_enabled()) {
+            std::cerr << "[moqt-session] invalid SERVER_SETUP bytes=[" << hex_dump(response) << "]" << std::endl;
+        }
         return TransportStatus::failure("received invalid SERVER_SETUP message");
     }
 
