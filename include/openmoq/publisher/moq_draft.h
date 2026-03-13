@@ -19,5 +19,6 @@ struct DraftProfile {
 
 DraftProfile draft_profile(DraftVersion version);
 std::string to_string(DraftVersion version);
+std::string default_alpn(DraftVersion version);
 
 }  // namespace openmoq::publisher

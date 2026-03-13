@@ -34,6 +34,7 @@ private:
     std::optional<EndpointConfig> endpoint_;
     std::uint64_t control_stream_id_ = 0;
     std::uint64_t peer_max_request_id_ = 0;
+    std::vector<std::uint8_t> pending_control_bytes_;
     bool control_stream_open_ = false;
     bool setup_complete_ = false;
 };

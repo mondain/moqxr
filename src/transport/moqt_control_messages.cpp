@@ -14,13 +14,16 @@ constexpr std::uint64_t kServerSetupType = 0x21;
 constexpr std::uint64_t kSubscribeType = 0x03;
 constexpr std::uint64_t kSubscribeOkType = 0x04;
 constexpr std::uint64_t kSubscribeErrorType = 0x05;
+constexpr std::uint64_t kRequestErrorType = 0x05;
 constexpr std::uint64_t kPublishNamespaceType = 0x06;
 constexpr std::uint64_t kPublishNamespaceOkType = 0x07;
+constexpr std::uint64_t kRequestOkType = 0x07;
 constexpr std::uint64_t kPublishNamespaceErrorType = 0x08;
 constexpr std::uint64_t kPublishNamespaceDoneType = 0x09;
 constexpr std::uint64_t kPublishDoneType = 0x0b;
 constexpr std::uint64_t kSubscribeNamespaceType = 0x11;
 constexpr std::uint64_t kSubscribeNamespaceOkType = 0x12;
+constexpr std::uint64_t kMaxRequestIdType = 0x15;
 constexpr std::uint64_t kPublishType = 0x1d;
 constexpr std::uint64_t kPublishOkType = 0x1e;
 constexpr std::uint64_t kPublishErrorType = 0x1f;
@@ -254,11 +257,27 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
         case kPublishType:
         case kPublishOkType:
         case kPublishErrorType: {
+            if ((type == kPublishOkType || type == kPublishErrorType || type == kPublishType) &&
+                offset + 2 <= bytes.size() && bytes[offset] == 0) {
+                const std::size_t payload_length =
+                    (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
+                message_size = offset + 2 + payload_length;
+                return bytes.size() >= message_size;
+            }
             std::uint64_t payload_length = 0;
             if (!decode_varint_impl(bytes, offset, payload_length)) {
                 return false;
             }
             message_size = offset + static_cast<std::size_t>(payload_length);
+            return bytes.size() >= message_size;
+        }
+        case kMaxRequestIdType: {
+            if (offset + 2 > bytes.size()) {
+                return false;
+            }
+            const std::size_t payload_length =
+                (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
+            message_size = offset + 2 + payload_length;
             return bytes.size() >= message_size;
         }
         default:
@@ -274,13 +293,13 @@ std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message) {
         append_varint(payload, draft_version_number(message.draft));
     }
 
-    append_varint(payload, 3);
     const std::vector<std::uint8_t> authority = to_bytes(message.authority);
     const std::vector<std::uint8_t> path = to_bytes(message.path);
-    std::vector<std::uint8_t> max_request_id;
-    append_varint(max_request_id, message.max_request_id);
+    append_varint(payload, 3);
     append_parameter(payload, kSetupParamAuthority, authority);
     append_parameter(payload, kSetupParamPath, path);
+    std::vector<std::uint8_t> max_request_id;
+    append_varint(max_request_id, message.max_request_id);
     append_parameter(payload, kSetupParamMaxRequestId, max_request_id);
 
     std::vector<std::uint8_t> message_bytes;
@@ -374,6 +393,16 @@ std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& 
     return message_bytes;
 }
 
+bool decode_max_request_id_message(std::span<const std::uint8_t> bytes, MaxRequestIdMessage& message) {
+    std::size_t payload_offset = 0;
+    std::size_t payload_length = 0;
+    if (!parse_uint16_length_message(bytes, kMaxRequestIdType, payload_offset, payload_length)) {
+        return false;
+    }
+    std::size_t offset = payload_offset;
+    return decode_varint_impl(bytes, offset, message.max_request_id) && offset == payload_offset + payload_length;
+}
+
 std::vector<std::uint8_t> encode_namespace_message(const NamespaceMessage& message) {
     std::vector<std::uint8_t> payload;
     append_varint(payload, message.request_id);
@@ -385,6 +414,61 @@ std::vector<std::uint8_t> encode_namespace_message(const NamespaceMessage& messa
     append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
     message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
     return message_bytes;
+}
+
+std::vector<std::uint8_t> encode_request_ok_message(std::uint64_t request_id) {
+    std::vector<std::uint8_t> payload;
+    append_varint(payload, request_id);
+    append_varint(payload, 0);
+
+    std::vector<std::uint8_t> message_bytes;
+    append_varint(message_bytes, kRequestOkType);
+    append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
+    message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
+    return message_bytes;
+}
+
+bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishNamespaceOk& message) {
+    if (draft == DraftVersion::kDraft14) {
+        return decode_publish_namespace_ok(bytes, message);
+    }
+
+    std::size_t payload_offset = 0;
+    std::size_t payload_length = 0;
+    if (!parse_uint16_length_message(bytes, kRequestOkType, payload_offset, payload_length)) {
+        return false;
+    }
+    std::size_t offset = payload_offset;
+    std::uint64_t parameter_count = 0;
+    return decode_varint_impl(bytes, offset, message.request_id) &&
+           decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 &&
+           offset == payload_offset + payload_length;
+}
+
+bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draft, RequestError& message) {
+    if (draft == DraftVersion::kDraft14) {
+        PublishNamespaceError namespace_error;
+        if (!decode_publish_namespace_error(bytes, namespace_error)) {
+            return false;
+        }
+        message.request_id = namespace_error.request_id;
+        message.error_code = namespace_error.error_code;
+        message.reason = std::move(namespace_error.reason);
+        return true;
+    }
+
+    std::size_t payload_offset = 0;
+    std::size_t payload_length = 0;
+    if (!parse_uint16_length_message(bytes, kRequestErrorType, payload_offset, payload_length)) {
+        return false;
+    }
+    std::size_t offset = payload_offset;
+    const std::size_t payload_end = payload_offset + payload_length;
+    std::uint64_t parameter_count = 0;
+    return decode_varint_impl(bytes, offset, message.request_id) &&
+           decode_varint_impl(bytes, offset, message.error_code) &&
+           decode_reason_phrase(bytes.subspan(0, payload_end), offset, message.reason) &&
+           decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
 }
 
 bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, SubscribeNamespaceMessage& message) {
@@ -401,7 +485,11 @@ bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, Sub
            decode_varint_impl(bytes, offset, parameters) && parameters == 0 && offset == payload_end;
 }
 
-std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
+    if (draft == DraftVersion::kDraft16) {
+        return encode_request_ok_message(request_id);
+    }
+
     std::vector<std::uint8_t> payload;
     append_varint(payload, request_id);
 
@@ -468,7 +556,8 @@ bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMess
     return decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
 }
 
-std::vector<std::uint8_t> encode_subscribe_ok_message(std::uint64_t request_id,
+std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
+                                                      std::uint64_t request_id,
                                                       std::uint64_t track_alias,
                                                       std::uint8_t subscriber_priority,
                                                       std::size_t largest_group_id,
@@ -476,15 +565,20 @@ std::vector<std::uint8_t> encode_subscribe_ok_message(std::uint64_t request_id,
                                                       bool content_exists) {
     std::vector<std::uint8_t> payload;
     append_varint(payload, request_id);
-    append_varint(payload, 0);
-    payload.push_back(subscriber_priority);
-    payload.push_back(kGroupOrderAscending);
-    payload.push_back(content_exists ? kContentExistsTrue : 0);
-    if (content_exists) {
-        append_location(payload, largest_group_id, largest_object_id);
+    if (draft == DraftVersion::kDraft14) {
+        append_varint(payload, 0);
+        payload.push_back(subscriber_priority);
+        payload.push_back(kGroupOrderAscending);
+        payload.push_back(content_exists ? kContentExistsTrue : 0);
+        if (content_exists) {
+            append_location(payload, largest_group_id, largest_object_id);
+        }
+        append_varint(payload, 0);
+        append_varint(payload, track_alias);
+    } else {
+        append_varint(payload, track_alias);
+        append_varint(payload, 0);
     }
-    append_varint(payload, 0);
-    append_varint(payload, track_alias);
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kSubscribeOkType);
@@ -526,10 +620,17 @@ std::vector<std::uint8_t> encode_track_message(const TrackMessage& message) {
     }
 
     append_varint(payload, 0);
+    if (message.draft == DraftVersion::kDraft16) {
+        // No Track Extensions are needed for the current draft-16 publish path.
+    }
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kPublishType);
-    append_varint(message_bytes, payload.size());
+    if (message.draft == DraftVersion::kDraft14) {
+        append_varint(message_bytes, payload.size());
+    } else {
+        append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
+    }
     message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
     return message_bytes;
 }
@@ -563,15 +664,29 @@ std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceM
     return message_bytes;
 }
 
-std::vector<std::uint8_t> encode_object_stream(std::uint64_t track_alias,
+std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
+                                               std::uint64_t track_alias,
                                                const CmsfObject& object,
                                                std::span<const std::uint8_t> payload) {
+    if (draft == DraftVersion::kDraft14) {
+        std::vector<std::uint8_t> stream_bytes;
+        append_varint(stream_bytes, kSubgroupHeaderType);
+        append_varint(stream_bytes, track_alias);
+        append_varint(stream_bytes, object.group_id);
+        append_varint(stream_bytes, object.object_id);
+        stream_bytes.push_back(kPublisherPriority);
+        append_varint(stream_bytes, payload.size());
+        stream_bytes.insert(stream_bytes.end(), payload.begin(), payload.end());
+        return stream_bytes;
+    }
+
     std::vector<std::uint8_t> stream_bytes;
     append_varint(stream_bytes, kSubgroupHeaderType);
     append_varint(stream_bytes, track_alias);
     append_varint(stream_bytes, object.group_id);
     append_varint(stream_bytes, object.object_id);
     stream_bytes.push_back(kPublisherPriority);
+    append_varint(stream_bytes, 0);
     append_varint(stream_bytes, payload.size());
     stream_bytes.insert(stream_bytes.end(), payload.begin(), payload.end());
     return stream_bytes;
@@ -602,7 +717,10 @@ bool decode_publish_namespace_error(std::span<const std::uint8_t> bytes, Publish
 bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishOk& message) {
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;
-    if (!parse_varint_length_message(bytes, kPublishOkType, payload_offset, payload_length)) {
+    const bool parsed =
+        draft == DraftVersion::kDraft14 ? parse_varint_length_message(bytes, kPublishOkType, payload_offset, payload_length)
+                                        : parse_uint16_length_message(bytes, kPublishOkType, payload_offset, payload_length);
+    if (!parsed) {
         return false;
     }
     if (payload_offset + payload_length > bytes.size()) {

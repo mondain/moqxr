@@ -23,6 +23,10 @@ struct ServerSetupMessage {
     std::uint64_t max_request_id = 0;
 };
 
+struct MaxRequestIdMessage {
+    std::uint64_t max_request_id = 0;
+};
+
 struct NamespaceMessage {
     DraftVersion draft = DraftVersion::kDraft14;
     std::string track_namespace = "media";
@@ -42,6 +46,12 @@ struct TrackMessage {
 
 struct PublishNamespaceOk {
     std::uint64_t request_id = 0;
+};
+
+struct RequestError {
+    std::uint64_t request_id = 0;
+    std::uint64_t error_code = 0;
+    std::string reason;
 };
 
 struct SubscribeNamespaceMessage {
@@ -88,12 +98,17 @@ bool decode_varint(std::span<const std::uint8_t> bytes, std::size_t& offset, std
 std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message);
 bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetupMessage& message);
 std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& message);
+bool decode_max_request_id_message(std::span<const std::uint8_t> bytes, MaxRequestIdMessage& message);
 bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& message_size);
 std::vector<std::uint8_t> encode_namespace_message(const NamespaceMessage& message);
+std::vector<std::uint8_t> encode_request_ok_message(std::uint64_t request_id);
+bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishNamespaceOk& message);
+bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draft, RequestError& message);
 bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, SubscribeNamespaceMessage& message);
-std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(std::uint64_t request_id);
+std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id);
 bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMessage& message);
-std::vector<std::uint8_t> encode_subscribe_ok_message(std::uint64_t request_id,
+std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
+                                                      std::uint64_t request_id,
                                                       std::uint64_t track_alias,
                                                       std::uint8_t subscriber_priority,
                                                       std::size_t largest_group_id,
@@ -105,7 +120,8 @@ std::vector<std::uint8_t> encode_subscribe_error_message(std::uint64_t request_i
 std::vector<std::uint8_t> encode_track_message(const TrackMessage& message);
 std::vector<std::uint8_t> encode_publish_done_message(std::uint64_t request_id, std::uint64_t stream_count);
 std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceMessage& message);
-std::vector<std::uint8_t> encode_object_stream(std::uint64_t track_alias,
+std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
+                                               std::uint64_t track_alias,
                                                const CmsfObject& object,
                                                std::span<const std::uint8_t> payload);
 bool decode_publish_namespace_ok(std::span<const std::uint8_t> bytes, PublishNamespaceOk& message);

@@ -133,8 +133,12 @@ void append_be16(std::vector<std::uint8_t>& out, std::uint16_t value) {
     out.push_back(static_cast<std::uint8_t>(value & 0xffU));
 }
 
-std::vector<std::uint8_t> encode_publish_namespace_ok_message(std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_publish_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
+    if (draft == DraftVersion::kDraft16) {
+        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    }
     std::vector<std::uint8_t> message = encode_varint(0x07);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
@@ -188,37 +192,49 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     return message;
 }
 
-std::vector<std::uint8_t> encode_publish_ok_message(std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft, std::uint64_t request_id) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
-    payload.push_back(0x01);
-    payload.push_back(0x80);
-    payload.push_back(0x01);
-    const std::vector<std::uint8_t> filter_type = encode_varint(0);
-    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
-    payload.insert(payload.end(), filter_type.begin(), filter_type.end());
-    payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    if (draft == DraftVersion::kDraft14) {
+        payload.push_back(0x01);
+        payload.push_back(0x80);
+        payload.push_back(0x01);
+        const std::vector<std::uint8_t> filter_type = encode_varint(0);
+        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        payload.insert(payload.end(), filter_type.begin(), filter_type.end());
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    } else {
+        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    }
 
     std::vector<std::uint8_t> message = encode_varint(0x1e);
-    const std::vector<std::uint8_t> length = encode_varint(payload.size());
-    message.insert(message.end(), length.begin(), length.end());
+    if (draft == DraftVersion::kDraft14) {
+        const std::vector<std::uint8_t> length = encode_varint(payload.size());
+        message.insert(message.end(), length.begin(), length.end());
+    } else {
+        append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    }
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
 }
 
 void queue_subscribe_requests(MockTransport& transport,
+                              DraftVersion draft,
                               std::string_view track_namespace,
                               std::initializer_list<std::pair<std::uint64_t, std::string>> requests) {
-    transport.reads[0].push_back(encode_publish_namespace_ok_message(0));
+    transport.reads[0].push_back(encode_publish_namespace_ok_message(draft, 0));
     transport.reads[0].push_back(encode_subscribe_namespace_message(1, track_namespace));
     for (const auto& [request_id, track_name] : requests) {
         transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name));
     }
 }
 
-void queue_publish_ok_responses(MockTransport& transport, std::initializer_list<std::uint64_t> request_ids) {
-    transport.reads[0].push_back(encode_publish_namespace_ok_message(0));
+void queue_publish_ok_responses(MockTransport& transport,
+                                DraftVersion draft,
+                                std::initializer_list<std::uint64_t> request_ids) {
+    transport.reads[0].push_back(encode_publish_namespace_ok_message(draft, 0));
     for (const auto request_id : request_ids) {
-        transport.reads[0].push_back(encode_publish_ok_message(request_id));
+        transport.reads[0].push_back(encode_publish_ok_message(draft, request_id));
     }
 }
 
@@ -387,7 +403,7 @@ int main() {
             .draft = DraftVersion::kDraft14,
             .max_request_id = 8,
         }));
-        queue_subscribe_requests(transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+        queue_subscribe_requests(transport, DraftVersion::kDraft14, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
         MoqtSession session(transport, std::string(kTestTrackNamespace), false);
 
         auto status = session.connect(endpoint, tls);
@@ -439,7 +455,7 @@ int main() {
             .draft = DraftVersion::kDraft14,
             .max_request_id = 8,
         }));
-        queue_publish_ok_responses(transport, {2, 4});
+        queue_publish_ok_responses(transport, DraftVersion::kDraft14, {2, 4});
         MoqtSession session(transport, std::string(kTestTrackNamespace), true);
 
         auto status = session.connect(endpoint, tls);
@@ -478,7 +494,7 @@ int main() {
         .draft = DraftVersion::kDraft16,
         .max_request_id = 8,
     }));
-    queue_subscribe_requests(draft16_transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    queue_subscribe_requests(draft16_transport, DraftVersion::kDraft16, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
     MoqtSession draft16_session(draft16_transport, std::string(kTestTrackNamespace));
     status = draft16_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected draft-16 session connect to succeed");
@@ -504,7 +520,7 @@ int main() {
                                                                                   0x69, 0x6e, 0x74, 0x65, 0x72, 0x6f,
                                                                                   0x70, 0x00}),
                  "expected draft-16 namespace write to use the configured track namespace");
-    ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x12, "expected draft-16 SUBSCRIBE_NAMESPACE_OK");
+    ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x07, "expected draft-16 REQUEST_OK");
     ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
     ok &= expect(draft16_transport.writes[4].stream_id == 2, "expected first draft-16 object stream");
     ok &= expect(message_type(draft16_transport.writes[5].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
@@ -525,7 +541,7 @@ int main() {
         std::vector<std::uint8_t>(split_server_setup.begin(), split_server_setup.begin() + 3));
     segmented_transport.reads[0].push_back(
         std::vector<std::uint8_t>(split_server_setup.begin() + 3, split_server_setup.end()));
-    queue_subscribe_requests(segmented_transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    queue_subscribe_requests(segmented_transport, DraftVersion::kDraft14, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
     MoqtSession segmented_session(segmented_transport, std::string(kTestTrackNamespace));
     status = segmented_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected segmented setup connect to succeed");
@@ -536,7 +552,10 @@ int main() {
     extra_server_setup_param_transport.reads[0].push_back(
         std::vector<std::uint8_t>({0x21, 0x00, 0x0f, 0xc0, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x0e, 0x02,
                                    0x02, 0x40, 0x64, 0x04, 0x44, 0x00}));
-    queue_subscribe_requests(extra_server_setup_param_transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    queue_subscribe_requests(extra_server_setup_param_transport,
+                             DraftVersion::kDraft14,
+                             kTestTrackNamespace,
+                             {{2, "catalog"}, {4, "vide_1"}});
     MoqtSession extra_server_setup_param_session(extra_server_setup_param_transport, std::string(kTestTrackNamespace));
     status = extra_server_setup_param_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected SERVER_SETUP with extra even-numbered parameter to connect successfully");

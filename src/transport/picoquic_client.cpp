@@ -168,18 +168,36 @@ int client_callback(picoquic_cnx_t* cnx,
         case picoquic_callback_stateless_reset: {
             const std::uint64_t local_error = picoquic_get_local_error(cnx);
             const std::uint64_t remote_error = picoquic_get_remote_error(cnx);
+            const std::uint64_t application_error = picoquic_get_application_error(cnx);
+            std::uint64_t local_reason = 0;
+            std::uint64_t remote_reason = 0;
+            std::uint64_t local_application_reason = 0;
+            std::uint64_t remote_application_reason = 0;
+            picoquic_get_close_reasons(
+                cnx, &local_reason, &remote_reason, &local_application_reason, &remote_application_reason);
             trace(std::string("callback connection closed event=") +
                   (event == picoquic_callback_application_close
                        ? "application_close"
                        : (event == picoquic_callback_stateless_reset ? "stateless_reset" : "close")) +
-                  " local_error=" + std::to_string(local_error) + " remote_error=" + std::to_string(remote_error));
+                  " local_error=" + std::to_string(local_error) +
+                  " remote_error=" + std::to_string(remote_error) +
+                  " application_error=" + std::to_string(application_error) +
+                  " local_reason=" + std::to_string(local_reason) +
+                  " remote_reason=" + std::to_string(remote_reason) +
+                  " local_application_reason=" + std::to_string(local_application_reason) +
+                  " remote_application_reason=" + std::to_string(remote_application_reason));
             std::lock_guard<std::mutex> lock(impl->mutex);
             impl->disconnected = true;
             if (!impl->connected) {
                 impl->failed = true;
                 impl->last_error = "connection closed before reaching ready state";
-            } else if (impl->last_error.empty() && remote_error != 0) {
-                impl->last_error = "peer closed connection with error " + std::to_string(remote_error);
+            } else if (impl->last_error.empty() &&
+                       (remote_error != 0 || remote_reason != 0 || remote_application_reason != 0 ||
+                        application_error != 0)) {
+                impl->last_error = "peer closed connection with remote_error=" + std::to_string(remote_error) +
+                                   ", remote_reason=" + std::to_string(remote_reason) +
+                                   ", remote_application_reason=" + std::to_string(remote_application_reason) +
+                                   ", application_error=" + std::to_string(application_error);
             }
             impl->condition.notify_all();
             return 0;

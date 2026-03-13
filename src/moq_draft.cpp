@@ -38,4 +38,15 @@ std::string to_string(DraftVersion version) {
     throw std::runtime_error("unreachable draft version");
 }
 
+std::string default_alpn(DraftVersion version) {
+    switch (version) {
+        case DraftVersion::kDraft14:
+            return "moq-00";
+        case DraftVersion::kDraft16:
+            return "moqt-16";
+    }
+
+    throw std::runtime_error("unreachable draft version");
+}
+
 }  // namespace openmoq::publisher

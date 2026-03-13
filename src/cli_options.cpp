@@ -84,6 +84,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
                 options.endpoint = transport::EndpointConfig{};
             }
             options.endpoint->alpn = std::string(require_value("--alpn"));
+            options.endpoint_alpn_overridden = true;
         } else if (argument == "--cert") {
             options.tls.certificate_path = std::string(require_value("--cert"));
         } else if (argument == "--key") {

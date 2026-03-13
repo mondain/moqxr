@@ -29,10 +29,14 @@ int main(int argc, char** argv) {
             using namespace openmoq::publisher::transport;
 
             const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
+            EndpointConfig endpoint = *options.endpoint;
+            if (!options.endpoint_alpn_overridden) {
+                endpoint.alpn = default_alpn(options.draft_version);
+            }
             PicoquicClient transport;
             MoqtSession session(transport, options.track_namespace, options.forward, options.paced);
 
-            TransportStatus status = session.connect(*options.endpoint, options.tls);
+            TransportStatus status = session.connect(endpoint, options.tls);
             if (!status.ok) {
                 throw std::runtime_error("transport connect failed: " + status.message);
             }
