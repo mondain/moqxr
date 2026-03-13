@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
 
             const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
             EndpointConfig endpoint = *options.endpoint;
-            if (!options.endpoint_alpn_overridden) {
+            if (!options.endpoint_alpn_overridden && options.draft_version != DraftVersion::kDraft14) {
                 endpoint.alpn = default_alpn(options.draft_version);
             }
             PicoquicClient transport;
