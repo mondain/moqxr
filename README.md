@@ -31,7 +31,7 @@ It is buildable and testable today, but it is not yet a full interoperable MOQT 
 - Progressive MP4 remux support is intentionally narrow
 - Edit lists, richer interleaving cases, and broader timing edge cases are not fully handled yet
 - The current remux path synthesizes fragments from `stbl` sample tables but does not attempt a full general-purpose MP4 muxer implementation
-- Current Cloudflare relay tests complete setup and namespace announcement, but do not yet result in inbound subscriptions
+- Current external relay tests complete setup and namespace announcement for draft-14, but do not yet result in inbound subscriptions or a complete draft-16 session
 
 ## Design overview
 
@@ -191,7 +191,7 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --insecure
 ```
 
-Current status as of March 12, 2026:
+Current status as of March 13, 2026:
 
 - QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443`, `interop-relay.cloudflare.mediaoverquic.com:443`, and `moq-relay.red5.net:8443`
 - `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
@@ -199,6 +199,7 @@ Current status as of March 12, 2026:
 - with `--forward 0`, the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
 - the Cloudflare endpoints accepted setup and namespace announce in testing, but did not issue subscriptions, so the publish attempt timed out waiting for control-stream data
 - with `--forward 1`, `moq-relay.red5.net:8443` now progresses through `PUBLISH_OK` for the catalog and media tracks, after which the client begins sending object streams
+- `fb.mvfst.net:9448` accepts QUIC for draft-14 and draft-16, but the current draft-14 flow stalls after namespace acceptance and the current draft-16 flow is still rejected with MOQT application error `3` (`PROTOCOL_VIOLATION`) immediately after setup
 - `--paced` only affects media-object sends; it does not delay setup, namespace announce, or track publish requests
 
 ### Optional picoquic smoke test
@@ -246,9 +247,14 @@ Transport-oriented CLI flags are also present now:
   --namespace media \
   --forward 0 \
   --paced \
-  --alpn moq-00 \
   --insecure
 ```
+
+ALPN selection:
+
+- draft-14 defaults to `moq-00`
+- draft-16 defaults to `moqt-16`
+- `--alpn` overrides either default when you need to target a specific relay
 
 Current status:
 
@@ -258,9 +264,10 @@ Current status:
 - the local picoquic loopback handshake works, including object publication over QUIC streams
 - `--namespace` lets you choose the advertised track namespace during transport tests
 - `--forward 0|1` selects whether the publisher waits for `SUBSCRIBE` (`0`) or immediately sends `PUBLISH` requests and forwards objects after namespace announce (`1`)
+- ALPN is selected from the requested draft unless `--alpn` explicitly overrides it
 - `--paced` delays media-object sends to match fragment media timestamps instead of sending the whole file as fast as possible; it only has an effect once object transmission begins
 - after setup completes, the CLI prints `connection_id=<hex>` to stdout
-- interoperability against external relays is partially working at setup, namespace announce, and forward-publish acknowledgement, but not yet at end-to-end subscription delivery
+- interoperability against external relays is partially working at draft-14 setup and namespace announcement, but not yet at end-to-end subscription delivery and not yet complete for draft-16 setup
 
 Catalog note:
 
