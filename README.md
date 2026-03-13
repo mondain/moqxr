@@ -316,10 +316,6 @@ The repository now includes a transport abstraction and a picoquic-backed client
 - the current session layer uses a draft-aware control-message module instead of ad hoc string formatting
 - the next remaining transport step is external interoperability, not local handshake bring-up
 
-## Contributing
-
-See [CONTRIBUTING.md](/media/mondain/terrorbyte/workspace/github/moqxr/CONTRIBUTING.md) for contribution expectations and development notes.
-
 ## Roadmap
 
 1. Add a real MOQT transport publisher over QUIC or WebTransport.
