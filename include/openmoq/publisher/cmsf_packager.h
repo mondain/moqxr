@@ -20,6 +20,8 @@ struct CmsfObject {
     std::string track_name;
     std::size_t group_id = 0;
     std::size_t object_id = 0;
+    std::uint64_t media_time_us = 0;
+    std::uint64_t media_duration_us = 0;
     ByteSpan payload;
     std::vector<std::uint8_t> owned_payload;
 };

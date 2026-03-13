@@ -23,6 +23,7 @@ It is buildable and testable today, but it is not yet a full interoperable MOQT 
 - Builds a picoquic-backed QUIC transport path when local `picoquic` and `picotls` checkouts are available
 - Publishes a draft-aware control stream plus per-object streams in the current session layer
 - Supports a configurable published track namespace for relay and interop testing
+- Supports optional paced publication using fragment media timestamps
 
 ## Current limitations
 
@@ -125,7 +126,8 @@ This covers:
 - fragmented MP4 packaging
 - progressive MP4 remux into CMAF-style objects
 - MOQT setup encoding and decoding
-- binary namespace announcement plus subscribe-serving control/object sequencing
+- binary namespace announcement plus subscribe-serving or forward-publish control/object sequencing
+- paced send scheduling against fragment media timestamps
 - QUIC varint boundary coverage
 
 ### Picoquic loopback smoke test
@@ -185,18 +187,19 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
   --namespace interop \
   --forward 0 \
+  --paced \
   --insecure
 ```
 
 Current status as of March 12, 2026:
 
-- QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443` and `interop-relay.cloudflare.mediaoverquic.com:443`
+- QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443`, `interop-relay.cloudflare.mediaoverquic.com:443`, and `moq-relay.red5.net:8443`
 - `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
 - `PUBLISH_NAMESPACE` is accepted with `PUBLISH_NAMESPACE_OK`
 - with `--forward 0`, the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
-- those Cloudflare endpoints did not issue subscriptions during these tests, so the publish attempt timed out waiting for control-stream data
-
-The older `moq-relay.red5.net:8443` endpoint behaved worse in earlier testing: setup did not complete reliably, and repeated malformed-control testing was reported to crash the relay. Prefer the Cloudflare endpoints for routine interop checks.
+- the Cloudflare endpoints accepted setup and namespace announce in testing, but did not issue subscriptions, so the publish attempt timed out waiting for control-stream data
+- with `--forward 1`, `moq-relay.red5.net:8443` now progresses through `PUBLISH_OK` for the catalog and media tracks, after which the client begins sending object streams
+- `--paced` only affects media-object sends; it does not delay setup, namespace announce, or track publish requests
 
 ### Optional picoquic smoke test
 
@@ -242,6 +245,7 @@ Transport-oriented CLI flags are also present now:
   --endpoint localhost:4433 \
   --namespace media \
   --forward 0 \
+  --paced \
   --alpn moq-00 \
   --insecure
 ```
@@ -254,8 +258,14 @@ Current status:
 - the local picoquic loopback handshake works, including object publication over QUIC streams
 - `--namespace` lets you choose the advertised track namespace during transport tests
 - `--forward 0|1` selects whether the publisher waits for `SUBSCRIBE` (`0`) or immediately sends `PUBLISH` requests and forwards objects after namespace announce (`1`)
+- `--paced` delays media-object sends to match fragment media timestamps instead of sending the whole file as fast as possible; it only has an effect once object transmission begins
 - after setup completes, the CLI prints `connection_id=<hex>` to stdout
-- interoperability against external relays is partially working at setup and namespace announce, but not yet at end-to-end subscription delivery
+- interoperability against external relays is partially working at setup, namespace announce, and forward-publish acknowledgement, but not yet at end-to-end subscription delivery
+
+Catalog note:
+
+- `catalog.json` uses the CMSF-style `role` field such as `video` and `audio`
+- `publish-plan.txt` and `--dump-plan` still print an internal debug `kind=` label for object type (`catalog` vs `media`); that debug label is not part of the catalog spec
 
 ## Creating Fragmented MP4 with FFmpeg
 

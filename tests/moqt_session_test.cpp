@@ -194,7 +194,9 @@ std::vector<std::uint8_t> encode_publish_ok_message(std::uint64_t request_id) {
     payload.push_back(0x80);
     payload.push_back(0x01);
     const std::vector<std::uint8_t> filter_type = encode_varint(0);
+    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
     payload.insert(payload.end(), filter_type.begin(), filter_type.end());
+    payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
 
     std::vector<std::uint8_t> message = encode_varint(0x1e);
     const std::vector<std::uint8_t> length = encode_varint(payload.size());
@@ -449,14 +451,18 @@ int main() {
         ok &= expect(status.ok, "expected publish to succeed with auto-forward flow");
         ok &= expect(transport.writes.size() == 9,
                      "expected setup, namespace, two publish requests, two object streams, two publish_done, namespace_done");
-        ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE before auto-forward track publish");
-        ok &= expect(message_type(transport.writes[2].bytes) == 0x1d, "expected first PUBLISH");
-        ok &= expect(message_type(transport.writes[3].bytes) == 0x1d, "expected second PUBLISH");
-        ok &= expect(transport.writes[4].stream_id == 2, "expected first auto-forward object stream on stream 2");
-        ok &= expect(transport.writes[5].stream_id == 6, "expected second auto-forward object stream on stream 6");
-        ok &= expect(message_type(transport.writes[6].bytes) == 0x0b, "expected first auto-forward PUBLISH_DONE");
-        ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second auto-forward PUBLISH_DONE");
-        ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected auto-forward PUBLISH_NAMESPACE_DONE");
+        if (transport.writes.size() >= 9) {
+            ok &= expect(message_type(transport.writes[1].bytes) == 0x06,
+                         "expected PUBLISH_NAMESPACE before auto-forward track publish");
+            ok &= expect(message_type(transport.writes[2].bytes) == 0x1d, "expected first PUBLISH");
+            ok &= expect(message_type(transport.writes[3].bytes) == 0x1d, "expected second PUBLISH");
+            ok &= expect(transport.writes[4].stream_id == 2, "expected first auto-forward object stream on stream 2");
+            ok &= expect(transport.writes[5].stream_id == 6, "expected second auto-forward object stream on stream 6");
+            ok &= expect(message_type(transport.writes[6].bytes) == 0x0b, "expected first auto-forward PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second auto-forward PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[8].bytes) == 0x09,
+                         "expected auto-forward PUBLISH_NAMESPACE_DONE");
+        }
     }
 
     MockTransport failing_transport;

@@ -15,6 +15,8 @@ struct PayloadBuffer {
 struct MediaFragment {
     std::size_t sequence = 0;
     std::string track_name;
+    std::uint64_t start_time_us = 0;
+    std::uint64_t duration_us = 0;
     PayloadBuffer payload;
 };
 

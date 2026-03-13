@@ -110,7 +110,7 @@ std::vector<std::uint8_t> encode_object_stream(std::uint64_t track_alias,
                                                std::span<const std::uint8_t> payload);
 bool decode_publish_namespace_ok(std::span<const std::uint8_t> bytes, PublishNamespaceOk& message);
 bool decode_publish_namespace_error(std::span<const std::uint8_t> bytes, PublishNamespaceError& message);
-bool decode_publish_ok(std::span<const std::uint8_t> bytes, PublishOk& message);
+bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishOk& message);
 bool decode_publish_error(std::span<const std::uint8_t> bytes, PublishError& message);
 
 }  // namespace openmoq::publisher::transport

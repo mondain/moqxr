@@ -98,6 +98,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
             options.track_namespace = std::string(require_value("--namespace"));
         } else if (argument == "--forward") {
             options.forward = parse_forward_flag(require_value("--forward"));
+        } else if (argument == "--paced") {
+            options.paced = true;
         } else if (argument == "--emit-dir") {
             options.emit_dir = std::filesystem::path(require_value("--emit-dir"));
         } else if (argument == "--dump-plan") {
@@ -125,7 +127,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <mp4> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--dump-plan] [--emit-dir <dir>]"
+           " --input <mp4> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--paced] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path] [--alpn value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }

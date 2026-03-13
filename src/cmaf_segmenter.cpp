@@ -27,11 +27,29 @@ struct TrackRemuxInfo {
     std::vector<bool> sync_samples;
 };
 
+struct FragmentTiming {
+    std::uint64_t start_time_us = 0;
+    std::uint64_t duration_us = 0;
+};
+
 std::uint32_t read_be32(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return (static_cast<std::uint32_t>(bytes[offset]) << 24U) |
            (static_cast<std::uint32_t>(bytes[offset + 1]) << 16U) |
            (static_cast<std::uint32_t>(bytes[offset + 2]) << 8U) |
            static_cast<std::uint32_t>(bytes[offset + 3]);
+}
+
+std::uint32_t read_full_box_flags(const Mp4Box& box, std::span<const std::uint8_t> bytes) {
+    return (static_cast<std::uint32_t>(bytes[box.payload.offset + 1]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[box.payload.offset + 2]) << 8U) |
+           static_cast<std::uint32_t>(bytes[box.payload.offset + 3]);
+}
+
+std::uint64_t scale_to_us(std::uint64_t value, std::uint32_t timescale) {
+    if (timescale == 0) {
+        return 0;
+    }
+    return (value * 1000000ULL) / timescale;
 }
 
 std::string fragment_track_name(const Mp4Box& moof,
@@ -50,6 +68,24 @@ std::string fragment_track_name(const Mp4Box& moof,
         }
     }
     return "media";
+}
+
+const TrackDescription* fragment_track_description(const Mp4Box& moof,
+                                                   const std::vector<TrackDescription>& tracks,
+                                                   std::span<const std::uint8_t> bytes) {
+    const Mp4Box* traf = find_child_box(moof, "traf");
+    const Mp4Box* tfhd = traf == nullptr ? nullptr : find_child_box(*traf, "tfhd");
+    if (tfhd == nullptr || tfhd->payload.size < 8) {
+        return nullptr;
+    }
+
+    const std::uint32_t track_id = read_be32(bytes, tfhd->payload.offset + 4);
+    for (const auto& track : tracks) {
+        if (track.track_id == track_id) {
+            return &track;
+        }
+    }
+    return nullptr;
 }
 
 std::uint64_t read_be64(std::span<const std::uint8_t> bytes, std::size_t offset) {
@@ -216,6 +252,84 @@ std::vector<std::int32_t> parse_composition_offsets(const Mp4Box* ctts,
     }
 
     return offsets;
+}
+
+FragmentTiming fragment_timing(const Mp4Box& moof,
+                               const std::vector<TrackDescription>& tracks,
+                               std::span<const std::uint8_t> bytes) {
+    const TrackDescription* track = fragment_track_description(moof, tracks, bytes);
+    if (track == nullptr || track->timescale == 0) {
+        return {};
+    }
+
+    const Mp4Box* traf = find_child_box(moof, "traf");
+    if (traf == nullptr) {
+        return {};
+    }
+
+    std::uint64_t base_decode_time = 0;
+    if (const Mp4Box* tfdt = find_child_box(*traf, "tfdt")) {
+        const std::uint8_t version = bytes[tfdt->payload.offset];
+        const std::size_t time_offset = tfdt->payload.offset + 4;
+        if (version == 1 && time_offset + 8 <= bytes.size()) {
+            base_decode_time = read_be64(bytes, time_offset);
+        } else if (time_offset + 4 <= bytes.size()) {
+            base_decode_time = read_be32(bytes, time_offset);
+        }
+    }
+
+    std::uint32_t default_sample_duration = 0;
+    if (const Mp4Box* tfhd = find_child_box(*traf, "tfhd")) {
+        const std::uint32_t flags = read_full_box_flags(*tfhd, bytes);
+        std::size_t cursor = tfhd->payload.offset + 8;
+        if ((flags & 0x000001U) != 0) {
+            cursor += 8;
+        }
+        if ((flags & 0x000002U) != 0) {
+            cursor += 4;
+        }
+        if ((flags & 0x000008U) != 0 && cursor + 4 <= bytes.size()) {
+            default_sample_duration = read_be32(bytes, cursor);
+        }
+    }
+
+    std::uint64_t duration = 0;
+    if (const Mp4Box* trun = find_child_box(*traf, "trun")) {
+        const std::uint32_t flags = read_full_box_flags(*trun, bytes);
+        std::size_t cursor = trun->payload.offset + 4;
+        if (cursor + 4 <= bytes.size()) {
+            const std::uint32_t sample_count = read_be32(bytes, cursor);
+            cursor += 4;
+            if ((flags & 0x000001U) != 0) {
+                cursor += 4;
+            }
+            if ((flags & 0x000004U) != 0) {
+                cursor += 4;
+            }
+            for (std::uint32_t index = 0; index < sample_count && cursor <= bytes.size(); ++index) {
+                std::uint32_t sample_duration = default_sample_duration;
+                if ((flags & 0x000100U) != 0 && cursor + 4 <= bytes.size()) {
+                    sample_duration = read_be32(bytes, cursor);
+                    cursor += 4;
+                }
+                duration += sample_duration;
+                if ((flags & 0x000200U) != 0) {
+                    cursor += 4;
+                }
+                if ((flags & 0x000400U) != 0) {
+                    cursor += 4;
+                }
+                if ((flags & 0x000800U) != 0) {
+                    cursor += 4;
+                }
+            }
+        }
+    }
+
+    return {
+        .start_time_us = scale_to_us(base_decode_time, track->timescale),
+        .duration_us = scale_to_us(duration, track->timescale),
+    };
 }
 
 std::vector<bool> parse_sync_samples(const Mp4Box* stss,
@@ -401,6 +515,13 @@ std::vector<std::uint8_t> build_remuxed_fragment(const TrackRemuxInfo& track,
     return concat_boxes({moof, mdat});
 }
 
+std::uint64_t remux_fragment_duration_us(const TrackRemuxInfo& track) {
+    return scale_to_us(std::accumulate(track.sample_durations.begin(),
+                                       track.sample_durations.end(),
+                                       std::uint64_t{0}),
+                       track.timescale);
+}
+
 }  // namespace
 
 SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
@@ -435,10 +556,13 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
             if (moofs[index]->span.offset > mdats[index]->span.offset) {
                 throw std::runtime_error("expected moof to precede matching mdat");
             }
+            const FragmentTiming timing = fragment_timing(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes);
 
             segmented.fragments.push_back({
                 .sequence = index,
                 .track_name = fragment_track_name(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes),
+                .start_time_us = timing.start_time_us,
+                .duration_us = timing.duration_us,
                 .payload = {.span = {.offset = moofs[index]->span.offset,
                                      .size = moofs[index]->span.size + mdats[index]->span.size},
                             .owned_bytes = {}},
@@ -465,6 +589,8 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
         segmented.fragments.push_back({
             .sequence = track_index,
             .track_name = track_info.description.track_name,
+            .start_time_us = 0,
+            .duration_us = remux_fragment_duration_us(track_info),
             .payload = {.span = {}, .owned_bytes = build_remuxed_fragment(track_info, track_index, parsed_mp4.bytes)},
         });
         ++track_index;

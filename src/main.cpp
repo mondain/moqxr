@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
 
             const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
             PicoquicClient transport;
-            MoqtSession session(transport, options.track_namespace, options.forward);
+            MoqtSession session(transport, options.track_namespace, options.forward, options.paced);
 
             TransportStatus status = session.connect(*options.endpoint, options.tls);
             if (!status.ok) {

@@ -597,7 +597,7 @@ bool decode_publish_namespace_error(std::span<const std::uint8_t> bytes, Publish
            offset == payload_offset + payload_length;
 }
 
-bool decode_publish_ok(std::span<const std::uint8_t> bytes, PublishOk& message) {
+bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishOk& message) {
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;
     if (!parse_varint_length_message(bytes, kPublishOkType, payload_offset, payload_length)) {
@@ -608,10 +608,67 @@ bool decode_publish_ok(std::span<const std::uint8_t> bytes, PublishOk& message) 
     }
     std::size_t offset = payload_offset;
     const std::size_t payload_end = payload_offset + payload_length;
-    return decode_varint_impl(bytes, offset, message.request_id) && offset + 3 <= payload_end &&
-           (message.forward = bytes[offset++], true) && (message.subscriber_priority = bytes[offset++], true) &&
-           (message.group_order = bytes[offset++], true) && decode_varint_impl(bytes, offset, message.filter_type) &&
-           offset == payload_end;
+    if (!decode_varint_impl(bytes, offset, message.request_id)) {
+        return false;
+    }
+
+    if (draft == DraftVersion::kDraft14) {
+        std::uint64_t parameter_count = 0;
+        if (offset + 3 > payload_end) {
+            return false;
+        }
+        message.forward = bytes[offset++];
+        message.subscriber_priority = bytes[offset++];
+        message.group_order = bytes[offset++];
+        if (!decode_varint_impl(bytes, offset, message.filter_type)) {
+            return false;
+        }
+
+        if (message.filter_type == 0x03 || message.filter_type == 0x04) {
+            std::uint64_t start_group_id = 0;
+            std::uint64_t start_object_id = 0;
+            if (!decode_varint_impl(bytes, offset, start_group_id) || !decode_varint_impl(bytes, offset, start_object_id)) {
+                return false;
+            }
+            if (message.filter_type == 0x04) {
+                std::uint64_t end_group_id = 0;
+                if (!decode_varint_impl(bytes, offset, end_group_id)) {
+                    return false;
+                }
+            }
+        }
+
+        if (!decode_varint_impl(bytes, offset, parameter_count)) {
+            return false;
+        }
+        for (std::uint64_t index = 0; index < parameter_count; ++index) {
+            std::uint64_t parameter_type = 0;
+            std::uint64_t parameter_length = 0;
+            if (!decode_varint_impl(bytes, offset, parameter_type) ||
+                !decode_varint_impl(bytes, offset, parameter_length) ||
+                offset + parameter_length > payload_end) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(parameter_length);
+        }
+        return offset == payload_end;
+    }
+
+    std::uint64_t parameter_count = 0;
+    if (!decode_varint_impl(bytes, offset, parameter_count)) {
+        return false;
+    }
+    for (std::uint64_t index = 0; index < parameter_count; ++index) {
+        std::uint64_t parameter_type = 0;
+        std::uint64_t parameter_length = 0;
+        if (!decode_varint_impl(bytes, offset, parameter_type) ||
+            !decode_varint_impl(bytes, offset, parameter_length) ||
+            offset + parameter_length > payload_end) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(parameter_length);
+    }
+    return offset == payload_end;
 }
 
 bool decode_publish_error(std::span<const std::uint8_t> bytes, PublishError& message) {

@@ -394,6 +394,8 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
             .track_name = fragment.track_name,
             .group_id = fragment.sequence,
             .object_id = 0,
+            .media_time_us = fragment.start_time_us,
+            .media_duration_us = fragment.duration_us,
             .payload = fragment.payload.span,
             .owned_payload = fragment.payload.owned_bytes,
         });
@@ -412,6 +414,7 @@ std::string render_publish_plan(const PublishPlan& plan) {
     for (const auto& object : plan.objects) {
         stream << object.track_name << " group=" << object.group_id << " object=" << object.object_id
                << " bytes=" << (object.owned_payload.empty() ? object.payload.size : object.owned_payload.size())
+               << " time_us=" << object.media_time_us
                << " kind="
                << (object.kind == CmsfObjectKind::kInitialization ? "catalog" : "media") << '\n';
     }
