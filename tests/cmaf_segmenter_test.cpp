@@ -54,14 +54,19 @@ std::vector<std::uint8_t> make_fragmented_test_mp4() {
     const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
     const auto tkhd = make_full_box("tkhd",
                                     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    const auto mdhd = make_full_box("mdhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x5d, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0});
     const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
-    const auto sample_entry = make_box("avc1",
-                                       concat({std::vector<std::uint8_t>(70, 0),
-                                               make_box("avcC", {1, 100, 0, 12, 0xff})}));
+    auto visual_header = std::vector<std::uint8_t>(70, 0);
+    visual_header[24] = 0x01;
+    visual_header[25] = 0x40;
+    visual_header[26] = 0x00;
+    visual_header[27] = 0xf0;
+    const auto sample_entry = make_box("avc1", concat({visual_header, make_box("avcC", {1, 100, 0, 12, 0xff})}));
     const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
     const auto stbl = make_box("stbl", stsd);
     const auto minf = make_box("minf", stbl);
-    const auto mdia = make_box("mdia", concat({hdlr, minf}));
+    const auto mdia = make_box("mdia", concat({mdhd, hdlr, minf}));
     const auto trak = make_box("trak", concat({tkhd, mdia}));
     const auto moov = make_box("moov", trak);
     const auto moof = make_box("moof", {'m', 'f', 'h', 'd'});
@@ -76,9 +81,12 @@ std::vector<std::uint8_t> make_progressive_test_mp4() {
     const auto mdhd = make_full_box("mdhd",
                                     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 232, 0, 0, 7, 208, 0, 0, 0, 0});
     const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
-    const auto sample_entry = make_box("avc1",
-                                       concat({std::vector<std::uint8_t>(70, 0),
-                                               make_box("avcC", {1, 100, 0, 12, 0xff})}));
+    auto visual_header = std::vector<std::uint8_t>(70, 0);
+    visual_header[24] = 0x01;
+    visual_header[25] = 0x40;
+    visual_header[26] = 0x00;
+    visual_header[27] = 0xf0;
+    const auto sample_entry = make_box("avc1", concat({visual_header, make_box("avcC", {1, 100, 0, 12, 0xff})}));
     const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
     const auto stts = make_full_box("stts", {0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 3, 232});
     const auto stsc = make_full_box("stsc", {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1});
@@ -107,9 +115,13 @@ std::vector<std::uint8_t> make_multitrack_init_mp4() {
     const auto video_tkhd = make_full_box("tkhd",
                                           {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
     const auto video_hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
-    const auto video_sample_entry = make_box("avc1",
-                                             concat({std::vector<std::uint8_t>(70, 0),
-                                                     make_box("avcC", {1, 100, 0, 12, 0xff})}));
+    auto video_header = std::vector<std::uint8_t>(70, 0);
+    video_header[24] = 0x01;
+    video_header[25] = 0x40;
+    video_header[26] = 0x00;
+    video_header[27] = 0xf0;
+    const auto video_sample_entry =
+        make_box("avc1", concat({video_header, make_box("avcC", {1, 100, 0, 12, 0xff})}));
     const auto video_stsd = make_full_box("stsd",
                                           concat({std::vector<std::uint8_t>{0, 0, 0, 1}, video_sample_entry}));
     const auto video_stbl = make_box("stbl", video_stsd);
@@ -120,9 +132,13 @@ std::vector<std::uint8_t> make_multitrack_init_mp4() {
     const auto audio_tkhd = make_full_box("tkhd",
                                           {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0});
     const auto audio_hdlr = make_full_box("hdlr", {0, 0, 0, 0, 's', 'o', 'u', 'n', 0, 0, 0, 0});
-    const auto audio_sample_entry = make_box("mp4a",
-                                             concat({std::vector<std::uint8_t>(28, 0),
-                                                     make_box("esds", {0, 0, 0, 0, 0x03, 0x19, 0x00, 0x02})}));
+    auto audio_header = std::vector<std::uint8_t>(28, 0);
+    audio_header[16] = 0x00;
+    audio_header[17] = 0x02;
+    audio_header[24] = 0xbb;
+    audio_header[25] = 0x80;
+    const auto audio_sample_entry =
+        make_box("mp4a", concat({audio_header, make_box("esds", {0x00, 0x00, 0x00, 0x00, 0x03, 0x19, 0x00, 0x02, 0x00, 0x04, 0x11, 0x40, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x02, 0x10, 0x10})}));
     const auto audio_stsd = make_full_box("stsd",
                                           concat({std::vector<std::uint8_t>{0, 0, 0, 1}, audio_sample_entry}));
     const auto audio_stbl = make_box("stbl", audio_stsd);
@@ -198,6 +214,10 @@ bool bytes_equal(const std::vector<std::uint8_t>& bytes, std::initializer_list<s
     return std::vector<std::uint8_t>(expected) == bytes;
 }
 
+bool expect_contains(std::string_view haystack, std::string_view needle, const std::string& message) {
+    return expect(haystack.find(needle) != std::string_view::npos, message);
+}
+
 }  // namespace
 
 int main() {
@@ -218,7 +238,7 @@ int main() {
 
     ok &= expect(fragmented.top_level_boxes.size() == 4, "expected 4 top-level boxes");
     ok &= expect(fragmented.tracks.size() == 1, "expected one extracted fragmented track");
-    ok &= expect(fragmented.tracks.front().codec == "avc1", "expected avc1 codec");
+    ok &= expect(fragmented.tracks.front().codec == "avc1.64000C", "expected RFC 6381 avc1 codec");
     ok &= expect(segmented.fragments.size() == 1, "expected one fragmented media fragment");
     ok &= expect(plan.objects.size() == 2, "expected catalog plus one fragmented media object");
     ok &= expect(plan.objects.front().track_name == "catalog", "expected catalog object first");
@@ -256,8 +276,8 @@ int main() {
         .initialization_segment = {.span = {}, .owned_bytes = multitrack_init_bytes},
         .fragments = {},
         .tracks = {
-            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1", .track_name = "vide_1"},
-            TrackDescription{.track_id = 2, .handler_type = "soun", .codec = "mp4a", .track_name = "soun_2"},
+            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1", .width = 320, .height = 240},
+            TrackDescription{.track_id = 2, .handler_type = "soun", .codec = "mp4a.40.2", .sample_entry_type = "mp4a", .track_name = "soun_2", .channel_count = 2, .sample_rate = 48000},
         },
     };
     const auto multitrack_plan = build_publish_plan(multitrack_segmented, DraftVersion::kDraft14);
@@ -268,6 +288,16 @@ int main() {
     ok &= expect(!video_init_data.empty(), "expected video initData in catalog");
     ok &= expect(!audio_init_data.empty(), "expected audio initData in catalog");
     ok &= expect(video_init_data != audio_init_data, "expected per-track initData entries to differ");
+    ok &= expect_contains(catalog_text, "\"role\":\"video\"", "expected video role in catalog");
+    ok &= expect_contains(catalog_text, "\"role\":\"audio\"", "expected audio role in catalog");
+    ok &= expect_contains(catalog_text, "\"codec\":\"avc1.64000C\"", "expected video codec string in catalog");
+    ok &= expect_contains(catalog_text, "\"codec\":\"mp4a.40.2\"", "expected audio codec string in catalog");
+    ok &= expect_contains(catalog_text, "\"width\":320", "expected video width in catalog");
+    ok &= expect_contains(catalog_text, "\"height\":240", "expected video height in catalog");
+    ok &= expect_contains(catalog_text, "\"sampleRate\":48000", "expected audio sample rate in catalog");
+    ok &= expect_contains(catalog_text, "\"channelCount\":2", "expected audio channel count in catalog");
+    ok &= expect_contains(catalog_text, "\"renderGroup\":1", "expected renderGroup in catalog");
+    ok &= expect_contains(catalog_text, "\"isLive\":false", "expected VOD isLive flag in catalog");
     ok &= expect(multitrack_plan.track_initializations.size() == 2, "expected per-track init payloads in plan");
 
     const auto video_init_bytes = base64_decode(video_init_data);
@@ -282,11 +312,14 @@ int main() {
     const auto audio_init_tracks = extract_tracks(audio_init_boxes, multitrack_plan.track_initializations[1].init_segment);
     ok &= expect(video_init_tracks.size() == 1, "expected one track in emitted video init segment");
     ok &= expect(audio_init_tracks.size() == 1, "expected one track in emitted audio init segment");
-    ok &= expect(video_init_tracks.front().codec == "avc1", "expected avc1-only emitted video init segment");
-    ok &= expect(audio_init_tracks.front().codec == "mp4a", "expected mp4a-only emitted audio init segment");
+    ok &= expect(video_init_tracks.front().codec == "avc1.64000C", "expected avc1-only emitted video init segment");
+    ok &= expect(audio_init_tracks.front().codec == "mp4a.40.2", "expected mp4a-only emitted audio init segment");
     ok &= expect(bytes_equal(video_init_bytes, {0x00, 0x00, 0x00, 0x0d, 0x61, 0x76, 0x63, 0x43, 0x01, 0x64, 0x00, 0x0c, 0xff}),
                  "expected video initData to contain only the avcC box");
-    ok &= expect(bytes_equal(audio_init_bytes, {0x00, 0x00, 0x00, 0x10, 0x65, 0x73, 0x64, 0x73, 0x00, 0x00, 0x00, 0x00, 0x03, 0x19, 0x00, 0x02}),
+    ok &= expect(bytes_equal(audio_init_bytes, {0x00, 0x00, 0x00, 0x20, 0x65, 0x73, 0x64, 0x73,
+                                                0x00, 0x00, 0x00, 0x00, 0x03, 0x19, 0x00, 0x02,
+                                                0x00, 0x04, 0x11, 0x40, 0x15, 0x00, 0x00, 0x00,
+                                                0x00, 0x00, 0x00, 0x00, 0x05, 0x02, 0x10, 0x10}),
                  "expected audio initData to contain only the esds box");
 
     return ok ? 0 : 1;

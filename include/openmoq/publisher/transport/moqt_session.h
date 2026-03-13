@@ -13,7 +13,9 @@ namespace openmoq::publisher::transport {
 
 class MoqtSession {
 public:
-    explicit MoqtSession(PublisherTransport& transport, std::string track_namespace = "media");
+    explicit MoqtSession(PublisherTransport& transport,
+                         std::string track_namespace = "media",
+                         bool auto_forward = false);
 
     TransportStatus connect(const EndpointConfig& endpoint, const TlsConfig& tls);
     TransportStatus publish(const openmoq::publisher::PublishPlan& plan);
@@ -26,6 +28,7 @@ private:
 
     PublisherTransport& transport_;
     std::string track_namespace_;
+    bool auto_forward_ = false;
     std::optional<EndpointConfig> endpoint_;
     std::uint64_t control_stream_id_ = 0;
     std::uint64_t peer_max_request_id_ = 0;

@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -122,7 +123,7 @@ std::string base64_encode(std::span<const std::uint8_t> bytes) {
     return encoded;
 }
 
-std::string track_kind(std::string_view handler_type) {
+std::string track_role(std::string_view handler_type) {
     if (handler_type == "vide") {
         return "video";
     }
@@ -130,6 +131,17 @@ std::string track_kind(std::string_view handler_type) {
         return "audio";
     }
     return "data";
+}
+
+std::string json_number(double value) {
+    std::ostringstream out;
+    const double rounded = std::round(value);
+    if (std::fabs(value - rounded) < 0.0005) {
+        out << static_cast<long long>(rounded);
+    } else {
+        out << std::fixed << std::setprecision(3) << value;
+    }
+    return out.str();
 }
 
 std::uint32_t track_id_from_trak(const Mp4Box& trak, std::span<const std::uint8_t> bytes) {
@@ -305,6 +317,7 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
                                     .track_id = 0,
                                     .handler_type = "meta",
                                     .codec = "catalog",
+                                    .sample_entry_type = "catalog",
                                     .track_name = "catalog",
                                 });
 
@@ -343,11 +356,24 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
         catalog << '{'
                 << "\"name\":\"" << json_escape(track.track_name) << "\","
                 << "\"id\":" << track.track_id << ','
-                << "\"kind\":\"" << track_kind(track.handler_type) << "\","
-                << "\"handler\":\"" << json_escape(track.handler_type) << "\","
+                << "\"role\":\"" << track_role(track.handler_type) << "\","
                 << "\"codec\":\"" << json_escape(track.codec) << "\","
                 << "\"packaging\":\"cmaf\","
-                << "\"initData\":\"" << init_data_by_track.at(track.track_name) << "\""
+                << "\"renderGroup\":1,"
+                << "\"isLive\":false,";
+        if (track.handler_type == "vide") {
+            catalog << "\"width\":" << track.width << ','
+                    << "\"height\":" << track.height;
+            if (track.frame_rate > 0.0) {
+                catalog << ','
+                        << "\"frameRate\":" << json_number(track.frame_rate);
+            }
+            catalog << ',';
+        } else if (track.handler_type == "soun") {
+            catalog << "\"sampleRate\":" << track.sample_rate << ','
+                    << "\"channelCount\":" << track.channel_count << ',';
+        }
+        catalog << "\"initData\":\"" << init_data_by_track.at(track.track_name) << "\""
                 << '}';
     }
     catalog << "]}";

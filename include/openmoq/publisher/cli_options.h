@@ -16,6 +16,7 @@ struct CliOptions {
     transport::TlsConfig tls;
     DraftVersion draft_version = DraftVersion::kDraft14;
     std::string track_namespace = "media";
+    bool forward = false;
     bool dump_plan = false;
 };
 

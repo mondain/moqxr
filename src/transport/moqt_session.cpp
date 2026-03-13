@@ -335,10 +335,93 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
     return transport.write_stream(control_stream_id, encode_publish_namespace_done_message(namespace_message), false);
 }
 
+TransportStatus forward_published_tracks(PublisherTransport& transport,
+                                         std::uint64_t control_stream_id,
+                                         const openmoq::publisher::PublishPlan& plan,
+                                         std::span<const PublishedTrack> tracks,
+                                         std::uint64_t peer_max_request_id,
+                                         std::string_view track_namespace) {
+    std::map<std::string, std::uint64_t> request_id_by_track;
+    std::map<std::string, PublishedTrack> tracks_by_name;
+    std::uint64_t next_request_id = 2;
+
+    for (const auto& track : tracks) {
+        if (next_request_id > peer_max_request_id) {
+            return TransportStatus::failure("peer max_request_id is too small for publish requests");
+        }
+
+        request_id_by_track.emplace(track.name, next_request_id);
+        tracks_by_name.emplace(track.name, track);
+
+        const TrackMessage track_message{
+            .draft = plan.draft.version,
+            .track_name = track.name,
+            .track_namespace = std::string(track_namespace),
+            .request_id = next_request_id,
+            .track_alias = track.alias,
+            .largest_group_id = track.largest_group_id,
+            .largest_object_id = track.largest_object_id,
+            .content_exists = track.content_exists,
+        };
+        const TransportStatus status =
+            transport.write_stream(control_stream_id, encode_track_message(track_message), false);
+        if (!status.ok) {
+            return status;
+        }
+        next_request_id += 2;
+    }
+
+    TransportStatus status = collect_control_acknowledgements(transport, control_stream_id, 0, tracks.size());
+    if (!status.ok) {
+        return status;
+    }
+
+    std::map<std::string, std::uint64_t> stream_count_by_track;
+    for (const auto& object : plan.objects) {
+        const auto track_it = tracks_by_name.find(object.track_name);
+        if (track_it == tracks_by_name.end()) {
+            continue;
+        }
+        const auto payload = object_payload(object);
+        if (payload.empty()) {
+            return TransportStatus::failure("transport publish requires materialized object payloads");
+        }
+
+        std::uint64_t stream_id = 0;
+        status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+        if (!status.ok) {
+            return status;
+        }
+        status = transport.write_stream(stream_id, encode_object_stream(track_it->second.alias, object, payload), true);
+        if (!status.ok) {
+            return status;
+        }
+        ++stream_count_by_track[object.track_name];
+    }
+
+    for (const auto& track : tracks) {
+        status = transport.write_stream(control_stream_id,
+                                        encode_publish_done_message(request_id_by_track.at(track.name),
+                                                                    stream_count_by_track[track.name]),
+                                        false);
+        if (!status.ok) {
+            return status;
+        }
+    }
+
+    return transport.write_stream(control_stream_id,
+                                  encode_publish_namespace_done_message({
+                                      .draft = plan.draft.version,
+                                      .track_namespace = std::string(track_namespace),
+                                      .request_id = 0,
+                                  }),
+                                  false);
+}
+
 }  // namespace
 
-MoqtSession::MoqtSession(PublisherTransport& transport, std::string track_namespace)
-    : transport_(transport), track_namespace_(std::move(track_namespace)) {}
+MoqtSession::MoqtSession(PublisherTransport& transport, std::string track_namespace, bool auto_forward)
+    : transport_(transport), track_namespace_(std::move(track_namespace)), auto_forward_(auto_forward) {}
 
 TransportStatus MoqtSession::connect(const EndpointConfig& endpoint, const TlsConfig& tls) {
     endpoint_ = endpoint;
@@ -388,6 +471,11 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
     std::map<std::string, PublishedTrack> tracks_by_name;
     for (auto track : tracks) {
         tracks_by_name.emplace(track.name, track);
+    }
+
+    if (auto_forward_) {
+        return forward_published_tracks(
+            transport_, control_stream_id_, plan, tracks, peer_max_request_id_, track_namespace_);
     }
 
     return serve_subscriptions(transport_, control_stream_id_, plan, tracks_by_name, plan.draft.version, track_namespace_);

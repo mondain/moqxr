@@ -15,7 +15,7 @@ It is buildable and testable today, but it is not yet a full interoperable MOQT 
 
 - Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`
 - Remuxes non-fragmented MP4 input into synthesized fragmented media objects
-- Extracts basic track metadata and codec identifiers from MP4 sample tables
+- Extracts track metadata and RFC 6381 codec identifiers from MP4 sample tables
 - Builds a publish plan consisting of initialization and media objects
 - Emits planned objects to disk for inspection
 - Keeps fragmented input on a zero-copy fast path where possible
@@ -161,8 +161,19 @@ Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
 The output directory should currently contain:
 
 - `catalog.json`
-- one `.mp4` object file per media object
+- one `*_init.mp4` file per media track
+- one `*_media.mp4` file per emitted media object
+- one `*_probe.mp4` file per emitted media object for direct `ffprobe` use
 - `publish-plan.txt`
+
+The current catalog format includes:
+
+- `role` with values such as `video` and `audio`
+- RFC 6381 `codec` strings such as `avc1.64000C` and `mp4a.40.2`
+- `renderGroup` and `isLive`
+- `width` and `height` for video tracks
+- `sampleRate` and `channelCount` for audio tracks
+- base64-encoded codec `initData` per track
 
 ### Relay interoperability test
 
@@ -173,6 +184,7 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --input sample.mp4 \
   --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
   --namespace interop \
+  --forward 0 \
   --insecure
 ```
 
@@ -181,7 +193,7 @@ Current status as of March 12, 2026:
 - QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443` and `interop-relay.cloudflare.mediaoverquic.com:443`
 - `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
 - `PUBLISH_NAMESPACE` is accepted with `PUBLISH_NAMESPACE_OK`
-- the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
+- with `--forward 0`, the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
 - those Cloudflare endpoints did not issue subscriptions during these tests, so the publish attempt timed out waiting for control-stream data
 
 The older `moq-relay.red5.net:8443` endpoint behaved worse in earlier testing: setup did not complete reliably, and repeated malformed-control testing was reported to crash the relay. Prefer the Cloudflare endpoints for routine interop checks.
@@ -229,6 +241,7 @@ Transport-oriented CLI flags are also present now:
   --input sample.mp4 \
   --endpoint localhost:4433 \
   --namespace media \
+  --forward 0 \
   --alpn moq-00 \
   --insecure
 ```
@@ -240,6 +253,7 @@ Current status:
 - `--endpoint` now enters the real picoquic-backed transport path when the project is built with local picoquic and picotls support
 - the local picoquic loopback handshake works, including object publication over QUIC streams
 - `--namespace` lets you choose the advertised track namespace during transport tests
+- `--forward 0|1` selects whether the publisher waits for `SUBSCRIBE` (`0`) or immediately sends `PUBLISH` requests and forwards objects after namespace announce (`1`)
 - after setup completes, the CLI prints `connection_id=<hex>` to stdout
 - interoperability against external relays is partially working at setup and namespace announce, but not yet at end-to-end subscription delivery
 

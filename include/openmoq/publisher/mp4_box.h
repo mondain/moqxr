@@ -25,7 +25,14 @@ struct TrackDescription {
     std::uint32_t track_id = 0;
     std::string handler_type;
     std::string codec;
+    std::string sample_entry_type;
     std::string track_name;
+    std::uint32_t timescale = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t channel_count = 0;
+    std::uint32_t sample_rate = 0;
+    double frame_rate = 0.0;
 };
 
 struct ParsedMp4 {

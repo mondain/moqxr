@@ -1,7 +1,10 @@
 #include "openmoq/publisher/mp4_box.h"
 
 #include <array>
+#include <cmath>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 namespace openmoq::publisher {
@@ -102,6 +105,178 @@ std::string codec_from_stsd(const Mp4Box& stsd, std::span<const std::uint8_t> by
     return std::string(reinterpret_cast<const char*>(bytes.data() + sample_entry_offset + 4), 4);
 }
 
+std::uint16_t read_be16(std::span<const std::uint8_t> bytes, std::size_t offset) {
+    return static_cast<std::uint16_t>((static_cast<std::uint16_t>(bytes[offset]) << 8U) | bytes[offset + 1]);
+}
+
+std::string hex_byte(std::uint8_t value) {
+    std::ostringstream out;
+    out << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(value);
+    return out.str();
+}
+
+std::size_t find_child_box_offset(const Mp4Box& sample_entry,
+                                  std::span<const std::uint8_t> bytes,
+                                  std::size_t child_offset,
+                                  std::string_view type) {
+    for (std::size_t scan_offset = child_offset; scan_offset + 8 <= sample_entry.span.size; ++scan_offset) {
+        const std::size_t cursor = sample_entry.span.offset + scan_offset;
+        const std::uint32_t box_size = read_be32(bytes, cursor);
+        if (box_size < 8 || cursor + box_size > sample_entry.span.offset + sample_entry.span.size) {
+            continue;
+        }
+        if (std::string_view(reinterpret_cast<const char*>(bytes.data() + cursor + 4), 4) == type) {
+            return cursor;
+        }
+    }
+    return 0;
+}
+
+bool decode_descriptor_length(std::span<const std::uint8_t> bytes,
+                              std::size_t offset,
+                              std::size_t limit,
+                              std::size_t& length,
+                              std::size_t& bytes_consumed) {
+    length = 0;
+    bytes_consumed = 0;
+    while (offset + bytes_consumed < limit && bytes_consumed < 4) {
+        const std::uint8_t value = bytes[offset + bytes_consumed];
+        length = (length << 7U) | static_cast<std::size_t>(value & 0x7FU);
+        ++bytes_consumed;
+        if ((value & 0x80U) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string avc_codec_string(const Mp4Box& sample_entry, std::span<const std::uint8_t> bytes) {
+    const std::size_t avcc_offset = find_child_box_offset(sample_entry, bytes, 8 + 70, "avcC");
+    if (avcc_offset == 0 || avcc_offset + 12 > bytes.size()) {
+        return "avc1";
+    }
+
+    const std::uint8_t profile = bytes[avcc_offset + 9];
+    const std::uint8_t compatibility = bytes[avcc_offset + 10];
+    const std::uint8_t level = bytes[avcc_offset + 11];
+    return sample_entry.type + "." + hex_byte(profile) + hex_byte(compatibility) + hex_byte(level);
+}
+
+std::string hevc_codec_string(const Mp4Box& sample_entry, std::span<const std::uint8_t> bytes) {
+    const std::size_t hvcc_offset = find_child_box_offset(sample_entry, bytes, 8 + 70, "hvcC");
+    if (hvcc_offset == 0 || hvcc_offset + 21 > bytes.size()) {
+        return sample_entry.type;
+    }
+
+    const std::uint8_t profile_byte = bytes[hvcc_offset + 9];
+    const char profile_space = (profile_byte >> 6U) == 1 ? 'A' : (profile_byte >> 6U) == 2 ? 'B' : (profile_byte >> 6U) == 3 ? 'C' : '\0';
+    const std::uint8_t profile_idc = profile_byte & 0x1FU;
+    const std::uint32_t compatibility_flags = read_be32(bytes, hvcc_offset + 10);
+    const std::uint64_t constraint_indicator =
+        (static_cast<std::uint64_t>(bytes[hvcc_offset + 14]) << 40U) |
+        (static_cast<std::uint64_t>(bytes[hvcc_offset + 15]) << 32U) |
+        (static_cast<std::uint64_t>(bytes[hvcc_offset + 16]) << 24U) |
+        (static_cast<std::uint64_t>(bytes[hvcc_offset + 17]) << 16U) |
+        (static_cast<std::uint64_t>(bytes[hvcc_offset + 18]) << 8U) |
+        static_cast<std::uint64_t>(bytes[hvcc_offset + 19]);
+    const std::uint8_t level_idc = bytes[hvcc_offset + 20];
+
+    std::ostringstream out;
+    out << sample_entry.type << '.';
+    if (profile_space != '\0') {
+        out << profile_space;
+    }
+    out << static_cast<unsigned int>(profile_idc) << '.'
+        << std::uppercase << std::hex << compatibility_flags << '.'
+        << ((bytes[hvcc_offset + 13] & 0x20U) != 0 ? 'H' : 'L') << static_cast<unsigned int>(level_idc);
+    if (constraint_indicator != 0) {
+        out << '.';
+        for (int shift = 40; shift >= 0; shift -= 8) {
+            const auto component = static_cast<std::uint8_t>((constraint_indicator >> shift) & 0xFFU);
+            if (component == 0 && shift != 0) {
+                continue;
+            }
+            out << hex_byte(component);
+        }
+    }
+    return out.str();
+}
+
+std::string mpeg4_audio_codec_string(const Mp4Box& sample_entry, std::span<const std::uint8_t> bytes) {
+    const std::size_t esds_offset = find_child_box_offset(sample_entry, bytes, 8 + 28, "esds");
+    if (esds_offset == 0 || esds_offset + 16 > bytes.size()) {
+        return "mp4a.40.2";
+    }
+
+    std::uint8_t audio_object_type = 2;
+    for (std::size_t cursor = esds_offset + 12; cursor + 2 <= sample_entry.span.offset + sample_entry.span.size; ++cursor) {
+        if (bytes[cursor] != 0x05) {
+            continue;
+        }
+        std::size_t length = 0;
+        std::size_t length_bytes = 0;
+        if (!decode_descriptor_length(bytes, cursor + 1, sample_entry.span.offset + sample_entry.span.size, length, length_bytes) ||
+            length == 0) {
+            continue;
+        }
+        const std::size_t config_offset = cursor + 1 + length_bytes;
+        if (config_offset + length > sample_entry.span.offset + sample_entry.span.size) {
+            continue;
+        }
+        const std::uint8_t config = bytes[config_offset];
+        audio_object_type = static_cast<std::uint8_t>((config >> 3U) & 0x1FU);
+        if (audio_object_type == 31 && length >= 2) {
+            audio_object_type =
+                static_cast<std::uint8_t>(32 + ((config & 0x07U) << 3U) + ((bytes[config_offset + 1] >> 5U) & 0x07U));
+        }
+        break;
+    }
+
+    std::ostringstream out;
+    out << "mp4a.40." << static_cast<unsigned int>(audio_object_type);
+    return out.str();
+}
+
+std::string codec_string_from_sample_entry(const Mp4Box& sample_entry, std::span<const std::uint8_t> bytes) {
+    if (sample_entry.type == "avc1" || sample_entry.type == "avc3") {
+        return avc_codec_string(sample_entry, bytes);
+    }
+    if (sample_entry.type == "hvc1" || sample_entry.type == "hev1") {
+        return hevc_codec_string(sample_entry, bytes);
+    }
+    if (sample_entry.type == "mp4a") {
+        return mpeg4_audio_codec_string(sample_entry, bytes);
+    }
+    if (sample_entry.type == "Opus" || sample_entry.type == "opus") {
+        return "opus";
+    }
+    return sample_entry.type;
+}
+
+double frame_rate_from_stts(const Mp4Box* stts, std::uint32_t timescale, std::span<const std::uint8_t> bytes) {
+    if (stts == nullptr || timescale == 0 || stts->payload.size < 8) {
+        return 0.0;
+    }
+
+    const std::size_t table_offset = stts->payload.offset + 4;
+    const std::uint32_t entry_count = read_be32(bytes, table_offset);
+    std::size_t cursor = table_offset + 4;
+    std::uint64_t sample_count = 0;
+    std::uint64_t duration_sum = 0;
+    for (std::uint32_t index = 0; index < entry_count && cursor + 8 <= bytes.size(); ++index) {
+        const std::uint32_t run_count = read_be32(bytes, cursor);
+        const std::uint32_t delta = read_be32(bytes, cursor + 4);
+        sample_count += run_count;
+        duration_sum += static_cast<std::uint64_t>(run_count) * delta;
+        cursor += 8;
+    }
+
+    if (sample_count == 0 || duration_sum == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(sample_count) * static_cast<double>(timescale) / static_cast<double>(duration_sum);
+}
+
 }  // namespace
 
 ParsedMp4 parse_mp4_file(const std::string& path) {
@@ -150,6 +325,7 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
         }
 
         const Mp4Box* hdlr = find_child(*mdia, "hdlr");
+        const Mp4Box* mdhd = find_child(*mdia, "mdhd");
         const Mp4Box* minf = find_child(*mdia, "minf");
         const Mp4Box* tkhd = find_child(trak, "tkhd");
         if (hdlr == nullptr || minf == nullptr) {
@@ -164,8 +340,21 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
 
         const std::size_t handler_offset = hdlr->payload.offset + 8;
         const std::string handler_type(reinterpret_cast<const char*>(bytes.data() + handler_offset), 4);
-        const std::string codec = codec_from_stsd(*stsd, bytes);
+        const std::string sample_entry_type = codec_from_stsd(*stsd, bytes);
+        const Mp4Box sample_entry{
+            .type = sample_entry_type,
+            .span = {.offset = stsd->payload.offset + 8, .size = read_be32(bytes, stsd->payload.offset + 8)},
+            .payload = {.offset = stsd->payload.offset + 16, .size = read_be32(bytes, stsd->payload.offset + 8) - 8},
+            .children = {},
+        };
+        const std::string codec = codec_string_from_sample_entry(sample_entry, bytes);
         std::uint32_t track_id = 0;
+        std::uint32_t timescale = 0;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t channel_count = 0;
+        std::uint32_t sample_rate = 0;
+        double frame_rate = 0.0;
         if (tkhd != nullptr && tkhd->payload.size >= 20) {
             const std::uint8_t version = bytes[tkhd->payload.offset];
             const std::size_t track_id_offset = tkhd->payload.offset + (version == 1 ? 20 : 12);
@@ -173,12 +362,38 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
                 track_id = read_be32(bytes, track_id_offset);
             }
         }
+        if (mdhd != nullptr && mdhd->payload.size >= 20) {
+            const std::uint8_t version = bytes[mdhd->payload.offset];
+            const std::size_t timescale_offset = mdhd->payload.offset + (version == 1 ? 20 : 12);
+            if (timescale_offset + 4 <= bytes.size()) {
+                timescale = read_be32(bytes, timescale_offset);
+            }
+        }
+        if ((sample_entry_type == "avc1" || sample_entry_type == "avc3" || sample_entry_type == "hvc1" ||
+             sample_entry_type == "hev1") &&
+            sample_entry.payload.offset + 28 <= bytes.size()) {
+            width = read_be16(bytes, sample_entry.payload.offset + 24);
+            height = read_be16(bytes, sample_entry.payload.offset + 26);
+            frame_rate = frame_rate_from_stts(find_child(*stbl, "stts"), timescale, bytes);
+        }
+        if ((sample_entry_type == "mp4a" || sample_entry_type == "Opus" || sample_entry_type == "opus") &&
+            sample_entry.payload.offset + 28 <= bytes.size()) {
+            channel_count = read_be16(bytes, sample_entry.payload.offset + 16);
+            sample_rate = read_be16(bytes, sample_entry.payload.offset + 24);
+        }
 
         tracks.push_back({
             .track_id = track_id,
             .handler_type = handler_type,
             .codec = codec,
+            .sample_entry_type = sample_entry_type,
             .track_name = handler_type + "_" + std::to_string(tracks.size() + 1),
+            .timescale = timescale,
+            .width = width,
+            .height = height,
+            .channel_count = channel_count,
+            .sample_rate = sample_rate,
+            .frame_rate = frame_rate,
         });
     }
 

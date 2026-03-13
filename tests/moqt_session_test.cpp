@@ -213,6 +213,13 @@ void queue_subscribe_requests(MockTransport& transport,
     }
 }
 
+void queue_publish_ok_responses(MockTransport& transport, std::initializer_list<std::uint64_t> request_ids) {
+    transport.reads[0].push_back(encode_publish_namespace_ok_message(0));
+    for (const auto request_id : request_ids) {
+        transport.reads[0].push_back(encode_publish_ok_message(request_id));
+    }
+}
+
 bool bytes_equal(const std::vector<std::uint8_t>& bytes, std::initializer_list<std::uint8_t> expected) {
     return std::vector<std::uint8_t>(expected) == bytes;
 }
@@ -323,8 +330,8 @@ bool expect(bool condition, const std::string& message) {
 PublishPlan make_span_backed_plan() {
     return {
         .draft = openmoq::publisher::draft_profile(DraftVersion::kDraft14),
-        .tracks = {TrackDescription{.track_id = 0, .handler_type = "meta", .codec = "catalog", .track_name = "catalog"},
-                   TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1", .track_name = "vide_1"}},
+        .tracks = {TrackDescription{.track_id = 0, .handler_type = "meta", .codec = "catalog", .sample_entry_type = "catalog", .track_name = "catalog"},
+                   TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1"}},
         .objects = {
             CmsfObject{
                 .kind = CmsfObjectKind::kInitialization,
@@ -355,15 +362,6 @@ PublishPlan make_span_backed_plan(DraftVersion draft) {
 int main() {
     bool ok = true;
     constexpr std::string_view kTestTrackNamespace = "interop";
-
-    MockTransport transport;
-    transport.reads[0].push_back(encode_server_setup_message({
-        .draft = DraftVersion::kDraft14,
-        .max_request_id = 8,
-    }));
-    queue_subscribe_requests(transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
-    MoqtSession session(transport, std::string(kTestTrackNamespace));
-
     const EndpointConfig endpoint{
         .host = "example.com",
         .port = 4433,
@@ -375,48 +373,91 @@ int main() {
         .ca_path = {},
         .insecure_skip_verify = true,
     };
-
-    auto status = session.connect(endpoint, tls);
-    ok &= expect(status.ok, "expected session connect to succeed");
-
     const std::vector<std::uint8_t> source_bytes = {'I', 'N', 'I', 'T', 'M', 'S', 'G'};
-    const PublishPlan materialized = materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
-
-    status = session.publish(materialized);
-    ok &= expect(status.ok, "expected publish to succeed with announce plus subscribe flow");
-    ok &= expect(transport.writes.size() == 10,
-                 "expected setup, namespace, subscribe_namespace_ok, two subscribe_ok, two object streams, two publish_done, namespace_done");
-    ok &= expect(!transport.writes[0].bytes.empty() && transport.writes[0].bytes.front() == 0x20,
-                 "expected binary CLIENT_SETUP message type");
+    auto status = TransportStatus::success();
     std::string authority;
     std::string path;
     std::uint64_t max_request_id = 1;
-    ok &= expect(decode_setup_fields(transport.writes[0].bytes, DraftVersion::kDraft14, authority, path, max_request_id),
-                 "expected draft-14 CLIENT_SETUP to decode");
-    ok &= expect(authority == "example.com:4433", "expected draft-14 CLIENT_SETUP authority");
-    ok &= expect(path == "/", "expected draft-14 CLIENT_SETUP path");
-    ok &= expect(max_request_id == 0, "expected draft-14 CLIENT_SETUP max_request_id");
-    ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE");
-    ok &= expect(transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07, 0x69, 0x6e,
-                                                                         0x74, 0x65, 0x72, 0x6f, 0x70, 0x00}),
-                 "expected namespace write to use the configured track namespace");
-    ok &= expect(message_type(transport.writes[2].bytes) == 0x12, "expected SUBSCRIBE_NAMESPACE_OK");
-    ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected first SUBSCRIBE_OK");
-    ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-    ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x14,
-                 "expected first object stream to use a subgroup header with explicit subgroup ID");
-    ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
-    ok &= expect(message_type(transport.writes[5].bytes) == 0x0b, "expected first PUBLISH_DONE");
-    ok &= expect(message_type(transport.writes[6].bytes) == 0x04, "expected second SUBSCRIBE_OK");
-    ok &= expect(transport.writes[7].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-    ok &= expect(!transport.writes[7].bytes.empty() && transport.writes[7].bytes.front() == 0x14,
-                 "expected second object stream to use a subgroup header with explicit subgroup ID");
-    ok &= expect(transport.writes[7].fin, "expected second object stream write to set FIN");
-    ok &= expect(message_type(transport.writes[8].bytes) == 0x0b, "expected second PUBLISH_DONE");
-    ok &= expect(message_type(transport.writes[9].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
-    ok &= expect(transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
-                                                                         0x74, 0x65, 0x72, 0x6f, 0x70}),
-                 "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        queue_subscribe_requests(transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with announce plus subscribe flow");
+        ok &= expect(transport.writes.size() == 10,
+                     "expected setup, namespace, subscribe_namespace_ok, two subscribe_ok, two object streams, two publish_done, namespace_done");
+        ok &= expect(!transport.writes[0].bytes.empty() && transport.writes[0].bytes.front() == 0x20,
+                     "expected binary CLIENT_SETUP message type");
+        authority.clear();
+        path.clear();
+        max_request_id = 1;
+        ok &= expect(decode_setup_fields(transport.writes[0].bytes, DraftVersion::kDraft14, authority, path, max_request_id),
+                     "expected draft-14 CLIENT_SETUP to decode");
+        ok &= expect(authority == "example.com:4433", "expected draft-14 CLIENT_SETUP authority");
+        ok &= expect(path == "/", "expected draft-14 CLIENT_SETUP path");
+        ok &= expect(max_request_id == 0, "expected draft-14 CLIENT_SETUP max_request_id");
+        ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE");
+        ok &= expect(transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07, 0x69, 0x6e,
+                                                                             0x74, 0x65, 0x72, 0x6f, 0x70, 0x00}),
+                     "expected namespace write to use the configured track namespace");
+        ok &= expect(message_type(transport.writes[2].bytes) == 0x12, "expected SUBSCRIBE_NAMESPACE_OK");
+        ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected first SUBSCRIBE_OK");
+        ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
+        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x14,
+                     "expected first object stream to use a subgroup header with explicit subgroup ID");
+        ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
+        ok &= expect(message_type(transport.writes[5].bytes) == 0x0b, "expected first PUBLISH_DONE");
+        ok &= expect(message_type(transport.writes[6].bytes) == 0x04, "expected second SUBSCRIBE_OK");
+        ok &= expect(transport.writes[7].stream_id == 6, "expected second object stream to be unidirectional stream 6");
+        ok &= expect(!transport.writes[7].bytes.empty() && transport.writes[7].bytes.front() == 0x14,
+                     "expected second object stream to use a subgroup header with explicit subgroup ID");
+        ok &= expect(transport.writes[7].fin, "expected second object stream write to set FIN");
+        ok &= expect(message_type(transport.writes[8].bytes) == 0x0b, "expected second PUBLISH_DONE");
+        ok &= expect(message_type(transport.writes[9].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
+        ok &= expect(transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
+                                                                             0x74, 0x65, 0x72, 0x6f, 0x70}),
+                     "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        queue_publish_ok_responses(transport, {2, 4});
+        MoqtSession session(transport, std::string(kTestTrackNamespace), true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected auto-forward session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with auto-forward flow");
+        ok &= expect(transport.writes.size() == 9,
+                     "expected setup, namespace, two publish requests, two object streams, two publish_done, namespace_done");
+        ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE before auto-forward track publish");
+        ok &= expect(message_type(transport.writes[2].bytes) == 0x1d, "expected first PUBLISH");
+        ok &= expect(message_type(transport.writes[3].bytes) == 0x1d, "expected second PUBLISH");
+        ok &= expect(transport.writes[4].stream_id == 2, "expected first auto-forward object stream on stream 2");
+        ok &= expect(transport.writes[5].stream_id == 6, "expected second auto-forward object stream on stream 6");
+        ok &= expect(message_type(transport.writes[6].bytes) == 0x0b, "expected first auto-forward PUBLISH_DONE");
+        ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second auto-forward PUBLISH_DONE");
+        ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected auto-forward PUBLISH_NAMESPACE_DONE");
+    }
 
     MockTransport failing_transport;
     MoqtSession failing_session(failing_transport, std::string(kTestTrackNamespace));
@@ -520,9 +561,13 @@ int main() {
         ok = false;
     }
 
-    status = session.close(7);
+    MockTransport close_transport;
+    MoqtSession close_session(close_transport, std::string(kTestTrackNamespace));
+    status = close_session.connect(endpoint, tls);
+    ok &= expect(status.ok, "expected close session connect to succeed");
+    status = close_session.close(7);
     ok &= expect(status.ok, "expected close to succeed");
-    ok &= expect(transport.last_close_code == 7, "expected close code to propagate");
+    ok &= expect(close_transport.last_close_code == 7, "expected close code to propagate");
 
     return ok ? 0 : 1;
 }
