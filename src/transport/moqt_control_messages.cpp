@@ -335,12 +335,14 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
             return false;
         }
 
-        if (parameter_type == kSetupParamMaxRequestId) {
+        if ((parameter_type & 0x1ULL) == 0) {
             std::uint64_t value = 0;
             if (!decode_varint_impl(payload_bytes, offset, value)) {
                 return false;
             }
-            message.max_request_id = value;
+            if (parameter_type == kSetupParamMaxRequestId) {
+                message.max_request_id = value;
+            }
             continue;
         }
 

@@ -25,6 +25,43 @@ bool trace_enabled() {
     return enabled;
 }
 
+const char* control_message_type_name(std::uint64_t message_type) {
+    switch (message_type) {
+        case 0x03:
+            return "SUBSCRIBE";
+        case 0x04:
+            return "SUBSCRIBE_OK";
+        case 0x05:
+            return "SUBSCRIBE_ERROR";
+        case 0x06:
+            return "PUBLISH_NAMESPACE";
+        case 0x07:
+            return "PUBLISH_NAMESPACE_OK";
+        case 0x08:
+            return "PUBLISH_NAMESPACE_ERROR";
+        case 0x09:
+            return "PUBLISH_NAMESPACE_DONE";
+        case 0x0b:
+            return "PUBLISH_DONE";
+        case 0x11:
+            return "SUBSCRIBE_NAMESPACE";
+        case 0x12:
+            return "SUBSCRIBE_NAMESPACE_OK";
+        case 0x1d:
+            return "PUBLISH";
+        case 0x1e:
+            return "PUBLISH_OK";
+        case 0x1f:
+            return "PUBLISH_ERROR";
+        case 0x20:
+            return "CLIENT_SETUP";
+        case 0x21:
+            return "SERVER_SETUP";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 std::string hex_dump(std::span<const std::uint8_t> bytes) {
     std::ostringstream out;
     out << std::hex << std::setfill('0');
@@ -35,6 +72,70 @@ std::string hex_dump(std::span<const std::uint8_t> bytes) {
         out << std::setw(2) << static_cast<unsigned int>(bytes[index]);
     }
     return out.str();
+}
+
+void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq::publisher::DraftVersion draft) {
+    if (!trace_enabled()) {
+        return;
+    }
+
+    std::size_t offset = 0;
+    std::uint64_t message_type = 0;
+    if (!decode_varint(message_bytes, offset, message_type)) {
+        std::cerr << "[moqt-session] control message parse error bytes=[" << hex_dump(message_bytes) << "]"
+                  << std::endl;
+        return;
+    }
+
+    std::cerr << "[moqt-session] control message type=0x" << std::hex << message_type << std::dec << " "
+              << control_message_type_name(message_type);
+
+    if (message_type == 0x07) {
+        PublishNamespaceOk message;
+        if (decode_publish_namespace_ok(message_bytes, message)) {
+            std::cerr << " request_id=" << message.request_id;
+        }
+    } else if (message_type == 0x08) {
+        PublishNamespaceError message;
+        if (decode_publish_namespace_error(message_bytes, message)) {
+            std::cerr << " request_id=" << message.request_id << " error_code=" << message.error_code
+                      << " reason=" << message.reason;
+        }
+    } else if (message_type == 0x11) {
+        SubscribeNamespaceMessage message;
+        if (decode_subscribe_namespace_message(message_bytes, message)) {
+            std::cerr << " request_id=" << message.request_id;
+            if (!message.track_namespace_prefix.empty()) {
+                std::cerr << " prefix=" << message.track_namespace_prefix.front();
+            } else {
+                std::cerr << " prefix=<empty>";
+            }
+        }
+    } else if (message_type == 0x03) {
+        SubscribeMessage message;
+        if (decode_subscribe_message(message_bytes, message)) {
+            std::cerr << " request_id=" << message.request_id << " track=" << message.track_name
+                      << " forward=" << static_cast<unsigned int>(message.forward)
+                      << " filter_type=" << message.filter_type;
+        }
+    } else if (message_type == 0x1e) {
+        PublishOk message;
+        if (decode_publish_ok(message_bytes, draft, message)) {
+            std::cerr << " request_id=" << message.request_id
+                      << " forward=" << static_cast<unsigned int>(message.forward)
+                      << " subscriber_priority=" << static_cast<unsigned int>(message.subscriber_priority)
+                      << " group_order=" << static_cast<unsigned int>(message.group_order)
+                      << " filter_type=" << message.filter_type;
+        }
+    } else if (message_type == 0x1f) {
+        PublishError message;
+        if (decode_publish_error(message_bytes, message)) {
+            std::cerr << " request_id=" << message.request_id << " error_code=" << message.error_code
+                      << " reason=" << message.reason;
+        }
+    }
+
+    std::cerr << " bytes=[" << hex_dump(message_bytes) << "]" << std::endl;
 }
 
 std::span<const std::uint8_t> object_payload(const openmoq::publisher::CmsfObject& object) {
@@ -124,10 +225,7 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
             if (!decode_varint(message_bytes, offset, message_type)) {
                 return TransportStatus::failure("failed to parse control response type");
             }
-            if (trace_enabled()) {
-                std::cerr << "[moqt-session] control message type=0x" << std::hex << message_type << std::dec
-                          << " bytes=[" << hex_dump(message_bytes) << "]" << std::endl;
-            }
+            trace_control_message(message_bytes, draft);
 
             if (message_type == 0x07) {
                 PublishNamespaceOk message;
@@ -235,11 +333,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             if (!decode_varint(message_bytes, offset, message_type)) {
                 return TransportStatus::failure("failed to parse control request type");
             }
-
-            if (trace_enabled()) {
-                std::cerr << "[moqt-session] control message type=0x" << std::hex << message_type << std::dec
-                          << " bytes=[" << hex_dump(message_bytes) << "]" << std::endl;
-            }
+            trace_control_message(message_bytes, draft);
 
             if (message_type == 0x12 || message_type == 0x07 || message_type == 0x1e) {
                 buffer.erase(buffer.begin(), buffer.begin() + message_size);

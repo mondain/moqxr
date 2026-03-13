@@ -532,6 +532,18 @@ int main() {
     status = segmented_session.publish(materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
     ok &= expect(status.ok, "expected segmented SERVER_SETUP path to publish successfully");
 
+    MockTransport extra_server_setup_param_transport;
+    extra_server_setup_param_transport.reads[0].push_back(
+        std::vector<std::uint8_t>({0x21, 0x00, 0x0f, 0xc0, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x0e, 0x02,
+                                   0x02, 0x40, 0x64, 0x04, 0x44, 0x00}));
+    queue_subscribe_requests(extra_server_setup_param_transport, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    MoqtSession extra_server_setup_param_session(extra_server_setup_param_transport, std::string(kTestTrackNamespace));
+    status = extra_server_setup_param_session.connect(endpoint, tls);
+    ok &= expect(status.ok, "expected SERVER_SETUP with extra even-numbered parameter to connect successfully");
+    status = extra_server_setup_param_session.publish(
+        materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
+    ok &= expect(status.ok, "expected publish to succeed after SERVER_SETUP with extra even-numbered parameter");
+
     ok &= expect(bytes_equal(encode_varint(0), {0x00}), "expected single-byte varint encoding");
     ok &= expect(bytes_equal(encode_varint(63), {0x3f}), "expected max one-byte varint encoding");
     ok &= expect(bytes_equal(encode_varint(64), {0x40, 0x40}), "expected two-byte varint encoding");
