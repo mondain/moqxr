@@ -164,7 +164,8 @@ std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t reque
 
 std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
                                                    std::string_view track_namespace,
-                                                   std::string_view track_name) {
+                                                   std::string_view track_name,
+                                                   std::uint8_t forward) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
     const std::vector<std::uint8_t> tuple_len = encode_varint(1);
     const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
@@ -176,7 +177,7 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     payload.insert(payload.end(), track_name.begin(), track_name.end());
     payload.push_back(0x80);
     payload.push_back(0x01);
-    payload.push_back(0x01);
+    payload.push_back(forward);
     const std::vector<std::uint8_t> filter_type = encode_varint(0x03);
     const std::vector<std::uint8_t> start_group = encode_varint(0);
     const std::vector<std::uint8_t> start_object = encode_varint(0);
@@ -216,11 +217,15 @@ std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft, std::uin
 void queue_subscribe_requests(MockTransport& transport,
                               DraftVersion draft,
                               std::string_view track_namespace,
-                              std::initializer_list<std::pair<std::uint64_t, std::string>> requests) {
+                              std::initializer_list<std::pair<std::uint64_t, std::string>> requests,
+                              bool include_subscribe_namespace = false,
+                              std::uint8_t forward = 0) {
     transport.reads[0].push_back(encode_publish_namespace_ok_message(draft, 0));
-    transport.reads[0].push_back(encode_subscribe_namespace_message(1, track_namespace));
+    if (include_subscribe_namespace) {
+        transport.reads[0].push_back(encode_subscribe_namespace_message(1, track_namespace));
+    }
     for (const auto& [request_id, track_name] : requests) {
-        transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name));
+        transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name, forward));
     }
 }
 
@@ -408,9 +413,9 @@ int main() {
             materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
 
         status = session.publish(materialized);
-        ok &= expect(status.ok, "expected publish to succeed with announce plus subscribe flow");
-        ok &= expect(transport.writes.size() == 10,
-                     "expected setup, namespace, subscribe_namespace_ok, two subscribe_ok, two object streams, two publish_done, namespace_done");
+        ok &= expect(status.ok, "expected publish to succeed with relay subscribe flow");
+        ok &= expect(transport.writes.size() == 9,
+                     "expected setup, namespace, two subscribe_ok, two object streams, two publish_done, namespace_done");
         ok &= expect(!transport.writes[0].bytes.empty() && transport.writes[0].bytes.front() == 0x20,
                      "expected binary CLIENT_SETUP message type");
         authority.clear();
@@ -425,21 +430,20 @@ int main() {
         ok &= expect(transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70, 0x00}),
                      "expected namespace write to use the configured track namespace");
-        ok &= expect(message_type(transport.writes[2].bytes) == 0x12, "expected SUBSCRIBE_NAMESPACE_OK");
-        ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected first SUBSCRIBE_OK");
-        ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x14,
+        ok &= expect(message_type(transport.writes[2].bytes) == 0x04, "expected first SUBSCRIBE_OK");
+        ok &= expect(transport.writes[3].stream_id == 2, "expected first object stream to be unidirectional stream 2");
+        ok &= expect(!transport.writes[3].bytes.empty() && transport.writes[3].bytes.front() == 0x14,
                      "expected first object stream to use a subgroup header with explicit subgroup ID");
-        ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
-        ok &= expect(message_type(transport.writes[5].bytes) == 0x0b, "expected first PUBLISH_DONE");
-        ok &= expect(message_type(transport.writes[6].bytes) == 0x04, "expected second SUBSCRIBE_OK");
-        ok &= expect(transport.writes[7].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-        ok &= expect(!transport.writes[7].bytes.empty() && transport.writes[7].bytes.front() == 0x14,
+        ok &= expect(transport.writes[3].fin, "expected first object stream write to set FIN");
+        ok &= expect(message_type(transport.writes[4].bytes) == 0x0b, "expected first PUBLISH_DONE");
+        ok &= expect(message_type(transport.writes[5].bytes) == 0x04, "expected second SUBSCRIBE_OK");
+        ok &= expect(transport.writes[6].stream_id == 6, "expected second object stream to be unidirectional stream 6");
+        ok &= expect(!transport.writes[6].bytes.empty() && transport.writes[6].bytes.front() == 0x14,
                      "expected second object stream to use a subgroup header with explicit subgroup ID");
-        ok &= expect(transport.writes[7].fin, "expected second object stream write to set FIN");
-        ok &= expect(message_type(transport.writes[8].bytes) == 0x0b, "expected second PUBLISH_DONE");
-        ok &= expect(message_type(transport.writes[9].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
-        ok &= expect(transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
+        ok &= expect(transport.writes[6].fin, "expected second object stream write to set FIN");
+        ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second PUBLISH_DONE");
+        ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
+        ok &= expect(transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70}),
                      "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
     }
@@ -498,7 +502,7 @@ int main() {
         materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft16), source_bytes);
     status = draft16_session.publish(draft16_materialized);
     ok &= expect(status.ok, "expected draft-16 publish to succeed");
-    ok &= expect(draft16_transport.writes.size() == 10, "expected draft-16 announce/subscribe control/object sequence");
+    ok &= expect(draft16_transport.writes.size() == 9, "expected draft-16 relay subscribe control/object sequence");
     ok &= expect(!draft16_transport.writes[0].bytes.empty() && draft16_transport.writes[0].bytes.front() == 0x20,
                  "expected draft-16 binary CLIENT_SETUP message type");
     authority.clear();
@@ -515,16 +519,15 @@ int main() {
                                                                                   0x69, 0x6e, 0x74, 0x65, 0x72, 0x6f,
                                                                                   0x70, 0x00}),
                  "expected draft-16 namespace write to use the configured track namespace");
-    ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x07, "expected draft-16 REQUEST_OK");
-    ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
-    ok &= expect(draft16_transport.writes[4].stream_id == 2, "expected first draft-16 object stream");
-    ok &= expect(message_type(draft16_transport.writes[5].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
-    ok &= expect(message_type(draft16_transport.writes[6].bytes) == 0x04, "expected second draft-16 SUBSCRIBE_OK");
-    ok &= expect(draft16_transport.writes[7].stream_id == 6, "expected second draft-16 object stream");
-    ok &= expect(message_type(draft16_transport.writes[8].bytes) == 0x0b, "expected second draft-16 PUBLISH_DONE");
-    ok &= expect(message_type(draft16_transport.writes[9].bytes) == 0x09,
+    ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
+    ok &= expect(draft16_transport.writes[3].stream_id == 2, "expected first draft-16 object stream");
+    ok &= expect(message_type(draft16_transport.writes[4].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
+    ok &= expect(message_type(draft16_transport.writes[5].bytes) == 0x04, "expected second draft-16 SUBSCRIBE_OK");
+    ok &= expect(draft16_transport.writes[6].stream_id == 6, "expected second draft-16 object stream");
+    ok &= expect(message_type(draft16_transport.writes[7].bytes) == 0x0b, "expected second draft-16 PUBLISH_DONE");
+    ok &= expect(message_type(draft16_transport.writes[8].bytes) == 0x09,
                  "expected draft-16 PUBLISH_NAMESPACE_DONE");
-    ok &= expect(draft16_transport.writes[9].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x01, 0x00}),
+    ok &= expect(draft16_transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x01, 0x00}),
                  "expected draft-16 PUBLISH_NAMESPACE_DONE to contain only the request ID");
 
     const std::vector<std::uint8_t> split_server_setup = encode_server_setup_message({

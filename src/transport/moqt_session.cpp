@@ -16,10 +16,6 @@ namespace openmoq::publisher::transport {
 
 namespace {
 
-bool control_message_complete(std::span<const std::uint8_t> bytes, std::size_t& message_size) {
-    return next_control_message(bytes, message_size);
-}
-
 bool trace_enabled() {
     static const bool enabled = std::getenv("OPENMOQ_PICOQUIC_TRACE") != nullptr;
     return enabled;
@@ -419,33 +415,31 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 std::uint64_t first_media_time_us = 0;
                 bool first_media_time_set = false;
                 const auto pacing_start = std::chrono::steady_clock::now();
-                if (subscribe.forward != 0) {
-                    for (const auto& object : plan.objects) {
-                        if (object.track_name != subscribe.track_name || !object_matches_filter(object, subscribe)) {
-                            continue;
-                        }
-                        const auto payload = object_payload(object);
-                        if (payload.empty()) {
-                            return TransportStatus::failure("transport publish requires materialized object payloads");
-                        }
-                        if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
-                            first_media_time_us = object.media_time_us;
-                            first_media_time_set = true;
-                        }
-                        pace_until(pacing_start, first_media_time_us, object, paced);
-                        std::uint64_t stream_id = 0;
-                        write_status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-                        if (!write_status.ok) {
-                            return write_status;
-                        }
-                        write_status = transport.write_stream(stream_id,
-                                                              encode_object_stream(draft, track_it->second.alias, object, payload),
-                                                              true);
-                        if (!write_status.ok) {
-                            return write_status;
-                        }
-                        ++stream_count;
+                for (const auto& object : plan.objects) {
+                    if (object.track_name != subscribe.track_name || !object_matches_filter(object, subscribe)) {
+                        continue;
                     }
+                    const auto payload = object_payload(object);
+                    if (payload.empty()) {
+                        return TransportStatus::failure("transport publish requires materialized object payloads");
+                    }
+                    if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
+                        first_media_time_us = object.media_time_us;
+                        first_media_time_set = true;
+                    }
+                    pace_until(pacing_start, first_media_time_us, object, paced);
+                    std::uint64_t stream_id = 0;
+                    write_status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    write_status = transport.write_stream(stream_id,
+                                                          encode_object_stream(draft, track_it->second.alias, object, payload),
+                                                          true);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    ++stream_count;
                 }
 
                 write_status = transport.write_stream(control_stream_id,

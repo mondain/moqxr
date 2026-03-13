@@ -196,7 +196,7 @@ Current status as of March 13, 2026:
 - QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443`, `interop-relay.cloudflare.mediaoverquic.com:443`, and `moq-relay.red5.net:8443`
 - `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
 - `PUBLISH_NAMESPACE` is accepted with `PUBLISH_NAMESPACE_OK`
-- with `--forward 0`, the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
+- with `--forward 0`, the current client waits for inbound `SUBSCRIBE`; relays may consume `SUBSCRIBE_NAMESPACE` themselves and only forward `SUBSCRIBE` to the publisher
 - the Cloudflare endpoints accepted setup and namespace announce in testing, but did not issue subscriptions, so the publish attempt timed out waiting for control-stream data
 - with `--forward 1`, `moq-relay.red5.net:8443` now progresses through `PUBLISH_OK` for the catalog and media tracks, after which the client begins sending object streams
 - `fb.mvfst.net:9448` now accepts the draft-14 publish flow end-to-end after switching `PUBLISH`, `PUBLISH_OK`, and `PUBLISH_ERROR` control messages to `u16` outer lengths; the current draft-16 flow is still rejected with MOQT application error `3` (`PROTOCOL_VIOLATION`) immediately after setup
