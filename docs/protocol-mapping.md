@@ -7,6 +7,7 @@ This project keeps `draft-ietf-moq-transport-14` as the primary publisher profil
 - Namespace subscription responses are modeled as the dedicated `SUBSCRIBE_NAMESPACE_OK` and `SUBSCRIBE_NAMESPACE_ERROR` flow.
 - Namespace overlap handling is documented against `NAMESPACE_PREFIX_OVERLAP`.
 - Publisher-side namespace acceptance is modeled with draft-14 style `PUBLISH_NAMESPACE_OK` and `PUBLISH_NAMESPACE_ERROR`.
+- Draft-14 control messages use a `u16` outer `Length` field, including `PUBLISH`, `PUBLISH_OK`, and `PUBLISH_ERROR`; only inner fields explicitly marked `(i)` remain QUIC varints.
 
 ## Draft-16 secondary assumptions
 

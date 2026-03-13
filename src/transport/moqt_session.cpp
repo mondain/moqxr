@@ -137,7 +137,7 @@ void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq:
         }
     } else if (message_type == 0x1f) {
         PublishError message;
-        if (decode_publish_error(message_bytes, message)) {
+        if (decode_publish_error(message_bytes, draft, message)) {
             std::cerr << " request_id=" << message.request_id << " error_code=" << message.error_code
                       << " reason=" << message.reason;
         }
@@ -262,7 +262,7 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
                 ++publish_responses;
             } else if (message_type == 0x1f) {
                 PublishError message;
-                if (!decode_publish_error(message_bytes, message)) {
+                if (!decode_publish_error(message_bytes, draft, message)) {
                     return TransportStatus::failure("received invalid PUBLISH_ERROR");
                 }
                 return TransportStatus::failure("peer rejected track publish: " + message.reason);

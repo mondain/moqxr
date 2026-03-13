@@ -208,12 +208,7 @@ std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft, std::uin
     }
 
     std::vector<std::uint8_t> message = encode_varint(0x1e);
-    if (draft == DraftVersion::kDraft14) {
-        const std::vector<std::uint8_t> length = encode_varint(payload.size());
-        message.insert(message.end(), length.begin(), length.end());
-    } else {
-        append_be16(message, static_cast<std::uint16_t>(payload.size()));
-    }
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
 }

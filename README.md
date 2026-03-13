@@ -199,7 +199,7 @@ Current status as of March 13, 2026:
 - with `--forward 0`, the current client then waits for inbound `SUBSCRIBE_NAMESPACE` / `SUBSCRIBE`
 - the Cloudflare endpoints accepted setup and namespace announce in testing, but did not issue subscriptions, so the publish attempt timed out waiting for control-stream data
 - with `--forward 1`, `moq-relay.red5.net:8443` now progresses through `PUBLISH_OK` for the catalog and media tracks, after which the client begins sending object streams
-- `fb.mvfst.net:9448` accepts QUIC for draft-14 and draft-16, but the current draft-14 flow stalls after namespace acceptance and the current draft-16 flow is still rejected with MOQT application error `3` (`PROTOCOL_VIOLATION`) immediately after setup
+- `fb.mvfst.net:9448` now accepts the draft-14 publish flow end-to-end after switching `PUBLISH`, `PUBLISH_OK`, and `PUBLISH_ERROR` control messages to `u16` outer lengths; the current draft-16 flow is still rejected with MOQT application error `3` (`PROTOCOL_VIOLATION`) immediately after setup
 - `--paced` only affects media-object sends; it does not delay setup, namespace announce, or track publish requests
 
 ### Optional picoquic smoke test
