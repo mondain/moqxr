@@ -11,6 +11,7 @@ namespace {
 
 constexpr std::uint64_t kClientSetupType = 0x20;
 constexpr std::uint64_t kServerSetupType = 0x21;
+constexpr std::uint64_t kSubscribeUpdateType = 0x02;
 constexpr std::uint64_t kSubscribeType = 0x03;
 constexpr std::uint64_t kSubscribeOkType = 0x04;
 constexpr std::uint64_t kSubscribeErrorType = 0x05;
@@ -236,6 +237,7 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
     switch (type) {
         case kClientSetupType:
         case kServerSetupType:
+        case kSubscribeUpdateType:
         case kSubscribeType:
         case kSubscribeOkType:
         case kSubscribeErrorType:
@@ -529,8 +531,15 @@ bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMess
     message.subscriber_priority = bytes[offset++];
     message.group_order = bytes[offset++];
     message.forward = bytes[offset++];
+    if (message.group_order > 2 || message.forward > 1) {
+        return false;
+    }
 
     if (!decode_varint_impl(bytes, offset, message.filter_type)) {
+        return false;
+    }
+
+    if (message.filter_type < 0x01 || message.filter_type > 0x04) {
         return false;
     }
 
@@ -553,6 +562,40 @@ bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMess
         message.start_group_id = 0;
         message.start_object_id = 0;
         message.end_group_id = 0;
+    }
+
+    return decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
+}
+
+bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, SubscribeUpdateMessage& message) {
+    std::size_t payload_offset = 0;
+    std::size_t payload_length = 0;
+    if (!parse_uint16_length_message(bytes, kSubscribeUpdateType, payload_offset, payload_length)) {
+        return false;
+    }
+
+    std::size_t offset = payload_offset;
+    const std::size_t payload_end = payload_offset + payload_length;
+    std::uint64_t start_group_id = 0;
+    std::uint64_t start_object_id = 0;
+    std::uint64_t end_group_plus_one = 0;
+    std::uint64_t parameter_count = 0;
+    if (!decode_varint_impl(bytes, offset, message.request_id) ||
+        !decode_varint_impl(bytes, offset, message.subscription_request_id) ||
+        !decode_varint_impl(bytes, offset, start_group_id) ||
+        !decode_varint_impl(bytes, offset, start_object_id) ||
+        !decode_varint_impl(bytes, offset, end_group_plus_one) ||
+        offset + 2 > payload_end) {
+        return false;
+    }
+
+    message.start_group_id = static_cast<std::size_t>(start_group_id);
+    message.start_object_id = static_cast<std::size_t>(start_object_id);
+    message.end_group_plus_one = static_cast<std::size_t>(end_group_plus_one);
+    message.subscriber_priority = bytes[offset++];
+    message.forward = bytes[offset++];
+    if (message.forward > 1) {
+        return false;
     }
 
     return decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
@@ -666,13 +709,16 @@ std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
                                                std::uint64_t track_alias,
                                                const CmsfObject& object,
                                                std::span<const std::uint8_t> payload) {
+    static_cast<void>(draft);
+
     if (draft == DraftVersion::kDraft14) {
         std::vector<std::uint8_t> stream_bytes;
         append_varint(stream_bytes, kSubgroupHeaderType);
         append_varint(stream_bytes, track_alias);
         append_varint(stream_bytes, object.group_id);
-        append_varint(stream_bytes, object.object_id);
+        append_varint(stream_bytes, 0);
         stream_bytes.push_back(kPublisherPriority);
+        append_varint(stream_bytes, object.object_id);
         append_varint(stream_bytes, payload.size());
         stream_bytes.insert(stream_bytes.end(), payload.begin(), payload.end());
         return stream_bytes;
@@ -682,9 +728,9 @@ std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
     append_varint(stream_bytes, kSubgroupHeaderType);
     append_varint(stream_bytes, track_alias);
     append_varint(stream_bytes, object.group_id);
-    append_varint(stream_bytes, object.object_id);
-    stream_bytes.push_back(kPublisherPriority);
     append_varint(stream_bytes, 0);
+    stream_bytes.push_back(kPublisherPriority);
+    append_varint(stream_bytes, object.object_id);
     append_varint(stream_bytes, payload.size());
     stream_bytes.insert(stream_bytes.end(), payload.begin(), payload.end());
     return stream_bytes;

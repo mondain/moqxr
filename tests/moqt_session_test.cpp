@@ -193,10 +193,32 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     return message;
 }
 
-std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft, std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_subscribe_update_message(std::uint64_t request_id) {
+    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    const std::vector<std::uint8_t> subscription_request_id = encode_varint(6);
+    const std::vector<std::uint8_t> start_group = encode_varint(0);
+    const std::vector<std::uint8_t> start_object = encode_varint(0);
+    const std::vector<std::uint8_t> end_group_plus_one = encode_varint(1);
+    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+    payload.insert(payload.end(), subscription_request_id.begin(), subscription_request_id.end());
+    payload.insert(payload.end(), start_group.begin(), start_group.end());
+    payload.insert(payload.end(), start_object.begin(), start_object.end());
+    payload.insert(payload.end(), end_group_plus_one.begin(), end_group_plus_one.end());
+    payload.push_back(0x80);
+    payload.push_back(0x01);
+    payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    std::vector<std::uint8_t> message = encode_varint(0x02);
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft,
+                                                    std::uint64_t request_id,
+                                                    std::uint8_t forward = 1) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
     if (draft == DraftVersion::kDraft14) {
-        payload.push_back(0x01);
+        payload.push_back(forward);
         payload.push_back(0x80);
         payload.push_back(0x01);
         const std::vector<std::uint8_t> filter_type = encode_varint(0);
@@ -231,10 +253,11 @@ void queue_subscribe_requests(MockTransport& transport,
 
 void queue_publish_ok_responses(MockTransport& transport,
                                 DraftVersion draft,
-                                std::initializer_list<std::uint64_t> request_ids) {
+                                std::initializer_list<std::uint64_t> request_ids,
+                                std::uint8_t forward = 1) {
     transport.reads[0].push_back(encode_publish_namespace_ok_message(draft, 0));
     for (const auto request_id : request_ids) {
-        transport.reads[0].push_back(encode_publish_ok_message(draft, request_id));
+        transport.reads[0].push_back(encode_publish_ok_message(draft, request_id, forward));
     }
 }
 
@@ -337,6 +360,32 @@ bool decode_setup_fields(const std::vector<std::uint8_t>& bytes,
     return offset == bytes.size();
 }
 
+bool decode_object_stream_fields(const std::vector<std::uint8_t>& bytes,
+                                 std::uint64_t& stream_type,
+                                 std::uint64_t& track_alias,
+                                 std::uint64_t& group_id,
+                                 std::uint64_t& subgroup_id,
+                                 std::uint64_t& publisher_priority,
+                                 std::uint64_t& object_id_delta,
+                                 std::uint64_t& payload_length,
+                                 std::vector<std::uint8_t>& payload) {
+    payload.clear();
+    std::size_t offset = 0;
+    if (!decode_varint(bytes, offset, stream_type) ||
+        !decode_varint(bytes, offset, track_alias) ||
+        !decode_varint(bytes, offset, group_id) ||
+        !decode_varint(bytes, offset, subgroup_id) ||
+        !decode_varint(bytes, offset, publisher_priority) ||
+        !decode_varint(bytes, offset, object_id_delta) ||
+        !decode_varint(bytes, offset, payload_length) ||
+        offset + payload_length != bytes.size()) {
+        return false;
+    }
+
+    payload.assign(bytes.begin() + static_cast<std::ptrdiff_t>(offset), bytes.end());
+    return true;
+}
+
 bool expect(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << '\n';
@@ -434,12 +483,54 @@ int main() {
         ok &= expect(transport.writes[3].stream_id == 2, "expected first object stream to be unidirectional stream 2");
         ok &= expect(!transport.writes[3].bytes.empty() && transport.writes[3].bytes.front() == 0x14,
                      "expected first object stream to use a subgroup header with explicit subgroup ID");
+        std::uint64_t stream_type = 0;
+        std::uint64_t track_alias = 0;
+        std::uint64_t group_id = 0;
+        std::uint64_t subgroup_id = 0;
+        std::uint64_t publisher_priority = 0;
+        std::uint64_t object_id_delta = 0;
+        std::uint64_t payload_length = 0;
+        std::vector<std::uint8_t> payload;
+        ok &= expect(decode_object_stream_fields(transport.writes[3].bytes,
+                                                 stream_type,
+                                                 track_alias,
+                                                 group_id,
+                                                 subgroup_id,
+                                                 publisher_priority,
+                                                 object_id_delta,
+                                                 payload_length,
+                                                 payload),
+                     "expected first object stream to decode");
+        ok &= expect(stream_type == 0x14, "expected subgroup stream type");
+        ok &= expect(group_id == 0, "expected catalog group id");
+        ok &= expect(subgroup_id == 0, "expected catalog subgroup id");
+        ok &= expect(object_id_delta == 0, "expected catalog object id delta before payload length");
+        ok &= expect(payload_length == 4, "expected catalog payload length to be encoded after object id delta");
+        ok &= expect(payload == std::vector<std::uint8_t>({'I', 'N', 'I', 'T'}),
+                     "expected catalog payload bytes after subgroup object fields");
         ok &= expect(transport.writes[3].fin, "expected first object stream write to set FIN");
         ok &= expect(message_type(transport.writes[4].bytes) == 0x0b, "expected first PUBLISH_DONE");
         ok &= expect(message_type(transport.writes[5].bytes) == 0x04, "expected second SUBSCRIBE_OK");
         ok &= expect(transport.writes[6].stream_id == 6, "expected second object stream to be unidirectional stream 6");
         ok &= expect(!transport.writes[6].bytes.empty() && transport.writes[6].bytes.front() == 0x14,
                      "expected second object stream to use a subgroup header with explicit subgroup ID");
+        payload.clear();
+        ok &= expect(decode_object_stream_fields(transport.writes[6].bytes,
+                                                 stream_type,
+                                                 track_alias,
+                                                 group_id,
+                                                 subgroup_id,
+                                                 publisher_priority,
+                                                 object_id_delta,
+                                                 payload_length,
+                                                 payload),
+                     "expected second object stream to decode");
+        ok &= expect(group_id == 1, "expected media group id");
+        ok &= expect(subgroup_id == 0, "expected media subgroup id");
+        ok &= expect(object_id_delta == 0, "expected media object id delta before payload length");
+        ok &= expect(payload_length == 3, "expected media payload length to be encoded after object id delta");
+        ok &= expect(payload == std::vector<std::uint8_t>({'M', 'S', 'G'}),
+                     "expected media payload bytes after subgroup object fields");
         ok &= expect(transport.writes[6].fin, "expected second object stream write to set FIN");
         ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second PUBLISH_DONE");
         ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
@@ -477,6 +568,95 @@ int main() {
             ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second auto-forward PUBLISH_DONE");
             ok &= expect(message_type(transport.writes[8].bytes) == 0x09,
                          "expected auto-forward PUBLISH_NAMESPACE_DONE");
+        }
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        std::vector<std::uint8_t> interleaved_control = encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0);
+        const auto catalog_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 2, 0);
+        interleaved_control.insert(interleaved_control.end(), catalog_publish_ok.begin(), catalog_publish_ok.end());
+        const auto catalog_subscribe = encode_subscribe_message(6, kTestTrackNamespace, "catalog", 0);
+        interleaved_control.insert(interleaved_control.end(), catalog_subscribe.begin(), catalog_subscribe.end());
+        const auto catalog_subscribe_update = encode_subscribe_update_message(6);
+        interleaved_control.insert(interleaved_control.end(),
+                                   catalog_subscribe_update.begin(),
+                                   catalog_subscribe_update.end());
+        const auto media_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 4, 1);
+        interleaved_control.insert(interleaved_control.end(), media_publish_ok.begin(), media_publish_ok.end());
+        transport.reads[0].push_back(interleaved_control);
+        MoqtSession session(transport, std::string(kTestTrackNamespace), true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected interleaved control session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with interleaved SUBSCRIBE and SUBSCRIBE_UPDATE");
+        ok &= expect(transport.writes.size() == 10,
+                     "expected setup, namespace, two publish requests, media object, media publish_done, subscribe_ok, catalog object, catalog publish_done, namespace_done");
+        if (transport.writes.size() >= 10) {
+            ok &= expect(message_type(transport.writes[2].bytes) == 0x1d,
+                         "expected first interleaved-flow PUBLISH");
+            ok &= expect(message_type(transport.writes[3].bytes) == 0x1d,
+                         "expected second interleaved-flow PUBLISH");
+            ok &= expect(transport.writes[4].stream_id == 2,
+                         "expected forwarded media object stream before deferred subscribe handling");
+            ok &= expect(message_type(transport.writes[5].bytes) == 0x0b,
+                         "expected forwarded media PUBLISH_DONE before deferred subscribe handling");
+            ok &= expect(message_type(transport.writes[6].bytes) == 0x04,
+                         "expected deferred catalog SUBSCRIBE_OK after publish acknowledgements");
+            ok &= expect(transport.writes[7].stream_id == 6,
+                         "expected deferred catalog object stream after SUBSCRIBE_OK");
+            ok &= expect(message_type(transport.writes[8].bytes) == 0x0b,
+                         "expected deferred catalog PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[9].bytes) == 0x09,
+                         "expected namespace done after deferred subscribe handling");
+        }
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        queue_publish_ok_responses(transport, DraftVersion::kDraft14, {2, 4}, 0);
+        transport.reads[0].push_back(encode_subscribe_message(6, kTestTrackNamespace, "catalog", 0));
+        transport.reads[0].push_back(encode_subscribe_message(8, kTestTrackNamespace, "vide_1", 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace), true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected downgraded auto-forward session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed after PUBLISH_OK forward downgrade");
+        ok &= expect(transport.writes.size() == 11,
+                     "expected setup, namespace, two publish requests, two subscribe_ok, two object streams, two publish_done, namespace_done");
+        if (transport.writes.size() >= 11) {
+            ok &= expect(message_type(transport.writes[2].bytes) == 0x1d, "expected first downgraded PUBLISH");
+            ok &= expect(message_type(transport.writes[3].bytes) == 0x1d, "expected second downgraded PUBLISH");
+            ok &= expect(message_type(transport.writes[4].bytes) == 0x04,
+                         "expected downgraded catalog SUBSCRIBE_OK");
+            ok &= expect(transport.writes[5].stream_id == 2,
+                         "expected downgraded catalog object stream on stream 2");
+            ok &= expect(message_type(transport.writes[6].bytes) == 0x0b,
+                         "expected downgraded catalog PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[7].bytes) == 0x04,
+                         "expected downgraded media SUBSCRIBE_OK");
+            ok &= expect(transport.writes[8].stream_id == 6,
+                         "expected downgraded media object stream on stream 6");
+            ok &= expect(message_type(transport.writes[9].bytes) == 0x0b,
+                         "expected downgraded media PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[10].bytes) == 0x09,
+                         "expected downgraded auto-forward PUBLISH_NAMESPACE_DONE");
         }
     }
 

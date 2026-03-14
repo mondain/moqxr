@@ -72,6 +72,16 @@ struct SubscribeMessage {
     std::size_t end_group_id = 0;
 };
 
+struct SubscribeUpdateMessage {
+    std::uint64_t request_id = 0;
+    std::uint64_t subscription_request_id = 0;
+    std::size_t start_group_id = 0;
+    std::size_t start_object_id = 0;
+    std::size_t end_group_plus_one = 0;
+    std::uint8_t subscriber_priority = 0;
+    std::uint8_t forward = 0;
+};
+
 struct PublishNamespaceError {
     std::uint64_t request_id = 0;
     std::uint64_t error_code = 0;
@@ -107,6 +117,7 @@ bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draf
 bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, SubscribeNamespaceMessage& message);
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id);
 bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMessage& message);
+bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, SubscribeUpdateMessage& message);
 std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
                                                       std::uint64_t request_id,
                                                       std::uint64_t track_alias,
