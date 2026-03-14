@@ -213,6 +213,23 @@ std::vector<std::uint8_t> encode_subscribe_update_message(std::uint64_t request_
     return message;
 }
 
+std::vector<std::uint8_t> encode_legacy_subscribe_update_message(std::uint64_t track_alias) {
+    std::vector<std::uint8_t> payload = encode_varint(track_alias);
+    const std::vector<std::uint8_t> start_group = encode_varint(0);
+    const std::vector<std::uint8_t> start_object = encode_varint(0);
+    payload.insert(payload.end(), start_group.begin(), start_group.end());
+    payload.insert(payload.end(), start_object.begin(), start_object.end());
+    payload.push_back(0x80);
+    payload.push_back(0x01);
+    payload.push_back(0x10);
+    payload.push_back(0x01);
+
+    std::vector<std::uint8_t> message = encode_varint(0x02);
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
 std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft,
                                                     std::uint64_t request_id,
                                                     std::uint8_t forward = 1) {
@@ -569,6 +586,35 @@ int main() {
             ok &= expect(message_type(transport.writes[8].bytes) == 0x09,
                          "expected auto-forward PUBLISH_NAMESPACE_DONE");
         }
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        std::vector<std::uint8_t> interleaved_control = encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0);
+        const auto catalog_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 2, 0);
+        interleaved_control.insert(interleaved_control.end(), catalog_publish_ok.begin(), catalog_publish_ok.end());
+        const auto catalog_subscribe = encode_subscribe_message(6, kTestTrackNamespace, "catalog", 0);
+        interleaved_control.insert(interleaved_control.end(), catalog_subscribe.begin(), catalog_subscribe.end());
+        const auto catalog_subscribe_update = encode_legacy_subscribe_update_message(0);
+        interleaved_control.insert(interleaved_control.end(),
+                                   catalog_subscribe_update.begin(),
+                                   catalog_subscribe_update.end());
+        const auto media_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 4, 1);
+        interleaved_control.insert(interleaved_control.end(), media_publish_ok.begin(), media_publish_ok.end());
+        transport.reads[0].push_back(interleaved_control);
+        MoqtSession session(transport, std::string(kTestTrackNamespace), true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected legacy update session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with legacy alias-based SUBSCRIBE_UPDATE");
     }
 
     {

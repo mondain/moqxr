@@ -385,6 +385,62 @@ bool apply_subscribe_update(SubscribeMessage& subscribe, const SubscribeUpdateMe
     return true;
 }
 
+bool decode_legacy_subscribe_update_message(std::span<const std::uint8_t> bytes,
+                                            const std::map<std::string, PublishedTrack>& tracks_by_name,
+                                            const std::map<std::uint64_t, SubscribeMessage>& pending_subscriptions,
+                                            SubscribeUpdateMessage& message) {
+    std::size_t offset = 0;
+    std::uint64_t message_type = 0;
+    if (!decode_varint(bytes, offset, message_type) || message_type != 0x02 || offset + 2 > bytes.size()) {
+        return false;
+    }
+
+    const std::size_t payload_length =
+        (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
+    offset += 2;
+    if (offset + payload_length != bytes.size() || payload_length != 7) {
+        return false;
+    }
+
+    std::size_t payload_offset = offset;
+    std::uint64_t track_alias = 0;
+    std::uint64_t start_group_id = 0;
+    std::uint64_t start_object_id = 0;
+    if (!decode_varint(bytes, payload_offset, track_alias) ||
+        !decode_varint(bytes, payload_offset, start_group_id) ||
+        !decode_varint(bytes, payload_offset, start_object_id) ||
+        payload_offset + 4 != bytes.size()) {
+        return false;
+    }
+
+    const std::uint8_t subscriber_priority = bytes[payload_offset++];
+    const std::uint8_t group_order = bytes[payload_offset++];
+    const std::uint8_t parameter_or_filter = bytes[payload_offset++];
+    const std::uint8_t forward = bytes[payload_offset++];
+    if (group_order > 2 || forward > 1) {
+        return false;
+    }
+    static_cast<void>(parameter_or_filter);
+
+    for (const auto& [request_id, subscribe] : pending_subscriptions) {
+        const auto track_it = tracks_by_name.find(subscribe.track_name);
+        if (track_it == tracks_by_name.end() || track_it->second.alias != track_alias) {
+            continue;
+        }
+
+        message.request_id = 0;
+        message.subscription_request_id = request_id;
+        message.start_group_id = static_cast<std::size_t>(start_group_id);
+        message.start_object_id = static_cast<std::size_t>(start_object_id);
+        message.end_group_plus_one = subscribe.filter_type == 0x04 ? (subscribe.end_group_id + 1) : 0;
+        message.subscriber_priority = subscriber_priority;
+        message.forward = forward;
+        return true;
+    }
+
+    return false;
+}
+
 TransportStatus serve_subscriptions(PublisherTransport& transport,
                                     std::uint64_t control_stream_id,
                                     const openmoq::publisher::PublishPlan& plan,
@@ -425,7 +481,11 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
             if (message_type == 0x02) {
                 SubscribeUpdateMessage subscribe_update;
-                if (!decode_subscribe_update_message(message_bytes, subscribe_update)) {
+                if (!decode_subscribe_update_message(message_bytes, subscribe_update) &&
+                    !decode_legacy_subscribe_update_message(message_bytes,
+                                                            tracks_by_name,
+                                                            pending_subscriptions,
+                                                            subscribe_update)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE");
                 }
                 auto pending_it = pending_subscriptions.find(subscribe_update.subscription_request_id);
