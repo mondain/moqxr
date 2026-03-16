@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -88,7 +89,11 @@ struct MockTransport final : PublisherTransport {
                                 std::vector<std::uint8_t>& bytes,
                                 bool& fin,
                                 std::chrono::milliseconds timeout) override {
-        static_cast<void>(timeout);
+        read_timeouts.push_back(timeout);
+        ++read_count;
+        if (on_read) {
+            on_read(*this, stream_id);
+        }
         const auto it = reads.find(stream_id);
         if (it == reads.end()) {
             return TransportStatus::failure("no queued read for stream");
@@ -124,8 +129,11 @@ struct MockTransport final : PublisherTransport {
     std::uint64_t next_bidi_ = 0;
     std::uint64_t next_uni_ = 2;
     std::uint64_t last_close_code = 0;
+    std::size_t read_count = 0;
     std::vector<WriteEvent> writes;
+    std::vector<std::chrono::milliseconds> read_timeouts;
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
+    std::function<void(const MockTransport&, std::uint64_t)> on_read;
 };
 
 void append_be16(std::vector<std::uint8_t>& out, std::uint16_t value) {
@@ -554,6 +562,64 @@ int main() {
         ok &= expect(transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70}),
                      "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
+        ok &= expect(!transport.read_timeouts.empty() && transport.read_timeouts.back() == std::chrono::seconds(3),
+                     "expected default subscriber wait timeout to be 3 seconds");
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_subscribe_message(2, kTestTrackNamespace, "catalog", 0));
+        transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "vide_1", 0));
+
+        bool saw_media_before_media_subscribe = false;
+        transport.on_read = [&](const MockTransport& current, std::uint64_t stream_id) {
+            if (stream_id != 0 || current.read_count != 4) {
+                return;
+            }
+
+            for (const auto& write : current.writes) {
+                if (write.stream_id != 6) {
+                    continue;
+                }
+                std::uint64_t stream_type = 0;
+                std::uint64_t track_alias = 0;
+                std::uint64_t group_id = 0;
+                std::uint64_t subgroup_id = 0;
+                std::uint64_t publisher_priority = 0;
+                std::uint64_t object_id_delta = 0;
+                std::uint64_t payload_length = 0;
+                std::vector<std::uint8_t> payload;
+                if (decode_object_stream_fields(write.bytes,
+                                                stream_type,
+                                                track_alias,
+                                                group_id,
+                                                subgroup_id,
+                                                publisher_priority,
+                                                object_id_delta,
+                                                payload_length,
+                                                payload) &&
+                    track_alias == 1) {
+                    saw_media_before_media_subscribe = true;
+                }
+            }
+        };
+
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected delayed-subscriber session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with delayed media subscriber");
+        ok &= expect(!saw_media_before_media_subscribe,
+                     "expected forward=0 to avoid sending media before the media subscriber arrives");
     }
 
     {
@@ -829,6 +895,28 @@ int main() {
     status = close_session.close(7);
     ok &= expect(status.ok, "expected close to succeed");
     ok &= expect(close_transport.last_close_code == 7, "expected close code to propagate");
+
+    {
+        MockTransport timeout_transport;
+        timeout_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        queue_subscribe_requests(timeout_transport,
+                                 DraftVersion::kDraft14,
+                                 kTestTrackNamespace,
+                                 {{2, "catalog"}, {4, "vide_1"}});
+        MoqtSession timeout_session(
+            timeout_transport, std::string(kTestTrackNamespace), false, false, std::chrono::seconds(11));
+        status = timeout_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected custom-timeout session connect to succeed");
+        status = timeout_session.publish(
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
+        ok &= expect(status.ok, "expected publish to succeed with custom subscriber timeout");
+        ok &= expect(!timeout_transport.read_timeouts.empty() &&
+                         timeout_transport.read_timeouts.back() == std::chrono::seconds(11),
+                     "expected custom subscriber timeout to reach transport reads");
+    }
 
     return ok ? 0 : 1;
 }

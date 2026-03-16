@@ -34,7 +34,8 @@ int main(int argc, char** argv) {
                 endpoint.alpn = default_alpn(options.draft_version);
             }
             PicoquicClient transport;
-            MoqtSession session(transport, options.track_namespace, options.forward, options.paced);
+            MoqtSession session(
+                transport, options.track_namespace, options.forward, options.paced, options.subscriber_timeout);
 
             TransportStatus status = session.connect(endpoint, options.tls);
             if (!status.ok) {

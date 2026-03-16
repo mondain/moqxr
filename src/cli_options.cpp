@@ -59,6 +59,14 @@ bool parse_forward_flag(std::string_view value) {
     throw std::runtime_error("unsupported --forward value: expected 0 or 1");
 }
 
+std::chrono::seconds parse_timeout(std::string_view value) {
+    const int timeout = std::stoi(std::string(value));
+    if (timeout < 0) {
+        throw std::runtime_error("subscriber timeout must be zero or greater");
+    }
+    return std::chrono::seconds(timeout);
+}
+
 }  // namespace
 
 CliOptions parse_cli_options(int argc, char** argv) {
@@ -99,6 +107,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
             options.track_namespace = std::string(require_value("--namespace"));
         } else if (argument == "--forward") {
             options.forward = parse_forward_flag(require_value("--forward"));
+        } else if (argument == "--timeout") {
+            options.subscriber_timeout = parse_timeout(require_value("--timeout"));
         } else if (argument == "--paced") {
             options.paced = true;
         } else if (argument == "--emit-dir") {
@@ -128,7 +138,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <mp4> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--paced] [--dump-plan] [--emit-dir <dir>]"
+           " --input <mp4> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
+           " [--paced] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path] [--alpn value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }

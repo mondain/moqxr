@@ -448,6 +448,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                                     openmoq::publisher::DraftVersion draft,
                                     std::string_view track_namespace,
                                     bool paced,
+                                    std::chrono::milliseconds subscriber_timeout,
                                     std::vector<std::uint8_t>& pending_control_bytes,
                                     bool send_namespace_done = true) {
     std::vector<std::uint8_t> buffer = std::move(pending_control_bytes);
@@ -621,7 +622,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
         }
 
         std::vector<std::uint8_t> chunk;
-        const TransportStatus read_status = transport.read_stream(control_stream_id, chunk, fin, std::chrono::seconds(3));
+        const TransportStatus read_status = transport.read_stream(control_stream_id, chunk, fin, subscriber_timeout);
         if (!read_status.ok) {
             if (served_any_subscription &&
                 (read_status.message == "timed out waiting for stream data" ||
@@ -656,6 +657,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
                                          std::uint64_t peer_max_request_id,
                                          std::string_view track_namespace,
                                          bool paced,
+                                         std::chrono::milliseconds subscriber_timeout,
                                          std::vector<std::uint8_t>& pending_control_bytes) {
     std::map<std::string, std::uint64_t> request_id_by_track;
     std::map<std::string, PublishedTrack> tracks_by_name;
@@ -779,6 +781,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
                                      plan.draft.version,
                                      track_namespace,
                                      paced,
+                                     subscriber_timeout,
                                      pending_control_bytes,
                                      false);
         if (!status.ok) {
@@ -797,8 +800,16 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
 
 }  // namespace
 
-MoqtSession::MoqtSession(PublisherTransport& transport, std::string track_namespace, bool auto_forward, bool paced)
-    : transport_(transport), track_namespace_(std::move(track_namespace)), auto_forward_(auto_forward), paced_(paced) {}
+MoqtSession::MoqtSession(PublisherTransport& transport,
+                         std::string track_namespace,
+                         bool auto_forward,
+                         bool paced,
+                         std::chrono::seconds subscriber_timeout)
+    : transport_(transport),
+      track_namespace_(std::move(track_namespace)),
+      auto_forward_(auto_forward),
+      paced_(paced),
+      subscriber_timeout_(subscriber_timeout) {}
 
 TransportStatus MoqtSession::connect(const EndpointConfig& endpoint, const TlsConfig& tls) {
     endpoint_ = endpoint;
@@ -856,7 +867,15 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
 
     if (auto_forward_) {
         return forward_published_tracks(
-            transport_, control_stream_id_, plan, tracks, peer_max_request_id_, track_namespace_, paced_, pending_control_bytes_);
+            transport_,
+            control_stream_id_,
+            plan,
+            tracks,
+            peer_max_request_id_,
+            track_namespace_,
+            paced_,
+            subscriber_timeout_,
+            pending_control_bytes_);
     }
 
     std::cerr << "[moqt-session] awaiting SUBSCRIBE for tracks:";
@@ -872,6 +891,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
                                plan.draft.version,
                                track_namespace_,
                                paced_,
+                               subscriber_timeout_,
                                pending_control_bytes_);
 }
 

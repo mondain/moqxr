@@ -187,6 +187,7 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
   --namespace interop \
   --forward 0 \
+  --timeout 10 \
   --paced \
   --insecure
 ```
@@ -197,6 +198,7 @@ Current status as of March 13, 2026:
 - `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
 - `PUBLISH_NAMESPACE` is accepted with `PUBLISH_NAMESPACE_OK`
 - with `--forward 0`, the current client waits for inbound `SUBSCRIBE`; relays may consume `SUBSCRIBE_NAMESPACE` themselves and only forward `SUBSCRIBE` to the publisher
+- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests before failing the publish attempt
 - the Cloudflare endpoints accepted setup and namespace announce in testing, but did not issue subscriptions, so the publish attempt timed out waiting for control-stream data
 - with `--forward 1`, `moq-relay.red5.net:8443` now progresses through `PUBLISH_OK` for the catalog and media tracks, after which the client begins sending object streams
 - `fb.mvfst.net:9448` now accepts the draft-14 publish flow end-to-end after switching `PUBLISH`, `PUBLISH_OK`, and `PUBLISH_ERROR` control messages to `u16` outer lengths; the current draft-16 flow is still rejected with MOQT application error `3` (`PROTOCOL_VIOLATION`) immediately after setup
@@ -246,6 +248,7 @@ Transport-oriented CLI flags are also present now:
   --endpoint localhost:4433 \
   --namespace media \
   --forward 0 \
+  --timeout 3 \
   --paced \
   --insecure
 ```
@@ -264,6 +267,7 @@ Current status:
 - the local picoquic loopback handshake works, including object publication over QUIC streams
 - `--namespace` lets you choose the advertised track namespace during transport tests
 - `--forward 0|1` selects whether the publisher waits for `SUBSCRIBE` (`0`) or immediately sends `PUBLISH` requests and forwards objects after namespace announce (`1`)
+- `--timeout <seconds>` sets the subscriber wait timeout used when the publisher is waiting for `SUBSCRIBE`
 - ALPN is selected from the requested draft unless `--alpn` explicitly overrides it
 - `--paced` delays media-object sends to match fragment media timestamps instead of sending the whole file as fast as possible; it only has an effect once object transmission begins
 - after setup completes, the CLI prints `connection_id=<hex>` to stdout

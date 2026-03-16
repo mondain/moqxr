@@ -78,6 +78,12 @@ if(OPENMOQ_BUILD_TESTS)
     target_link_libraries(openmoq-publisher-packaging-tests PRIVATE openmoq_publisher_lib)
     add_test(NAME openmoq-publisher-packaging-tests COMMAND openmoq-publisher-packaging-tests)
 
+    add_executable(openmoq-publisher-cli-tests
+        tests/cli_options_test.cpp
+    )
+    target_link_libraries(openmoq-publisher-cli-tests PRIVATE openmoq_publisher_lib)
+    add_test(NAME openmoq-publisher-cli-tests COMMAND openmoq-publisher-cli-tests)
+
     add_executable(openmoq-publisher-transport-tests
         tests/moqt_session_test.cpp
     )

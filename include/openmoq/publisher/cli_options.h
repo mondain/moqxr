@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <chrono>
 #include <optional>
 #include <string>
 
@@ -20,6 +21,7 @@ struct CliOptions {
     bool forward = false;
     bool paced = false;
     bool dump_plan = false;
+    std::chrono::seconds subscriber_timeout = std::chrono::seconds(3);
 };
 
 CliOptions parse_cli_options(int argc, char** argv);
