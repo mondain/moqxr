@@ -611,15 +611,14 @@ std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
     std::vector<std::uint8_t> payload;
     append_varint(payload, request_id);
     if (draft == DraftVersion::kDraft14) {
+        append_varint(payload, track_alias);
         append_varint(payload, 0);
-        payload.push_back(subscriber_priority);
         payload.push_back(kGroupOrderAscending);
         payload.push_back(content_exists ? kContentExistsTrue : 0);
         if (content_exists) {
             append_location(payload, largest_group_id, largest_object_id);
         }
         append_varint(payload, 0);
-        append_varint(payload, track_alias);
     } else {
         append_varint(payload, track_alias);
         append_varint(payload, 0);
