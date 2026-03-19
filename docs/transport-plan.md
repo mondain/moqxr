@@ -71,7 +71,7 @@ This separation is important because MOQT draft churn should be isolated to the 
 
 - [x] Publish initialization object first
 - [x] Publish media objects according to `PublishPlan`
-- [ ] Decide and document one stream mapping policy
+- [x] Decide and document one stream mapping policy
 - [ ] Handle transport write backpressure
 
 ### Phase 5: observability and testing
@@ -81,14 +81,14 @@ This separation is important because MOQT draft churn should be isolated to the 
 - [x] Add loopback integration tests for transport
 - [ ] Add interoperability tests against an OpenMOQ-capable endpoint
 
-## Proposed stream mapping
+## Stream mapping
 
-Initial recommendation:
+Current policy:
 
 - one bidirectional control stream per session
-- one unidirectional stream per published object in the first implementation
+- one unidirectional stream per published object
 
-That policy is not necessarily optimal long-term, but it is easier to reason about and validate while the control-plane logic is still moving.
+This remains intentionally conservative. It keeps object boundaries explicit and makes current draft-specific control and subscriber-serving logic easier to validate. Stream reuse is still a possible future optimization once backpressure handling is in place.
 
 ## Interface responsibilities
 
@@ -149,16 +149,18 @@ Owns:
 - The current workspace now compiles picoquic and picotls successfully.
 - A loopback smoke test now validates the local picoquic handshake and object publication path when it is run outside restricted sandboxes.
 - The session layer now uses a dedicated control-message encoder that keeps draft-14 and draft-16 naming differences out of the transport adapter.
+- Subscriber-driven serving is implemented for `--forward 0`, including multitrack publication in publish-plan/media-time order rather than draining one subscribed track completely before the next.
+- Incremental downstream `SUBSCRIBE` handling now lets later-arriving tracks join future object servicing without restarting the session or losing interleaving for remaining media objects.
 
 ## Key risks
 
 - draft-14 vs draft-16 control differences leaking into transport code
 - coupling picoquic callback state too tightly to publish scheduling
-- under-specifying how objects map to streams early on
+- incomplete backpressure behavior once object volume or pacing pressure increases
 
 ## Mitigations
 
 - keep draft-specific message encoding in session code
 - keep transport status and callbacks generic
-- start with a conservative one-object-per-stream policy
+- keep the current one-object-per-stream policy until backpressure and reuse semantics are explicit
 - add integration tests before optimizing stream reuse or pacing
