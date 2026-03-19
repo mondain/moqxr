@@ -454,6 +454,7 @@ PublishPlan make_span_backed_plan(DraftVersion draft) {
 int main() {
     bool ok = true;
     constexpr std::string_view kTestTrackNamespace = "interop";
+    constexpr std::uint64_t kExpectedClientMaxRequestId = 100;
     const EndpointConfig endpoint{
         .host = "example.com",
         .port = 4433,
@@ -499,7 +500,7 @@ int main() {
                      "expected draft-14 CLIENT_SETUP to decode");
         ok &= expect(authority == "example.com:4433", "expected draft-14 CLIENT_SETUP authority");
         ok &= expect(path == "/", "expected draft-14 CLIENT_SETUP path");
-        ok &= expect(max_request_id == 0, "expected draft-14 CLIENT_SETUP max_request_id");
+        ok &= expect(max_request_id == kExpectedClientMaxRequestId, "expected draft-14 CLIENT_SETUP max_request_id");
         ok &= expect(message_type(transport.writes[1].bytes) == 0x06, "expected PUBLISH_NAMESPACE");
         ok &= expect(transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70, 0x00}),
@@ -805,7 +806,7 @@ int main() {
         "expected draft-16 CLIENT_SETUP to decode");
     ok &= expect(authority == "example.com:4433", "expected draft-16 CLIENT_SETUP authority");
     ok &= expect(path == "/", "expected draft-16 CLIENT_SETUP path");
-    ok &= expect(max_request_id == 0, "expected draft-16 CLIENT_SETUP max_request_id");
+    ok &= expect(max_request_id == kExpectedClientMaxRequestId, "expected draft-16 CLIENT_SETUP max_request_id");
     ok &= expect(message_type(draft16_transport.writes[1].bytes) == 0x06, "expected draft-16 PUBLISH_NAMESPACE");
     ok &= expect(draft16_transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07,
                                                                                   0x69, 0x6e, 0x74, 0x65, 0x72, 0x6f,
