@@ -109,6 +109,7 @@ This covers:
 - CLI option parsing and validation
 - MOQT setup encoding and decoding
 - binary namespace announcement plus subscribe-serving or forward-publish control/object sequencing
+- multitrack subscribe serving in publish-plan/media-time order rather than draining one track at a time
 - paced send scheduling against fragment media timestamps
 - QUIC varint boundary coverage
 
@@ -185,6 +186,7 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
 Behavior notes:
 
 - `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
+- when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
 - `--forward 1` proactively publishes tracks and objects after namespace setup completes
 - `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests
 - `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
