@@ -1,37 +1,18 @@
 # OpenMOQ Publisher
 
-`moqxr` is a C++20 contribution project for an OpenMOQ publisher targeting Linux and macOS.
+`moqxr` is a C++20 OpenMOQ publisher contribution project for Linux and macOS.
 
-The current codebase focuses on the media packaging side of a publisher:
+It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-specific framing for drafts 14 and 16, and can either inspect the generated publish plan locally or publish it over a picoquic-backed transport when local `picoquic` and `picotls` checkouts are available.
 
-- primary MOQT behavior modeled after `draft-ietf-moq-transport-14`
-- secondary compatibility surface for `draft-ietf-moq-transport-16`
-- MP4 ingest for AAC-LC or Opus audio and H.264 or H.265 video
-- CMSF-oriented object planning for MOQT publication
-
-It is buildable and testable today, but it is not yet a full interoperable MOQT publisher.
-
-## Current capabilities
+## Overview
 
 - Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`
-- Remuxes non-fragmented MP4 input into synthesized fragmented media objects
+- Remuxes progressive MP4 input into synthesized fragmented media objects
 - Extracts track metadata and RFC 6381 codec identifiers from MP4 sample tables
-- Builds a publish plan consisting of initialization and media objects
-- Emits planned objects to disk for inspection
-- Keeps fragmented input on a zero-copy fast path where possible
-- Isolates MOQT draft-version mapping from the media packaging code
-- Builds a picoquic-backed QUIC transport path when local `picoquic` and `picotls` checkouts are available
-- Publishes a draft-aware control stream plus per-object streams in the current session layer
-- Supports a configurable published track namespace for relay and interop testing
-- Supports optional paced publication using fragment media timestamps
-
-## Current limitations
-
-- External relay interoperability is still incomplete
-- Progressive MP4 remux support is intentionally narrow
-- Edit lists, richer interleaving cases, and broader timing edge cases are not fully handled yet
-- The current remux path synthesizes fragments from `stbl` sample tables but does not attempt a full general-purpose MP4 muxer implementation
-- Current external relay tests complete setup and namespace announcement for draft-14, but do not yet result in inbound subscriptions or a complete draft-16 session
+- Builds a publish plan with initialization and media objects
+- Emits generated objects and catalog metadata to disk for inspection
+- Supports a configurable track namespace, optional paced publication, and draft-aware MOQT control/object encoding
+- Includes packaging, CLI, and MOQT session tests through CTest
 
 ## Design overview
 
@@ -51,7 +32,7 @@ For non-fragmented input:
 - it synthesizes a fragmented initialization segment by adding `mvex` and `trex`
 - it builds synthetic `moof` + `mdat` payloads from the original sample data
 
-This keeps the project aligned with CMAF-style publication while avoiding unnecessary redesign later when transport is added.
+This keeps the project aligned with CMAF-style publication while reusing the same publish-plan model for local inspection and transport-driven publication.
 
 ### Draft handling
 
@@ -72,7 +53,7 @@ This keeps the project aligned with CMAF-style publication while avoiding unnece
 
 ### Baseline build
 
-This is the default path if you only want the packaging and session-layer code:
+This is the default path for local development:
 
 ```bash
 cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
@@ -113,22 +94,31 @@ Useful CMake options:
 
 ### Packaging and session tests
 
-For routine development, run the packaging and session-layer tests:
+For routine development, run the packaging, CLI, and transport tests from the default build directory:
 
 ```bash
-cmake -S . -B build-nosmoke -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
-cmake --build build-nosmoke
-ctest --test-dir build-nosmoke --output-on-failure
+cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 This covers:
 
 - fragmented MP4 packaging
 - progressive MP4 remux into CMAF-style objects
+- CLI option parsing and validation
 - MOQT setup encoding and decoding
 - binary namespace announcement plus subscribe-serving or forward-publish control/object sequencing
 - paced send scheduling against fragment media timestamps
 - QUIC varint boundary coverage
+
+If you want the packaging and transport tests without the CLI target, use the secondary build tree:
+
+```bash
+cmake -S . -B build-nosmoke -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+cmake --build build-nosmoke
+ctest --test-dir build-nosmoke --output-on-failure
+```
 
 ### Picoquic loopback smoke test
 
@@ -160,7 +150,7 @@ Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
 ./build/openmoq-publisher --input sample.mp4 --draft 14 --emit-dir out/
 ```
 
-The output directory should currently contain:
+The output directory should contain:
 
 - `catalog.json`
 - one `*_init.mp4` file per media track
@@ -168,7 +158,7 @@ The output directory should currently contain:
 - one `*_probe.mp4` file per emitted media object for direct `ffprobe` use
 - `publish-plan.txt`
 
-The current catalog format includes:
+The catalog format includes:
 
 - `role` with values such as `video` and `audio`
 - RFC 6381 `codec` strings such as `avc1.64000C` and `mp4a.40.2`
@@ -192,17 +182,12 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --insecure
 ```
 
-Current status as of March 13, 2026:
+Behavior notes:
 
-- QUIC handshake succeeds against `draft-14.cloudflare.mediaoverquic.com:443`, `interop-relay.cloudflare.mediaoverquic.com:443`, and `moq-relay.red5.net:8443`
-- `CLIENT_SETUP` succeeds and the client prints the negotiated connection ID to stdout after setup
-- `PUBLISH_NAMESPACE` is accepted with `PUBLISH_NAMESPACE_OK`
-- with `--forward 0`, the current client waits for inbound `SUBSCRIBE`; relays may consume `SUBSCRIBE_NAMESPACE` themselves and only forward `SUBSCRIBE` to the publisher
-- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests before failing the publish attempt
-- the Cloudflare endpoints accepted setup and namespace announce in testing, but did not issue subscriptions, so the publish attempt timed out waiting for control-stream data
-- with `--forward 1`, `moq-relay.red5.net:8443` now progresses through `PUBLISH_OK` for the catalog and media tracks, after which the client begins sending object streams
-- `fb.mvfst.net:9448` now accepts the draft-14 publish flow end-to-end after switching `PUBLISH`, `PUBLISH_OK`, and `PUBLISH_ERROR` control messages to `u16` outer lengths; the current draft-16 flow is still rejected with MOQT application error `3` (`PROTOCOL_VIOLATION`) immediately after setup
-- `--paced` only affects media-object sends; it does not delay setup, namespace announce, or track publish requests
+- `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
+- `--forward 1` proactively publishes tracks and objects after namespace setup completes
+- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests
+- `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
 
 ### Optional picoquic smoke test
 
@@ -214,11 +199,7 @@ cmake --build build --target openmoq-publisher-picoquic-smoke-tests
 ctest --test-dir build --output-on-failure
 ```
 
-Current status:
-
-- the smoke test passes when run in an environment that allows real UDP sockets
-- restricted sandboxes can still fail early during socket setup
-- keep this option off for routine packaging-only development, and run the smoke binary directly when validating transport changes
+The smoke test requires an environment that permits real UDP sockets. Keep it disabled for routine packaging or session work, and run the smoke binary directly when validating transport changes.
 
 ## Usage
 
@@ -258,20 +239,6 @@ ALPN selection:
 - draft-14 defaults to `moq-00`
 - draft-16 defaults to `moqt-16`
 - `--alpn` overrides either default when you need to target a specific relay
-
-Current status:
-
-- the packaging pipeline is fully usable today
-- the session layer now emits typed control messages for setup, namespace publication, and subscription servicing
-- `--endpoint` now enters the real picoquic-backed transport path when the project is built with local picoquic and picotls support
-- the local picoquic loopback handshake works, including object publication over QUIC streams
-- `--namespace` lets you choose the advertised track namespace during transport tests
-- `--forward 0|1` selects whether the publisher waits for `SUBSCRIBE` (`0`) or immediately sends `PUBLISH` requests and forwards objects after namespace announce (`1`)
-- `--timeout <seconds>` sets the subscriber wait timeout used when the publisher is waiting for `SUBSCRIBE`
-- ALPN is selected from the requested draft unless `--alpn` explicitly overrides it
-- `--paced` delays media-object sends to match fragment media timestamps instead of sending the whole file as fast as possible; it only has an effect once object transmission begins
-- after setup completes, the CLI prints `connection_id=<hex>` to stdout
-- interoperability against external relays is partially working at draft-14 setup and namespace announcement, but not yet at end-to-end subscription delivery and not yet complete for draft-16 setup
 
 Catalog note:
 
@@ -314,18 +281,16 @@ GitHub Actions is configured to build and test the project on:
 - `ubuntu-latest`
 - `macos-latest`
 
-The workflow currently runs the same CMake configure, build, and CTest steps on both platforms.
+The workflow runs the same CMake configure, build, and CTest steps on both platforms.
 
-## Picoquic status
+## Transport Notes
 
-The repository now includes a transport abstraction and a picoquic-backed client wrapper.
+The repository includes a transport abstraction and a picoquic-backed client wrapper.
 
 - if local picoquic and picotls source trees are available, CMake can compile the real picoquic transport path into this project
 - if those dependencies are not available, the project still builds and tests normally, and the transport layer falls back cleanly
-- in this workspace, picoquic and picotls compile successfully as subprojects
-- the loopback smoke test now completes successfully when run outside restricted sandboxes
-- the current session layer uses a draft-aware control-message module instead of ad hoc string formatting
-- the next remaining transport step is external interoperability, not local handshake bring-up
+- the session layer uses a draft-aware control-message module instead of ad hoc string formatting
+- the optional loopback smoke test is the intended local validation path for real QUIC transport changes
 
 ## Roadmap
 
