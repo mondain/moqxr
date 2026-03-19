@@ -3,6 +3,7 @@
 #include "openmoq/publisher/transport/moqt_control_messages.h"
 #include "openmoq/publisher/transport/moqt_session.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -96,7 +97,8 @@ struct MockTransport final : PublisherTransport {
         }
         const auto it = reads.find(stream_id);
         if (it == reads.end()) {
-            return TransportStatus::failure("no queued read for stream");
+            return timeout == std::chrono::milliseconds(0) ? TransportStatus::failure("timed out waiting for stream data")
+                                                           : TransportStatus::failure("no queued read for stream");
         }
 
         if (it->second.empty()) {
@@ -449,6 +451,58 @@ PublishPlan make_span_backed_plan(DraftVersion draft) {
     return plan;
 }
 
+PublishPlan make_multitrack_plan(DraftVersion draft) {
+    return {
+        .draft = openmoq::publisher::draft_profile(draft),
+        .tracks = {
+            TrackDescription{.track_id = 0, .handler_type = "meta", .codec = "catalog", .sample_entry_type = "catalog", .track_name = "catalog"},
+            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1"},
+            TrackDescription{.track_id = 2, .handler_type = "soun", .codec = "mp4a.40.2", .sample_entry_type = "mp4a", .track_name = "soun_2"},
+        },
+        .objects = {
+            CmsfObject{
+                .kind = CmsfObjectKind::kInitialization,
+                .track_name = "catalog",
+                .group_id = 0,
+                .object_id = 0,
+                .owned_payload = {'I', 'N', 'I', 'T'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "vide_1",
+                .group_id = 1,
+                .object_id = 0,
+                .media_time_us = 0,
+                .owned_payload = {'V', '0'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "soun_2",
+                .group_id = 1,
+                .object_id = 0,
+                .media_time_us = 0,
+                .owned_payload = {'A', '0'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "vide_1",
+                .group_id = 2,
+                .object_id = 0,
+                .media_time_us = 1000,
+                .owned_payload = {'V', '1'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "soun_2",
+                .group_id = 2,
+                .object_id = 0,
+                .media_time_us = 1000,
+                .owned_payload = {'A', '1'},
+            },
+        },
+    };
+}
+
 }  // namespace
 
 int main() {
@@ -506,8 +560,9 @@ int main() {
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70, 0x00}),
                      "expected namespace write to use the configured track namespace");
         ok &= expect(message_type(transport.writes[2].bytes) == 0x04, "expected first SUBSCRIBE_OK");
-        ok &= expect(transport.writes[3].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-        ok &= expect(!transport.writes[3].bytes.empty() && transport.writes[3].bytes.front() == 0x14,
+        ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected second SUBSCRIBE_OK");
+        ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
+        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x14,
                      "expected first object stream to use a subgroup header with explicit subgroup ID");
         std::uint64_t stream_type = 0;
         std::uint64_t track_alias = 0;
@@ -517,7 +572,7 @@ int main() {
         std::uint64_t object_id_delta = 0;
         std::uint64_t payload_length = 0;
         std::vector<std::uint8_t> payload;
-        ok &= expect(decode_object_stream_fields(transport.writes[3].bytes,
+        ok &= expect(decode_object_stream_fields(transport.writes[4].bytes,
                                                  stream_type,
                                                  track_alias,
                                                  group_id,
@@ -534,14 +589,12 @@ int main() {
         ok &= expect(payload_length == 4, "expected catalog payload length to be encoded after object id delta");
         ok &= expect(payload == std::vector<std::uint8_t>({'I', 'N', 'I', 'T'}),
                      "expected catalog payload bytes after subgroup object fields");
-        ok &= expect(transport.writes[3].fin, "expected first object stream write to set FIN");
-        ok &= expect(message_type(transport.writes[4].bytes) == 0x0b, "expected first PUBLISH_DONE");
-        ok &= expect(message_type(transport.writes[5].bytes) == 0x04, "expected second SUBSCRIBE_OK");
-        ok &= expect(transport.writes[6].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-        ok &= expect(!transport.writes[6].bytes.empty() && transport.writes[6].bytes.front() == 0x14,
+        ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
+        ok &= expect(transport.writes[5].stream_id == 6, "expected second object stream to be unidirectional stream 6");
+        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x14,
                      "expected second object stream to use a subgroup header with explicit subgroup ID");
         payload.clear();
-        ok &= expect(decode_object_stream_fields(transport.writes[6].bytes,
+        ok &= expect(decode_object_stream_fields(transport.writes[5].bytes,
                                                  stream_type,
                                                  track_alias,
                                                  group_id,
@@ -557,13 +610,15 @@ int main() {
         ok &= expect(payload_length == 3, "expected media payload length to be encoded after object id delta");
         ok &= expect(payload == std::vector<std::uint8_t>({'M', 'S', 'G'}),
                      "expected media payload bytes after subgroup object fields");
-        ok &= expect(transport.writes[6].fin, "expected second object stream write to set FIN");
+        ok &= expect(transport.writes[5].fin, "expected second object stream write to set FIN");
+        ok &= expect(message_type(transport.writes[6].bytes) == 0x0b, "expected first PUBLISH_DONE");
         ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second PUBLISH_DONE");
         ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
         ok &= expect(transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70}),
                      "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
-        ok &= expect(!transport.read_timeouts.empty() && transport.read_timeouts.back() == std::chrono::seconds(3),
+        ok &= expect(std::find(transport.read_timeouts.begin(), transport.read_timeouts.end(), std::chrono::seconds(3)) !=
+                         transport.read_timeouts.end(),
                      "expected default subscriber wait timeout to be 3 seconds");
     }
 
@@ -621,6 +676,109 @@ int main() {
         ok &= expect(status.ok, "expected publish to succeed with delayed media subscriber");
         ok &= expect(!saw_media_before_media_subscribe,
                      "expected forward=0 to avoid sending media before the media subscriber arrives");
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 12,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_subscribe_message(2, kTestTrackNamespace, "vide_1", 0));
+        transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "soun_2", 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected multitrack subscribe session connect to succeed");
+
+        status = session.publish(make_multitrack_plan(DraftVersion::kDraft14));
+        ok &= expect(status.ok, "expected publish to interleave multitrack subscribed objects");
+
+        std::vector<std::vector<std::uint8_t>> served_payloads;
+        for (const auto& write : transport.writes) {
+            if (write.stream_id == 0) {
+                continue;
+            }
+            std::uint64_t stream_type = 0;
+            std::uint64_t track_alias = 0;
+            std::uint64_t group_id = 0;
+            std::uint64_t subgroup_id = 0;
+            std::uint64_t publisher_priority = 0;
+            std::uint64_t object_id_delta = 0;
+            std::uint64_t payload_length = 0;
+            std::vector<std::uint8_t> payload;
+            if (!decode_object_stream_fields(write.bytes,
+                                             stream_type,
+                                             track_alias,
+                                             group_id,
+                                             subgroup_id,
+                                             publisher_priority,
+                                             object_id_delta,
+                                             payload_length,
+                                             payload)) {
+                continue;
+            }
+            served_payloads.push_back(payload);
+        }
+        ok &= expect(served_payloads == std::vector<std::vector<std::uint8_t>>({{'V', '0'}, {'A', '0'}, {'V', '1'}, {'A', '1'}}),
+                     "expected subscribed multitrack payloads to alternate by media order");
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 12,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_subscribe_message(2, kTestTrackNamespace, "vide_1", 0));
+
+        bool queued_delayed_audio_subscribe = false;
+        transport.on_read = [&](const MockTransport& current, std::uint64_t stream_id) {
+            if (queued_delayed_audio_subscribe || stream_id != 0 || current.read_count != 4) {
+                return;
+            }
+            transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "soun_2", 0));
+            queued_delayed_audio_subscribe = true;
+        };
+
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected delayed multitrack subscribe session connect to succeed");
+
+        status = session.publish(make_multitrack_plan(DraftVersion::kDraft14));
+        ok &= expect(status.ok, "expected delayed second multitrack subscribe to succeed");
+
+        std::vector<std::vector<std::uint8_t>> served_payloads;
+        for (const auto& write : transport.writes) {
+            if (write.stream_id == 0) {
+                continue;
+            }
+            std::uint64_t stream_type = 0;
+            std::uint64_t track_alias = 0;
+            std::uint64_t group_id = 0;
+            std::uint64_t subgroup_id = 0;
+            std::uint64_t publisher_priority = 0;
+            std::uint64_t object_id_delta = 0;
+            std::uint64_t payload_length = 0;
+            std::vector<std::uint8_t> payload;
+            if (!decode_object_stream_fields(write.bytes,
+                                             stream_type,
+                                             track_alias,
+                                             group_id,
+                                             subgroup_id,
+                                             publisher_priority,
+                                             object_id_delta,
+                                             payload_length,
+                                             payload)) {
+                continue;
+            }
+            served_payloads.push_back(payload);
+        }
+        ok &= expect(served_payloads == std::vector<std::vector<std::uint8_t>>({{'V', '0'}, {'A', '0'}, {'V', '1'}, {'A', '1'}}),
+                     "expected delayed second multitrack subscribe to join future interleaved media order");
     }
 
     {
@@ -758,14 +916,14 @@ int main() {
             ok &= expect(message_type(transport.writes[3].bytes) == 0x1d, "expected second downgraded PUBLISH");
             ok &= expect(message_type(transport.writes[4].bytes) == 0x04,
                          "expected downgraded catalog SUBSCRIBE_OK");
-            ok &= expect(transport.writes[5].stream_id == 2,
-                         "expected downgraded catalog object stream on stream 2");
-            ok &= expect(message_type(transport.writes[6].bytes) == 0x0b,
-                         "expected downgraded catalog PUBLISH_DONE");
-            ok &= expect(message_type(transport.writes[7].bytes) == 0x04,
+            ok &= expect(message_type(transport.writes[5].bytes) == 0x04,
                          "expected downgraded media SUBSCRIBE_OK");
-            ok &= expect(transport.writes[8].stream_id == 6,
+            ok &= expect(transport.writes[6].stream_id == 2,
+                         "expected downgraded catalog object stream on stream 2");
+            ok &= expect(transport.writes[7].stream_id == 6,
                          "expected downgraded media object stream on stream 6");
+            ok &= expect(message_type(transport.writes[8].bytes) == 0x0b,
+                         "expected downgraded catalog PUBLISH_DONE");
             ok &= expect(message_type(transport.writes[9].bytes) == 0x0b,
                          "expected downgraded media PUBLISH_DONE");
             ok &= expect(message_type(transport.writes[10].bytes) == 0x09,
@@ -813,10 +971,10 @@ int main() {
                                                                                   0x70, 0x00}),
                  "expected draft-16 namespace write to use the configured track namespace");
     ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
-    ok &= expect(draft16_transport.writes[3].stream_id == 2, "expected first draft-16 object stream");
-    ok &= expect(message_type(draft16_transport.writes[4].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
-    ok &= expect(message_type(draft16_transport.writes[5].bytes) == 0x04, "expected second draft-16 SUBSCRIBE_OK");
-    ok &= expect(draft16_transport.writes[6].stream_id == 6, "expected second draft-16 object stream");
+    ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x04, "expected second draft-16 SUBSCRIBE_OK");
+    ok &= expect(draft16_transport.writes[4].stream_id == 2, "expected first draft-16 object stream");
+    ok &= expect(draft16_transport.writes[5].stream_id == 6, "expected second draft-16 object stream");
+    ok &= expect(message_type(draft16_transport.writes[6].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
     ok &= expect(message_type(draft16_transport.writes[7].bytes) == 0x0b, "expected second draft-16 PUBLISH_DONE");
     ok &= expect(message_type(draft16_transport.writes[8].bytes) == 0x09,
                  "expected draft-16 PUBLISH_NAMESPACE_DONE");
@@ -914,8 +1072,9 @@ int main() {
         status = timeout_session.publish(
             materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
         ok &= expect(status.ok, "expected publish to succeed with custom subscriber timeout");
-        ok &= expect(!timeout_transport.read_timeouts.empty() &&
-                         timeout_transport.read_timeouts.back() == std::chrono::seconds(11),
+        ok &= expect(std::find(timeout_transport.read_timeouts.begin(),
+                               timeout_transport.read_timeouts.end(),
+                               std::chrono::seconds(11)) != timeout_transport.read_timeouts.end(),
                      "expected custom subscriber timeout to reach transport reads");
     }
 

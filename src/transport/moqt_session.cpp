@@ -1,6 +1,7 @@
 #include "openmoq/publisher/transport/moqt_session.h"
 #include "openmoq/publisher/transport/moqt_control_messages.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -188,6 +189,14 @@ struct PublishedTrack {
     std::size_t largest_group_id = 0;
     std::size_t largest_object_id = 0;
     bool content_exists = false;
+};
+
+struct ActiveSubscription {
+    SubscribeMessage subscribe;
+    PublishedTrack track;
+    std::uint64_t stream_count = 0;
+    std::size_t next_object_index = 0;
+    bool completed = false;
 };
 
 std::vector<PublishedTrack> build_published_tracks(const openmoq::publisher::PublishPlan& plan) {
@@ -441,6 +450,34 @@ bool decode_legacy_subscribe_update_message(std::span<const std::uint8_t> bytes,
     return false;
 }
 
+bool find_next_matching_object_index(const openmoq::publisher::PublishPlan& plan,
+                                     const SubscribeMessage& subscribe,
+                                     std::size_t start_index,
+                                     std::size_t& object_index) {
+    for (std::size_t index = start_index; index < plan.objects.size(); ++index) {
+        const auto& object = plan.objects[index];
+        if (object.track_name == subscribe.track_name && object_matches_filter(object, subscribe)) {
+            object_index = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+TransportStatus finalize_subscription(PublisherTransport& transport,
+                                      std::uint64_t control_stream_id,
+                                      std::uint64_t request_id,
+                                      std::uint64_t stream_count,
+                                      std::set<std::uint64_t>& completed_request_ids) {
+    const TransportStatus write_status = transport.write_stream(
+        control_stream_id, encode_publish_done_message(request_id, stream_count), false);
+    if (!write_status.ok) {
+        return write_status;
+    }
+    completed_request_ids.insert(request_id);
+    return TransportStatus::success();
+}
+
 TransportStatus serve_subscriptions(PublisherTransport& transport,
                                     std::uint64_t control_stream_id,
                                     const openmoq::publisher::PublishPlan& plan,
@@ -456,8 +493,12 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
     std::set<std::uint64_t> completed_request_ids;
     std::map<std::uint64_t, SubscribeMessage> pending_subscriptions;
     std::deque<std::uint64_t> pending_subscription_order;
+    std::map<std::uint64_t, ActiveSubscription> active_subscriptions;
     bool fin = false;
     bool served_any_subscription = false;
+    std::uint64_t first_media_time_us = 0;
+    bool first_media_time_set = false;
+    const auto pacing_start = std::chrono::steady_clock::now();
     NamespaceMessage namespace_message{
         .draft = draft,
         .track_namespace = std::string(track_namespace),
@@ -489,11 +530,35 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                                                             subscribe_update)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE");
                 }
-                auto pending_it = pending_subscriptions.find(subscribe_update.subscription_request_id);
-                if (pending_it == pending_subscriptions.end() ||
-                    completed_request_ids.contains(subscribe_update.subscription_request_id) ||
-                    !apply_subscribe_update(pending_it->second, subscribe_update)) {
+                if (completed_request_ids.contains(subscribe_update.subscription_request_id)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
+                }
+
+                auto pending_it = pending_subscriptions.find(subscribe_update.subscription_request_id);
+                if (pending_it != pending_subscriptions.end()) {
+                    if (!apply_subscribe_update(pending_it->second, subscribe_update)) {
+                        return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
+                    }
+                    buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                    continue;
+                }
+
+                auto active_it = active_subscriptions.find(subscribe_update.subscription_request_id);
+                if (active_it == active_subscriptions.end() ||
+                    !apply_subscribe_update(active_it->second.subscribe, subscribe_update)) {
+                    return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
+                }
+
+                std::size_t next_object_index = 0;
+                if (find_next_matching_object_index(plan,
+                                                    active_it->second.subscribe,
+                                                    active_it->second.next_object_index,
+                                                    next_object_index)) {
+                    active_it->second.next_object_index = next_object_index;
+                    active_it->second.completed = false;
+                } else {
+                    active_it->second.next_object_index = plan.objects.size();
+                    active_it->second.completed = true;
                 }
                 buffer.erase(buffer.begin(), buffer.begin() + message_size);
                 continue;
@@ -535,7 +600,26 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             return TransportStatus::failure("received unsupported control request");
         }
 
-        while ((buffer.empty() || fin) && !pending_subscription_order.empty()) {
+        if (!fin && !pending_subscription_order.empty()) {
+            std::vector<std::uint8_t> chunk;
+            bool immediate_fin = false;
+            const TransportStatus read_status =
+                transport.read_stream(control_stream_id, chunk, immediate_fin, std::chrono::milliseconds(0));
+            if (read_status.ok) {
+                if (trace_enabled()) {
+                    std::cerr << "[moqt-session] control chunk fin=" << (immediate_fin ? 1 : 0) << " bytes=["
+                              << hex_dump(chunk) << "]" << std::endl;
+                }
+                buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+                fin = immediate_fin;
+                continue;
+            }
+            if (read_status.message != "timed out waiting for stream data") {
+                return read_status;
+            }
+        }
+
+        while (!pending_subscription_order.empty()) {
             const std::uint64_t request_id = pending_subscription_order.front();
             pending_subscription_order.pop_front();
             auto pending_it = pending_subscriptions.find(request_id);
@@ -558,7 +642,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 continue;
             }
 
-            TransportStatus write_status =
+            const TransportStatus write_status =
                 transport.write_stream(control_stream_id,
                                        encode_subscribe_ok_message(draft,
                                                                    subscribe.request_id,
@@ -574,47 +658,132 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             std::cerr << "[moqt-session] accepted subscribe track=" << subscribe.track_name
                       << " request_id=" << subscribe.request_id << '\n';
 
-            std::uint64_t stream_count = 0;
-            std::uint64_t first_media_time_us = 0;
-            bool first_media_time_set = false;
-            const auto pacing_start = std::chrono::steady_clock::now();
-            for (const auto& object : plan.objects) {
-                if (object.track_name != subscribe.track_name || !object_matches_filter(object, subscribe)) {
+            ActiveSubscription active{
+                .subscribe = subscribe,
+                .track = track_it->second,
+                .stream_count = 0,
+                .next_object_index = 0,
+                .completed = false,
+            };
+
+            std::size_t next_object_index = 0;
+            if (find_next_matching_object_index(plan, active.subscribe, 0, next_object_index)) {
+                active.next_object_index = next_object_index;
+                active_subscriptions.insert_or_assign(request_id, std::move(active));
+                continue;
+            }
+
+            const TransportStatus finalize_status =
+                finalize_subscription(transport, control_stream_id, request_id, 0, completed_request_ids);
+            if (!finalize_status.ok) {
+                return finalize_status;
+            }
+            served_any_subscription = true;
+        }
+
+        if (!active_subscriptions.empty()) {
+            std::vector<std::uint8_t> chunk;
+            bool immediate_fin = false;
+            const TransportStatus read_status =
+                transport.read_stream(control_stream_id, chunk, immediate_fin, std::chrono::milliseconds(0));
+            if (read_status.ok) {
+                if (trace_enabled()) {
+                    std::cerr << "[moqt-session] control chunk fin=" << (immediate_fin ? 1 : 0) << " bytes=["
+                              << hex_dump(chunk) << "]" << std::endl;
+                }
+                buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+                fin = immediate_fin;
+                continue;
+            }
+            if (read_status.message != "timed out waiting for stream data") {
+                return read_status;
+            }
+
+            std::size_t next_plan_index = plan.objects.size();
+            for (const auto& [request_id, active] : active_subscriptions) {
+                static_cast<void>(request_id);
+                if (active.completed) {
                     continue;
                 }
+                next_plan_index = std::min(next_plan_index, active.next_object_index);
+            }
+
+            if (next_plan_index < plan.objects.size()) {
+                const auto& object = plan.objects[next_plan_index];
                 const auto payload = object_payload(object);
                 if (payload.empty()) {
                     return TransportStatus::failure("transport publish requires materialized object payloads");
                 }
+
                 if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
                     first_media_time_us = object.media_time_us;
                     first_media_time_set = true;
                 }
                 pace_until(pacing_start, first_media_time_us, object, paced);
-                std::uint64_t stream_id = 0;
-                write_status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-                if (!write_status.ok) {
-                    return write_status;
+
+                for (auto& [request_id, active] : active_subscriptions) {
+                    if (active.next_object_index != next_plan_index) {
+                        continue;
+                    }
+
+                    std::uint64_t stream_id = 0;
+                    TransportStatus write_status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    write_status = transport.write_stream(
+                        stream_id, encode_object_stream(draft, active.track.alias, object, payload), true);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    std::cerr << "[moqt-session] served object track=" << object.track_name
+                              << " group=" << object.group_id << " object=" << object.object_id
+                              << " bytes=" << object_payload_size(object) << '\n';
+                    ++active.stream_count;
+
+                    std::size_t upcoming_object_index = 0;
+                    if (find_next_matching_object_index(plan,
+                                                        active.subscribe,
+                                                        next_plan_index + 1,
+                                                        upcoming_object_index)) {
+                        active.next_object_index = upcoming_object_index;
+                    } else {
+                        static_cast<void>(request_id);
+                        active.completed = true;
+                        active.next_object_index = plan.objects.size();
+                    }
                 }
-                write_status = transport.write_stream(stream_id,
-                                                      encode_object_stream(draft, track_it->second.alias, object, payload),
-                                                      true);
-                if (!write_status.ok) {
-                    return write_status;
-                }
-                std::cerr << "[moqt-session] served object track=" << object.track_name << " group=" << object.group_id
-                          << " object=" << object.object_id << " bytes=" << object_payload_size(object) << '\n';
-                ++stream_count;
+
+                served_any_subscription = true;
+                continue;
             }
 
-            write_status =
-                transport.write_stream(control_stream_id, encode_publish_done_message(subscribe.request_id, stream_count), false);
-            if (!write_status.ok) {
-                return write_status;
+            std::vector<std::uint64_t> completed_request_ids_to_finalize;
+            for (const auto& [request_id, active] : active_subscriptions) {
+                if (active.completed) {
+                    completed_request_ids_to_finalize.push_back(request_id);
+                }
             }
-
-            completed_request_ids.insert(subscribe.request_id);
-            served_any_subscription = true;
+            for (const auto request_id : completed_request_ids_to_finalize) {
+                const auto active_it = active_subscriptions.find(request_id);
+                if (active_it == active_subscriptions.end()) {
+                    continue;
+                }
+                const TransportStatus finalize_status =
+                    finalize_subscription(transport,
+                                          control_stream_id,
+                                          request_id,
+                                          active_it->second.stream_count,
+                                          completed_request_ids);
+                if (!finalize_status.ok) {
+                    return finalize_status;
+                }
+                active_subscriptions.erase(active_it);
+            }
+            if (!completed_request_ids_to_finalize.empty()) {
+                served_any_subscription = true;
+                continue;
+            }
         }
 
         if (fin) {
