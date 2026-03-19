@@ -302,10 +302,10 @@ int main() {
 
     const auto video_init_bytes = base64_decode(video_init_data);
     const auto audio_init_bytes = base64_decode(audio_init_data);
-    ok &= expect(multitrack_plan.track_initializations[0].codec_payload == video_init_bytes,
-                 "expected emitted video codec init payload to match catalog initData");
-    ok &= expect(multitrack_plan.track_initializations[1].codec_payload == audio_init_bytes,
-                 "expected emitted audio codec init payload to match catalog initData");
+    ok &= expect(multitrack_plan.track_initializations[0].init_segment == video_init_bytes,
+                 "expected emitted video init segment to match catalog initData");
+    ok &= expect(multitrack_plan.track_initializations[1].init_segment == audio_init_bytes,
+                 "expected emitted audio init segment to match catalog initData");
     const auto video_init_boxes = parse_mp4_boxes(multitrack_plan.track_initializations[0].init_segment);
     const auto audio_init_boxes = parse_mp4_boxes(multitrack_plan.track_initializations[1].init_segment);
     const auto video_init_tracks = extract_tracks(video_init_boxes, multitrack_plan.track_initializations[0].init_segment);
@@ -314,13 +314,12 @@ int main() {
     ok &= expect(audio_init_tracks.size() == 1, "expected one track in emitted audio init segment");
     ok &= expect(video_init_tracks.front().codec == "avc1.64000C", "expected avc1-only emitted video init segment");
     ok &= expect(audio_init_tracks.front().codec == "mp4a.40.2", "expected mp4a-only emitted audio init segment");
-    ok &= expect(bytes_equal(video_init_bytes, {0x00, 0x00, 0x00, 0x0d, 0x61, 0x76, 0x63, 0x43, 0x01, 0x64, 0x00, 0x0c, 0xff}),
-                 "expected video initData to contain only the avcC box");
-    ok &= expect(bytes_equal(audio_init_bytes, {0x00, 0x00, 0x00, 0x20, 0x65, 0x73, 0x64, 0x73,
-                                                0x00, 0x00, 0x00, 0x00, 0x03, 0x19, 0x00, 0x02,
-                                                0x00, 0x04, 0x11, 0x40, 0x15, 0x00, 0x00, 0x00,
-                                                0x00, 0x00, 0x00, 0x00, 0x05, 0x02, 0x10, 0x10}),
-                 "expected audio initData to contain only the esds box");
+    ok &= expect(video_init_boxes.size() == 2, "expected video initData to contain top-level boxes");
+    ok &= expect(audio_init_boxes.size() == 2, "expected audio initData to contain top-level boxes");
+    ok &= expect(video_init_boxes[0].type == "ftyp" && video_init_boxes[1].type == "moov",
+                 "expected video initData to contain ftyp and moov boxes");
+    ok &= expect(audio_init_boxes[0].type == "ftyp" && audio_init_boxes[1].type == "moov",
+                 "expected audio initData to contain ftyp and moov boxes");
 
     return ok ? 0 : 1;
 }

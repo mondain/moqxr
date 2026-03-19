@@ -340,7 +340,7 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
             .codec_payload = codec_init_data,
             .init_segment = init_segment,
         });
-        init_data_by_track.emplace(track.track_name, base64_encode(codec_init_data));
+        init_data_by_track.emplace(track.track_name, base64_encode(init_segment));
     }
 
     std::ostringstream catalog;

@@ -165,7 +165,7 @@ The catalog format includes:
 - `renderGroup` and `isLive`
 - `width` and `height` for video tracks
 - `sampleRate` and `channelCount` for audio tracks
-- base64-encoded codec `initData` per track
+- base64-encoded per-track CMAF initialization segment (`ftyp` + `moov`) in `initData`
 
 ### Relay interoperability test
 
