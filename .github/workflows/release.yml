@@ -1,0 +1,83 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional release tag to publish, for example v0.1.0"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.release_tag }}"
+          if [[ -z "${version}" ]]; then
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ -z "${version}" || "${GITHUB_REF_TYPE}" != "tag" && -z "${{ github.event.inputs.release_tag }}" ]]; then
+            version="manual-${GITHUB_RUN_NUMBER}"
+          fi
+
+          package_root="openmoq-publisher-${version}-${RUNNER_OS}"
+          mkdir -p "${package_root}"
+          cp build/openmoq-publisher "${package_root}/"
+          cp README.md LICENSE "${package_root}/"
+          cp -R docs "${package_root}/docs"
+
+          archive="${package_root}.tar.gz"
+          tar -czf "${archive}" "${package_root}"
+          if [[ "${version}" == v* ]]; then
+            echo "release_enabled=true" >> "${GITHUB_ENV}"
+          else
+            echo "release_enabled=false" >> "${GITHUB_ENV}"
+          fi
+          echo "release_tag=${version}" >> "${GITHUB_ENV}"
+          echo "artifact_name=${package_root}" >> "${GITHUB_ENV}"
+          echo "archive=${archive}" >> "${GITHUB_ENV}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+          path: ${{ env.archive }}
+          if-no-files-found: error
+
+      - name: Attach assets to GitHub release
+        if: env.release_enabled == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.release_tag }}
+          name: ${{ env.release_tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: ${{ env.archive }}

@@ -48,6 +48,15 @@ This keeps the project aligned with CMAF-style publication while reusing the sam
 - `docs`: protocol notes and design references
 - `docs/transport-plan.md`: picoquic integration plan and implementation checklist
 - `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux and macOS
+- `.github/workflows/release.yml`: GitHub Actions release-build workflow that uploads Linux and macOS archives
+
+## Release builds
+
+For users who just want a prebuilt binary, GitHub Actions publishes release archives for Linux and macOS:
+
+- pushing a `v*` tag builds release artifacts and attaches them to the matching GitHub Release
+- running the `Release Builds` workflow manually uploads the same archives as workflow artifacts
+- manual runs can also publish a GitHub Release when you provide a `release_tag` such as `v0.1.0`
 
 ## Build
 
