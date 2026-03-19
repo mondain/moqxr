@@ -936,7 +936,7 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
                              .draft = draft,
                              .authority = authority,
                              .path = endpoint_->path,
-                             .max_request_id = 0,
+                             .max_request_id = 100,
                          }),
                          false);
     if (!status.ok) {
