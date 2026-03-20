@@ -49,6 +49,7 @@ jobs:
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           -DOPENMOQ_PICOQUIC_SOURCE_DIR="${{ github.workspace }}/third_party/picoquic"
           -DOPENMOQ_PICOTLS_SOURCE_DIR="${{ github.workspace }}/third_party/picotls"
           -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF

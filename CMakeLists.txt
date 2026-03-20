@@ -23,6 +23,9 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         "Path to a picotls source checkout")
 
     if(EXISTS "${OPENMOQ_PICOTLS_SOURCE_DIR}/CMakeLists.txt")
+        # picotls still declares CMake 2.8 compatibility; newer CMake releases
+        # require an explicit policy floor when configuring that subproject.
+        set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "" FORCE)
         set(PICOQUIC_FETCH_PTLS ON CACHE BOOL "" FORCE)
         set(FETCHCONTENT_SOURCE_DIR_PICOTLS "${OPENMOQ_PICOTLS_SOURCE_DIR}" CACHE PATH "" FORCE)
         set(picoquic_BUILD_TESTS OFF CACHE BOOL "" FORCE)
