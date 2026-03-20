@@ -562,8 +562,8 @@ int main() {
         ok &= expect(message_type(transport.writes[2].bytes) == 0x04, "expected first SUBSCRIBE_OK");
         ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected second SUBSCRIBE_OK");
         ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x14,
-                     "expected first object stream to use a subgroup header with explicit subgroup ID");
+        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x1c,
+                     "expected first object stream to use a subgroup header with end-of-group");
         std::uint64_t stream_type = 0;
         std::uint64_t track_alias = 0;
         std::uint64_t group_id = 0;
@@ -582,7 +582,7 @@ int main() {
                                                  payload_length,
                                                  payload),
                      "expected first object stream to decode");
-        ok &= expect(stream_type == 0x14, "expected subgroup stream type");
+        ok &= expect(stream_type == 0x1c, "expected subgroup stream type with end-of-group");
         ok &= expect(group_id == 0, "expected catalog group id");
         ok &= expect(subgroup_id == 0, "expected catalog subgroup id");
         ok &= expect(object_id_delta == 0, "expected catalog object id delta before payload length");
@@ -591,8 +591,8 @@ int main() {
                      "expected catalog payload bytes after subgroup object fields");
         ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
         ok &= expect(transport.writes[5].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x14,
-                     "expected second object stream to use a subgroup header with explicit subgroup ID");
+        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x1c,
+                     "expected second object stream to use a subgroup header with end-of-group");
         payload.clear();
         ok &= expect(decode_object_stream_fields(transport.writes[5].bytes,
                                                  stream_type,

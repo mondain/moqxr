@@ -29,6 +29,7 @@ constexpr std::uint64_t kPublishType = 0x1d;
 constexpr std::uint64_t kPublishOkType = 0x1e;
 constexpr std::uint64_t kPublishErrorType = 0x1f;
 constexpr std::uint64_t kSubgroupHeaderType = 0x14;
+constexpr std::uint64_t kSubgroupHeaderEndOfGroupBit = 0x08;
 constexpr std::uint64_t kSetupParamPath = 0x1;
 constexpr std::uint64_t kSetupParamMaxRequestId = 0x2;
 constexpr std::uint64_t kSetupParamAuthority = 0x5;
@@ -707,12 +708,15 @@ std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceM
 std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
                                                std::uint64_t track_alias,
                                                const CmsfObject& object,
+                                               bool end_of_group,
                                                std::span<const std::uint8_t> payload) {
     static_cast<void>(draft);
+    const std::uint64_t stream_type =
+        kSubgroupHeaderType | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
 
     if (draft == DraftVersion::kDraft14) {
         std::vector<std::uint8_t> stream_bytes;
-        append_varint(stream_bytes, kSubgroupHeaderType);
+        append_varint(stream_bytes, stream_type);
         append_varint(stream_bytes, track_alias);
         append_varint(stream_bytes, object.group_id);
         append_varint(stream_bytes, 0);
@@ -724,7 +728,7 @@ std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
     }
 
     std::vector<std::uint8_t> stream_bytes;
-    append_varint(stream_bytes, kSubgroupHeaderType);
+    append_varint(stream_bytes, stream_type);
     append_varint(stream_bytes, track_alias);
     append_varint(stream_bytes, object.group_id);
     append_varint(stream_bytes, 0);
