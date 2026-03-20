@@ -51,7 +51,24 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         set(BUILD_PQBENCH OFF CACHE BOOL "" FORCE)
         set(BUILD_LOGLIB OFF CACHE BOOL "" FORCE)
         set(BUILD_LOGREADER OFF CACHE BOOL "" FORCE)
+        if(APPLE)
+            # picotls appends literal "(" and ")" list items when Brotli is
+            # discovered via pkg-config. On macOS, CMake rejects the resulting
+            # malformed source-prefixed link directories during generate. Scope
+            # pkg-config away from system package metadata while picotls configures.
+            set(_openmoq_saved_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
+            set(_openmoq_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+            set(ENV{PKG_CONFIG_LIBDIR} "${CMAKE_CURRENT_BINARY_DIR}/openmoq-empty-pkgconfig")
+            set(ENV{PKG_CONFIG_PATH} "${CMAKE_CURRENT_BINARY_DIR}/openmoq-empty-pkgconfig")
+            file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/openmoq-empty-pkgconfig")
+        endif()
         add_subdirectory("${OPENMOQ_PICOQUIC_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/picoquic")
+        if(APPLE)
+            set(ENV{PKG_CONFIG_LIBDIR} "${_openmoq_saved_pkg_config_libdir}")
+            set(ENV{PKG_CONFIG_PATH} "${_openmoq_saved_pkg_config_path}")
+            unset(_openmoq_saved_pkg_config_libdir)
+            unset(_openmoq_saved_pkg_config_path)
+        endif()
         # picotls currently injects literal "(" and ")" entries into its link
         # directories list when Brotli is discovered via pkg-config. CMake on
         # macOS rejects those malformed source-prefixed paths during generate.
