@@ -18,6 +18,23 @@ set(OPENMOQ_PICOQUIC_SOURCE_DIR "/media/mondain/terrorbyte/workspace/github/pico
 
 set(OPENMOQ_HAS_PICOQUIC OFF)
 
+function(openmoq_sanitize_target_link_directories target_name)
+    if(NOT TARGET "${target_name}")
+        return()
+    endif()
+
+    foreach(property_name IN ITEMS INTERFACE_LINK_DIRECTORIES LINK_DIRECTORIES)
+        get_target_property(property_value "${target_name}" "${property_name}")
+        if(NOT property_value OR property_value STREQUAL "property_value-NOTFOUND")
+            continue()
+        endif()
+
+        set(filtered_value "${property_value}")
+        list(FILTER filtered_value EXCLUDE REGEX "^\\($|^\\)$")
+        set_target_properties("${target_name}" PROPERTIES "${property_name}" "${filtered_value}")
+    endforeach()
+endfunction()
+
 if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists.txt")
     set(OPENMOQ_PICOTLS_SOURCE_DIR "${OPENMOQ_PICOQUIC_SOURCE_DIR}/../picotls" CACHE PATH
         "Path to a picotls source checkout")
@@ -35,6 +52,10 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         set(BUILD_LOGLIB OFF CACHE BOOL "" FORCE)
         set(BUILD_LOGREADER OFF CACHE BOOL "" FORCE)
         add_subdirectory("${OPENMOQ_PICOQUIC_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/picoquic")
+        # picotls currently injects literal "(" and ")" entries into its link
+        # directories list when Brotli is discovered via pkg-config. CMake on
+        # macOS rejects those malformed source-prefixed paths during generate.
+        openmoq_sanitize_target_link_directories(picotls-core)
         set(OPENMOQ_HAS_PICOQUIC ON)
     else()
         message(STATUS "picoquic checkout found, but picotls source was not found; building without picoquic integration")
