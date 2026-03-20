@@ -57,6 +57,7 @@ For users who just want a prebuilt binary, GitHub Actions publishes release arch
 - pushing a `v*` tag builds release artifacts and attaches them to the matching GitHub Release
 - running the `Release Builds` workflow manually uploads the same archives as workflow artifacts
 - manual runs can also publish a GitHub Release when you provide a `release_tag` such as `v0.1.0`
+- both CI and release workflows check out `private-octopus/picoquic` plus `private-octopus/picotls`, so published binaries include the picoquic transport path instead of falling back to a local-inspection-only build
 
 ## Build
 
@@ -262,6 +263,9 @@ The publisher’s preferred fast path is already fragmented MP4 input. You can g
 
 ```bash
 ffmpeg -i input.mp4 \
+  -map 0:v -map 0:a \
+  -map_metadata -1 \
+  -sn -dn \
   -c:v copy \
   -c:a copy \
   -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
@@ -272,6 +276,9 @@ If the source codecs are not already compatible, re-encode instead of copying. F
 
 ```bash
 ffmpeg -i input.mov \
+  -map 0:v -map 0:a \
+  -map_metadata -1 \
+  -sn -dn \
   -c:v libx264 -preset medium -g 48 -keyint_min 48 \
   -c:a aac -profile:a aac_low -b:a 128k \
   -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
@@ -280,6 +287,9 @@ ffmpeg -i input.mov \
 
 Practical notes:
 
+- `-map 0:v -map 0:a` keeps only video and audio streams, excluding subtitle and other non-A/V tracks
+- `-sn -dn` explicitly disables subtitle and data or text streams
+- `-map_metadata -1` drops container-level metadata from the output
 - `+frag_keyframe` starts a new fragment on keyframes
 - `+empty_moov` writes initialization metadata up front
 - `+default_base_moof` and `+separate_moof` produce a layout that is easier for fragmented-MP4 pipelines to consume

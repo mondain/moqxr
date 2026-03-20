@@ -22,13 +22,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Checkout picoquic
+        uses: actions/checkout@v5
+        with:
+          repository: private-octopus/picoquic
+          ref: master
+          path: third_party/picoquic
+
+      - name: Checkout picotls
+        uses: actions/checkout@v5
+        with:
+          repository: private-octopus/picotls
+          ref: master
+          path: third_party/picotls
+          submodules: recursive
+
       - name: Show toolchain
         run: |
           cmake --version
           c++ --version
 
       - name: Configure
-        run: cmake -S . -B build
+        run: >
+          cmake -S . -B build
+          -DOPENMOQ_PICOQUIC_SOURCE_DIR="${{ github.workspace }}/third_party/picoquic"
+          -DOPENMOQ_PICOTLS_SOURCE_DIR="${{ github.workspace }}/third_party/picotls"
 
       - name: Build
         run: cmake --build build --parallel

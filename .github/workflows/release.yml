@@ -30,8 +30,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Checkout picoquic
+        uses: actions/checkout@v5
+        with:
+          repository: private-octopus/picoquic
+          ref: master
+          path: third_party/picoquic
+
+      - name: Checkout picotls
+        uses: actions/checkout@v5
+        with:
+          repository: private-octopus/picotls
+          ref: master
+          path: third_party/picotls
+          submodules: recursive
+
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DOPENMOQ_PICOQUIC_SOURCE_DIR="${{ github.workspace }}/third_party/picoquic"
+          -DOPENMOQ_PICOTLS_SOURCE_DIR="${{ github.workspace }}/third_party/picotls"
+          -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel
