@@ -36,6 +36,15 @@ std::vector<std::uint8_t> make_box(const std::string& type, const std::vector<st
     return out;
 }
 
+std::vector<std::uint8_t> be32_bytes(std::uint32_t value) {
+    return {
+        static_cast<std::uint8_t>((value >> 24U) & 0xFFU),
+        static_cast<std::uint8_t>((value >> 16U) & 0xFFU),
+        static_cast<std::uint8_t>((value >> 8U) & 0xFFU),
+        static_cast<std::uint8_t>(value & 0xFFU),
+    };
+}
+
 std::vector<std::uint8_t> make_full_box(const std::string& type, const std::vector<std::uint8_t>& payload) {
     std::vector<std::uint8_t> out(4, 0);
     out.insert(out.end(), payload.begin(), payload.end());
@@ -72,6 +81,33 @@ std::vector<std::uint8_t> make_fragmented_test_mp4() {
     const auto moof = make_box("moof", {'m', 'f', 'h', 'd'});
     const auto mdat = make_box("mdat", {1, 2, 3, 4, 5, 6});
     return concat({ftyp, moov, moof, mdat});
+}
+
+std::vector<std::uint8_t> make_multitrack_fragmented_test_mp4() {
+    const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
+    const auto moov = make_box("moov", {});
+
+    auto make_fragment = [](std::uint32_t track_id,
+                            std::uint32_t base_decode_time,
+                            std::uint32_t sample_duration,
+                            std::initializer_list<std::uint8_t> payload_bytes) {
+        const auto tfhd = make_full_box("tfhd", be32_bytes(track_id));
+        const auto tfdt = make_full_box("tfdt", be32_bytes(base_decode_time));
+        const auto trun = make_full_box("trun", concat({be32_bytes(1), be32_bytes(sample_duration)}));
+        const auto traf = make_box("traf", concat({tfhd, tfdt, trun}));
+        const auto moof = make_box("moof", traf);
+        const auto mdat = make_box("mdat", std::vector<std::uint8_t>(payload_bytes));
+        return concat({moof, mdat});
+    };
+
+    return concat({
+        ftyp,
+        moov,
+        make_fragment(1, 0, 1000, {0x10, 0x11}),
+        make_fragment(2, 0, 1000, {0x20, 0x21}),
+        make_fragment(1, 1000, 1000, {0x12, 0x13}),
+        make_fragment(2, 1000, 1000, {0x22, 0x23}),
+    });
 }
 
 std::vector<std::uint8_t> make_progressive_test_mp4() {
@@ -244,6 +280,26 @@ int main() {
     ok &= expect(plan.objects.front().track_name == "catalog", "expected catalog object first");
     ok &= expect(payload_size(segmented.initialization_segment) > 0, "expected fragmented init payload");
     ok &= expect(payload_size(segmented.fragments.front().payload) > 0, "expected fragmented media payload");
+
+    const auto multitrack_fragmented_bytes = make_multitrack_fragmented_test_mp4();
+    ParsedMp4 multitrack_fragmented{
+        .bytes = multitrack_fragmented_bytes,
+        .top_level_boxes = parse_mp4_boxes(multitrack_fragmented_bytes),
+        .tracks = {
+            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1", .timescale = 1000},
+            TrackDescription{.track_id = 2, .handler_type = "soun", .codec = "mp4a.40.2", .sample_entry_type = "mp4a", .track_name = "soun_2", .timescale = 1000},
+        },
+    };
+    const auto segmented_multitrack = segment_for_cmaf(multitrack_fragmented);
+    ok &= expect(segmented_multitrack.fragments.size() == 4, "expected four multitrack fragmented media fragments");
+    ok &= expect(segmented_multitrack.fragments[0].track_name == "vide_1" && segmented_multitrack.fragments[0].sequence == 0,
+                 "expected first video fragment group sequence to start at zero");
+    ok &= expect(segmented_multitrack.fragments[1].track_name == "soun_2" && segmented_multitrack.fragments[1].sequence == 0,
+                 "expected first audio fragment group sequence to start at zero");
+    ok &= expect(segmented_multitrack.fragments[2].track_name == "vide_1" && segmented_multitrack.fragments[2].sequence == 1,
+                 "expected second video fragment group sequence to advance independently");
+    ok &= expect(segmented_multitrack.fragments[3].track_name == "soun_2" && segmented_multitrack.fragments[3].sequence == 1,
+                 "expected second audio fragment group sequence to advance independently");
 
     const auto progressive_bytes = make_progressive_test_mp4();
     ParsedMp4 progressive{

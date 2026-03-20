@@ -123,6 +123,11 @@ This covers:
 - paced send scheduling against fragment media timestamps
 - QUIC varint boundary coverage
 
+Publish-plan numbering note:
+
+- `group_id` is allocated per track, not across all tracks, so interleaved audio and video fragments can both use `0, 1, 2, ...`
+- `object_id` is currently `0` for each emitted fragment because this publisher currently emits one object per group
+
 If you want the packaging and transport tests without the CLI target, use the secondary build tree:
 
 ```bash

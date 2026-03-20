@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -552,15 +553,17 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
             throw std::runtime_error("fragmented MP4 must contain matched moof/mdat pairs");
         }
 
+        std::map<std::string, std::size_t> next_sequence_by_track;
         for (std::size_t index = 0; index < moofs.size(); ++index) {
             if (moofs[index]->span.offset > mdats[index]->span.offset) {
                 throw std::runtime_error("expected moof to precede matching mdat");
             }
             const FragmentTiming timing = fragment_timing(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes);
+            const std::string track_name = fragment_track_name(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes);
 
             segmented.fragments.push_back({
-                .sequence = index,
-                .track_name = fragment_track_name(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes),
+                .sequence = next_sequence_by_track[track_name]++,
+                .track_name = track_name,
                 .start_time_us = timing.start_time_us,
                 .duration_us = timing.duration_us,
                 .payload = {.span = {.offset = moofs[index]->span.offset,
