@@ -198,12 +198,28 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --insecure
 ```
 
+If you need to connect to a relay by IP while still presenting the relay hostname in TLS SNI:
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
+  --input sample.mp4 \
+  --endpoint 203.0.113.10:443 \
+  --sni relay.example.com \
+  --namespace interop \
+  --forward 0 \
+  --timeout 10 \
+  --insecure
+```
+
 Behavior notes:
 
 - `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
+- with `--forward 0`, subscribers are still expected to request tracks explicitly; by default that includes subscribing to `catalog` if they need track discovery
+- `--publish-catalog` keeps `--forward 0` for media tracks but proactively publishes the `catalog` track through the normal `PUBLISH` / `PUBLISH_OK` path so downstream consumers can discover available tracks without first subscribing to `catalog`
 - when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
 - `--forward 1` proactively publishes tracks and objects after namespace setup completes
-- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests
+- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 3 seconds
+- `--sni <value>` overrides the TLS SNI sent to the relay, which is useful when `--endpoint` uses a raw IP address
 - `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
 
 ### Optional picoquic smoke test

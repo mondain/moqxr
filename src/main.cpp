@@ -35,7 +35,12 @@ int main(int argc, char** argv) {
             }
             PicoquicClient transport;
             MoqtSession session(
-                transport, options.track_namespace, options.forward, options.paced, options.subscriber_timeout);
+                transport,
+                options.track_namespace,
+                options.forward,
+                options.publish_catalog,
+                options.paced,
+                options.subscriber_timeout);
 
             TransportStatus status = session.connect(endpoint, options.tls);
             if (!status.ok) {

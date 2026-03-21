@@ -17,6 +17,7 @@ public:
     explicit MoqtSession(PublisherTransport& transport,
                          std::string track_namespace = "media",
                          bool auto_forward = false,
+                         bool publish_catalog = false,
                          bool paced = false,
                          std::chrono::seconds subscriber_timeout = std::chrono::seconds(3));
 
@@ -32,6 +33,7 @@ private:
     PublisherTransport& transport_;
     std::string track_namespace_;
     bool auto_forward_ = false;
+    bool publish_catalog_ = false;
     bool paced_ = false;
     std::chrono::seconds subscriber_timeout_ = std::chrono::seconds(3);
     std::optional<EndpointConfig> endpoint_;

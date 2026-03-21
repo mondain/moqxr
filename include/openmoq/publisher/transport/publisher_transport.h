@@ -27,6 +27,7 @@ struct EndpointConfig {
     std::string host;
     std::uint16_t port = 0;
     std::string alpn = "moq-00";
+    std::string sni;
     std::string path = "/";
 };
 

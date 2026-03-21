@@ -203,14 +203,15 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     return message;
 }
 
-std::vector<std::uint8_t> encode_subscribe_update_message(std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_subscribe_update_message(std::uint64_t request_id,
+                                                          std::uint64_t subscription_request_id = 6) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
-    const std::vector<std::uint8_t> subscription_request_id = encode_varint(6);
+    const std::vector<std::uint8_t> subscription_request_id_bytes = encode_varint(subscription_request_id);
     const std::vector<std::uint8_t> start_group = encode_varint(0);
     const std::vector<std::uint8_t> start_object = encode_varint(0);
     const std::vector<std::uint8_t> end_group_plus_one = encode_varint(1);
     const std::vector<std::uint8_t> parameter_count = encode_varint(0);
-    payload.insert(payload.end(), subscription_request_id.begin(), subscription_request_id.end());
+    payload.insert(payload.end(), subscription_request_id_bytes.begin(), subscription_request_id_bytes.end());
     payload.insert(payload.end(), start_group.begin(), start_group.end());
     payload.insert(payload.end(), start_object.begin(), start_object.end());
     payload.insert(payload.end(), end_group_plus_one.begin(), end_group_plus_one.end());
@@ -819,6 +820,85 @@ int main() {
             .draft = DraftVersion::kDraft14,
             .max_request_id = 8,
         }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_publish_ok_message(DraftVersion::kDraft14, 2, 1));
+        transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "vide_1", 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false, true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected publish-catalog session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with proactive catalog publish");
+        ok &= expect(transport.writes.size() == 9,
+                     "expected setup, namespace, catalog publish, catalog object, catalog publish_done, media subscribe_ok, media object, media publish_done, namespace_done");
+        if (transport.writes.size() >= 9) {
+            ok &= expect(message_type(transport.writes[2].bytes) == 0x1d,
+                         "expected catalog PUBLISH before subscriber-driven media flow");
+            ok &= expect(transport.writes[3].stream_id == 2,
+                         "expected proactive catalog object stream on stream 2");
+            ok &= expect(message_type(transport.writes[4].bytes) == 0x0b,
+                         "expected proactive catalog PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[5].bytes) == 0x04,
+                         "expected subscriber-driven media SUBSCRIBE_OK after proactive catalog publish");
+            ok &= expect(transport.writes[6].stream_id == 6,
+                         "expected subscriber-driven media object stream on stream 6");
+            ok &= expect(message_type(transport.writes[7].bytes) == 0x0b,
+                         "expected subscriber-driven media PUBLISH_DONE");
+            ok &= expect(message_type(transport.writes[8].bytes) == 0x09,
+                         "expected namespace done after proactive catalog publish and media subscribe");
+        }
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_publish_ok_message(DraftVersion::kDraft14, 2, 0));
+        std::vector<std::uint8_t> control = encode_subscribe_update_message(1, 0);
+        const auto media_subscribe = encode_subscribe_message(4, kTestTrackNamespace, "vide_1", 0);
+        control.insert(control.end(), media_subscribe.begin(), media_subscribe.end());
+        transport.reads[0].push_back(control);
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false, true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected publish-catalog alias-update session connect to succeed");
+
+        const PublishPlan materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes);
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with alias-based catalog SUBSCRIBE_UPDATE activation");
+        ok &= expect(transport.writes.size() == 9,
+                     "expected setup, namespace, catalog publish, catalog object, catalog publish_done, media subscribe_ok, media object, media publish_done, namespace_done");
+        if (transport.writes.size() >= 9) {
+            ok &= expect(message_type(transport.writes[2].bytes) == 0x1d,
+                         "expected catalog PUBLISH before alias-based update activation");
+            ok &= expect(message_type(transport.writes[3].bytes) == 0x04,
+                         "expected media SUBSCRIBE_OK while catalog activation is pending");
+            ok &= expect(transport.writes[4].stream_id == 2,
+                         "expected catalog object stream after alias-based SUBSCRIBE_UPDATE activation");
+            ok &= expect(transport.writes[5].stream_id == 6,
+                         "expected media object stream after alias-based catalog activation");
+            ok &= expect(message_type(transport.writes[6].bytes) == 0x0b,
+                         "expected catalog PUBLISH_DONE after alias-based SUBSCRIBE_UPDATE activation");
+            ok &= expect(message_type(transport.writes[7].bytes) == 0x0b,
+                         "expected media PUBLISH_DONE after alias-based catalog activation");
+            ok &= expect(message_type(transport.writes[8].bytes) == 0x09,
+                         "expected namespace done after alias-based catalog activation");
+        }
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
         std::vector<std::uint8_t> interleaved_control = encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0);
         const auto catalog_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 2, 0);
         interleaved_control.insert(interleaved_control.end(), catalog_publish_ok.begin(), catalog_publish_ok.end());
@@ -1066,7 +1146,7 @@ int main() {
                                  kTestTrackNamespace,
                                  {{2, "catalog"}, {4, "vide_1"}});
         MoqtSession timeout_session(
-            timeout_transport, std::string(kTestTrackNamespace), false, false, std::chrono::seconds(11));
+            timeout_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(11));
         status = timeout_session.connect(endpoint, tls);
         ok &= expect(status.ok, "expected custom-timeout session connect to succeed");
         status = timeout_session.publish(

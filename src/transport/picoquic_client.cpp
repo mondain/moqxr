@@ -46,6 +46,11 @@ struct PicoquicClient::Impl {
     bool close_requested = false;
     bool loop_ready = false;
     bool loop_exited = false;
+    std::size_t total_bytes_sent = 0;
+    std::size_t total_bytes_received = 0;
+    std::size_t nonzero_send_events = 0;
+    std::size_t nonzero_receive_events = 0;
+    std::size_t consecutive_zero_send_events = 0;
     std::string last_error;
     std::thread packet_loop_thread;
 
@@ -233,8 +238,15 @@ int loop_callback(picoquic_quic_t* quic,
         }
         case picoquic_packet_loop_after_receive:
             if (callback_arg != nullptr) {
-                trace("packet loop after receive count=" +
-                      std::to_string(*static_cast<size_t*>(callback_arg)));
+                const auto count = *static_cast<size_t*>(callback_arg);
+                {
+                    std::lock_guard<std::mutex> lock(impl->mutex);
+                    impl->total_bytes_received += count;
+                    if (count != 0) {
+                        impl->nonzero_receive_events++;
+                    }
+                }
+                trace("packet loop after receive count=" + std::to_string(count));
             } else {
                 trace("packet loop after receive");
             }
@@ -252,8 +264,23 @@ int loop_callback(picoquic_quic_t* quic,
         }
         case picoquic_packet_loop_after_send: {
             if (callback_arg != nullptr) {
-                trace("packet loop after send count=" +
-                      std::to_string(*static_cast<size_t*>(callback_arg)));
+                const auto count = *static_cast<size_t*>(callback_arg);
+                {
+                    std::lock_guard<std::mutex> lock(impl->mutex);
+                    impl->total_bytes_sent += count;
+                    if (count != 0) {
+                        impl->nonzero_send_events++;
+                        impl->consecutive_zero_send_events = 0;
+                    } else {
+                        impl->consecutive_zero_send_events++;
+                    }
+                    if (count != 0 || impl->consecutive_zero_send_events == 1 ||
+                        impl->consecutive_zero_send_events % 50 == 0) {
+                        trace("packet loop after send count=" + std::to_string(count) +
+                              " total_sent=" + std::to_string(impl->total_bytes_sent) +
+                              " total_received=" + std::to_string(impl->total_bytes_received));
+                    }
+                }
             } else {
                 trace("packet loop after send");
             }
@@ -320,11 +347,16 @@ TransportStatus PicoquicClient::connect() {
         return TransportStatus::failure("failed to resolve picoquic server address");
     }
 
-    const char* sni = is_name ? endpoint_->host.c_str() : "localhost";
+    const char* sni = nullptr;
+    if (!endpoint_->sni.empty()) {
+        sni = endpoint_->sni.c_str();
+    } else if (is_name) {
+        sni = endpoint_->host.c_str();
+    }
     const char* alpn = endpoint_->alpn.c_str();
     const uint64_t current_time = picoquic_current_time();
     trace("connect start host=" + endpoint_->host + " port=" + std::to_string(endpoint_->port) +
-          " sni=" + sni + " alpn=" + alpn);
+          " sni=" + (sni != nullptr ? sni : "<none>") + " alpn=" + alpn);
 
     impl_->quic =
         picoquic_create(1, nullptr, nullptr, nullptr, alpn, nullptr, nullptr, nullptr, nullptr, nullptr,
@@ -386,6 +418,14 @@ TransportStatus PicoquicClient::connect() {
             trace("handshake wait timed out");
             impl_->failed = true;
             impl_->last_error = "timed out waiting for picoquic handshake";
+            if (impl_->nonzero_send_events != 0 && impl_->nonzero_receive_events == 0) {
+                impl_->last_error += " (sent " + std::to_string(impl_->total_bytes_sent) +
+                                     " bytes, received 0; relay did not answer)";
+            } else if (impl_->nonzero_receive_events != 0) {
+                impl_->last_error += " (sent " + std::to_string(impl_->total_bytes_sent) +
+                                     " bytes, received " + std::to_string(impl_->total_bytes_received) +
+                                     " bytes before timeout)";
+            }
         }
 
         if (impl_->connected) {

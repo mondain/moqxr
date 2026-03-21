@@ -199,6 +199,11 @@ struct ActiveSubscription {
     bool completed = false;
 };
 
+struct DormantPublishedTrack {
+    SubscribeMessage subscribe;
+    PublishedTrack track;
+};
+
 std::vector<PublishedTrack> build_published_tracks(const openmoq::publisher::PublishPlan& plan) {
     std::map<std::string, PublishedTrack> tracks;
     std::uint64_t next_alias = 0;
@@ -337,12 +342,58 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
 }
 
 bool namespace_matches(std::span<const std::string> track_namespace, std::string_view expected) {
-    return track_namespace.size() == 1 && track_namespace.front() == expected;
+    std::size_t component_count = 0;
+    std::size_t start = 0;
+    for (; start <= expected.size(); ++component_count) {
+        const std::size_t slash = expected.find('/', start);
+        const std::size_t end = slash == std::string_view::npos ? expected.size() : slash;
+        if (component_count >= track_namespace.size() || track_namespace[component_count] != expected.substr(start, end - start)) {
+            return false;
+        }
+        if (slash == std::string_view::npos) {
+            return component_count + 1 == track_namespace.size();
+        }
+        start = slash + 1;
+    }
+    return false;
 }
 
 bool namespace_prefix_matches(std::span<const std::string> track_namespace_prefix, std::string_view expected) {
-    return track_namespace_prefix.empty() ||
-           (track_namespace_prefix.size() == 1 && track_namespace_prefix.front() == expected);
+    if (track_namespace_prefix.empty()) {
+        return true;
+    }
+
+    std::size_t component_index = 0;
+    std::size_t start = 0;
+    while (start <= expected.size()) {
+        const std::size_t slash = expected.find('/', start);
+        const std::size_t end = slash == std::string_view::npos ? expected.size() : slash;
+        if (component_index >= track_namespace_prefix.size() ||
+            track_namespace_prefix[component_index] != expected.substr(start, end - start)) {
+            return false;
+        }
+        ++component_index;
+        if (slash == std::string_view::npos) {
+            return component_index == track_namespace_prefix.size();
+        }
+        start = slash + 1;
+    }
+    return false;
+}
+
+std::vector<std::string> split_track_namespace_components(std::string_view ns) {
+    std::vector<std::string> components;
+    std::size_t start = 0;
+    while (start <= ns.size()) {
+        const std::size_t slash = ns.find('/', start);
+        const std::size_t end = slash == std::string_view::npos ? ns.size() : slash;
+        components.emplace_back(ns.substr(start, end - start));
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    return components;
 }
 
 bool object_matches_filter(const openmoq::publisher::CmsfObject& object, const SubscribeMessage& subscribe) {
@@ -397,6 +448,7 @@ bool apply_subscribe_update(SubscribeMessage& subscribe, const SubscribeUpdateMe
 bool decode_legacy_subscribe_update_message(std::span<const std::uint8_t> bytes,
                                             const std::map<std::string, PublishedTrack>& tracks_by_name,
                                             const std::map<std::uint64_t, SubscribeMessage>& pending_subscriptions,
+                                            const std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias,
                                             SubscribeUpdateMessage& message) {
     std::size_t offset = 0;
     std::uint64_t message_type = 0;
@@ -445,6 +497,20 @@ bool decode_legacy_subscribe_update_message(std::span<const std::uint8_t> bytes,
         message.subscriber_priority = subscriber_priority;
         message.forward = forward;
         return true;
+    }
+
+    if (request_id_by_track_alias != nullptr) {
+        const auto request_id_it = request_id_by_track_alias->find(track_alias);
+        if (request_id_it != request_id_by_track_alias->end()) {
+            message.request_id = 0;
+            message.subscription_request_id = request_id_it->second;
+            message.start_group_id = static_cast<std::size_t>(start_group_id);
+            message.start_object_id = static_cast<std::size_t>(start_object_id);
+            message.end_group_plus_one = 0;
+            message.subscriber_priority = subscriber_priority;
+            message.forward = forward;
+            return true;
+        }
     }
 
     return false;
@@ -499,7 +565,9 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                                     bool paced,
                                     std::chrono::milliseconds subscriber_timeout,
                                     std::vector<std::uint8_t>& pending_control_bytes,
-                                    bool send_namespace_done = true) {
+                                    bool send_namespace_done = true,
+                                    std::map<std::uint64_t, DormantPublishedTrack>* dormant_published_tracks = nullptr,
+                                    const std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias = nullptr) {
     std::vector<std::uint8_t> buffer = std::move(pending_control_bytes);
     pending_control_bytes.clear();
     std::set<std::uint64_t> completed_request_ids;
@@ -539,14 +607,25 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     !decode_legacy_subscribe_update_message(message_bytes,
                                                             tracks_by_name,
                                                             pending_subscriptions,
+                                                            request_id_by_track_alias,
                                                             subscribe_update)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE");
                 }
-                if (completed_request_ids.contains(subscribe_update.subscription_request_id)) {
+                auto remapped_request_id = subscribe_update.subscription_request_id;
+                if (request_id_by_track_alias != nullptr && !pending_subscriptions.contains(remapped_request_id) &&
+                    !active_subscriptions.contains(remapped_request_id) &&
+                    (dormant_published_tracks == nullptr || !dormant_published_tracks->contains(remapped_request_id))) {
+                    const auto alias_it = request_id_by_track_alias->find(remapped_request_id);
+                    if (alias_it != request_id_by_track_alias->end()) {
+                        remapped_request_id = alias_it->second;
+                        subscribe_update.subscription_request_id = remapped_request_id;
+                    }
+                }
+                if (completed_request_ids.contains(remapped_request_id)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
                 }
 
-                auto pending_it = pending_subscriptions.find(subscribe_update.subscription_request_id);
+                auto pending_it = pending_subscriptions.find(remapped_request_id);
                 if (pending_it != pending_subscriptions.end()) {
                     if (!apply_subscribe_update(pending_it->second, subscribe_update)) {
                         return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
@@ -555,25 +634,60 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     continue;
                 }
 
-                auto active_it = active_subscriptions.find(subscribe_update.subscription_request_id);
-                if (active_it == active_subscriptions.end() ||
-                    !apply_subscribe_update(active_it->second.subscribe, subscribe_update)) {
-                    return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
+                auto active_it = active_subscriptions.find(remapped_request_id);
+                if (active_it != active_subscriptions.end()) {
+                    if (!apply_subscribe_update(active_it->second.subscribe, subscribe_update)) {
+                        return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
+                    }
+
+                    std::size_t next_object_index = 0;
+                    if (find_next_matching_object_index(plan,
+                                                        active_it->second.subscribe,
+                                                        active_it->second.next_object_index,
+                                                        next_object_index)) {
+                        active_it->second.next_object_index = next_object_index;
+                        active_it->second.completed = false;
+                    } else {
+                        active_it->second.next_object_index = plan.objects.size();
+                        active_it->second.completed = true;
+                    }
+                    buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                    continue;
                 }
 
-                std::size_t next_object_index = 0;
-                if (find_next_matching_object_index(plan,
-                                                    active_it->second.subscribe,
-                                                    active_it->second.next_object_index,
-                                                    next_object_index)) {
-                    active_it->second.next_object_index = next_object_index;
-                    active_it->second.completed = false;
-                } else {
-                    active_it->second.next_object_index = plan.objects.size();
-                    active_it->second.completed = true;
+                if (dormant_published_tracks != nullptr) {
+                    auto dormant_it = dormant_published_tracks->find(remapped_request_id);
+                    if (dormant_it != dormant_published_tracks->end()) {
+                        ActiveSubscription active{
+                            .subscribe = dormant_it->second.subscribe,
+                            .track = dormant_it->second.track,
+                            .stream_count = 0,
+                            .next_object_index = 0,
+                            .completed = false,
+                        };
+                        if (!apply_subscribe_update(active.subscribe, subscribe_update)) {
+                            return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
+                        }
+
+                        std::size_t next_object_index = 0;
+                        if (find_next_matching_object_index(plan, active.subscribe, 0, next_object_index)) {
+                            active.next_object_index = next_object_index;
+                            active_subscriptions.insert_or_assign(remapped_request_id, std::move(active));
+                        } else {
+                            const TransportStatus finalize_status = finalize_subscription(
+                                transport, control_stream_id, remapped_request_id, 0, completed_request_ids);
+                            if (!finalize_status.ok) {
+                                return finalize_status;
+                            }
+                            served_any_subscription = true;
+                        }
+                        dormant_published_tracks->erase(dormant_it);
+                        buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                        continue;
+                    }
                 }
-                buffer.erase(buffer.begin(), buffer.begin() + message_size);
-                continue;
+
+                return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
             }
 
             if (message_type == 0x11) {
@@ -989,16 +1103,180 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
                                   false);
 }
 
+TransportStatus publish_selected_tracks(PublisherTransport& transport,
+                                        std::uint64_t control_stream_id,
+                                        const openmoq::publisher::PublishPlan& plan,
+                                        std::span<const PublishedTrack> tracks,
+                                        std::uint64_t peer_max_request_id,
+                                        std::string_view track_namespace,
+                                        bool paced,
+                                        std::vector<std::uint8_t>& pending_control_bytes,
+                                        std::map<std::uint64_t, DormantPublishedTrack>* dormant_published_tracks = nullptr,
+                                        std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias = nullptr) {
+    if (tracks.empty()) {
+        return TransportStatus::success();
+    }
+
+    std::map<std::string, std::uint64_t> request_id_by_track;
+    std::map<std::string, PublishedTrack> tracks_by_name;
+    std::uint64_t next_request_id = 2;
+
+    for (const auto& track : tracks) {
+        if (next_request_id > peer_max_request_id) {
+            return TransportStatus::failure("peer max_request_id is too small for publish requests");
+        }
+
+        request_id_by_track.emplace(track.name, next_request_id);
+        tracks_by_name.emplace(track.name, track);
+        const TransportStatus status =
+            transport.write_stream(control_stream_id,
+                                   encode_track_message({
+                                       .draft = plan.draft.version,
+                                       .track_name = track.name,
+                                       .track_namespace = std::string(track_namespace),
+                                       .request_id = next_request_id,
+                                       .track_alias = track.alias,
+                                       .largest_group_id = track.largest_group_id,
+                                       .largest_object_id = track.largest_object_id,
+                                       .content_exists = track.content_exists,
+                                   }),
+                                   false);
+        if (!status.ok) {
+            return status;
+        }
+        std::cerr << "[moqt-session] publish selected track namespace=" << track_namespace
+                  << " track=" << track.name << " request_id=" << next_request_id
+                  << " alias=" << track.alias << '\n';
+        next_request_id += 2;
+    }
+
+    std::map<std::uint64_t, PublishOk> publish_ok_by_request_id;
+    TransportStatus status = collect_control_acknowledgements(transport,
+                                                              control_stream_id,
+                                                              plan.draft.version,
+                                                              0,
+                                                              tracks.size(),
+                                                              pending_control_bytes,
+                                                              &publish_ok_by_request_id);
+    if (!status.ok) {
+        return status;
+    }
+
+    const auto pacing_start = std::chrono::steady_clock::now();
+    std::uint64_t first_media_time_us = 0;
+    bool first_media_time_set = false;
+    std::map<std::string, std::uint64_t> stream_count_by_track;
+
+    std::size_t object_index = 0;
+    for (const auto& object : plan.objects) {
+        const auto track_it = tracks_by_name.find(object.track_name);
+        if (track_it == tracks_by_name.end()) {
+            ++object_index;
+            continue;
+        }
+
+        const auto publish_ok_it = publish_ok_by_request_id.find(request_id_by_track.at(object.track_name));
+        if (publish_ok_it == publish_ok_by_request_id.end()) {
+            return TransportStatus::failure("missing PUBLISH_OK for published track");
+        }
+        if (publish_ok_it->second.forward == 0) {
+            if (dormant_published_tracks != nullptr) {
+                dormant_published_tracks->insert_or_assign(
+                    request_id_by_track.at(object.track_name),
+                    DormantPublishedTrack{
+                        .subscribe =
+                            SubscribeMessage{
+                                .request_id = request_id_by_track.at(object.track_name),
+                                .track_namespace = split_track_namespace_components(track_namespace),
+                                .track_name = object.track_name,
+                                .subscriber_priority = publish_ok_it->second.subscriber_priority,
+                                .group_order = publish_ok_it->second.group_order,
+                                .forward = publish_ok_it->second.forward,
+                                .filter_type = publish_ok_it->second.filter_type == 0 ? 0x03 : publish_ok_it->second.filter_type,
+                                .start_group_id = 0,
+                                .start_object_id = 0,
+                                .end_group_id = 0,
+                            },
+                        .track = track_it->second,
+                    });
+            }
+            if (request_id_by_track_alias != nullptr) {
+                request_id_by_track_alias->insert_or_assign(track_it->second.alias, request_id_by_track.at(object.track_name));
+            }
+            ++object_index;
+            continue;
+        }
+
+        const auto payload = object_payload(object);
+        if (payload.empty()) {
+            return TransportStatus::failure("transport publish requires materialized object payloads");
+        }
+        if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
+            first_media_time_us = object.media_time_us;
+            first_media_time_set = true;
+        }
+        pace_until(pacing_start, first_media_time_us, object, paced);
+
+        std::uint64_t stream_id = 0;
+        status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+        if (!status.ok) {
+            return status;
+        }
+        status = transport.write_stream(stream_id,
+                                        encode_object_stream(plan.draft.version,
+                                                             track_it->second.alias,
+                                                             object,
+                                                             is_final_object_in_group(plan, object_index),
+                                                             payload),
+                                        true);
+        if (!status.ok) {
+            return status;
+        }
+        std::cerr << "[moqt-session] sent selected object track=" << object.track_name
+                  << " group=" << object.group_id
+                  << " object=" << object.object_id
+                  << " bytes=" << object_payload_size(object)
+                  << " kind="
+                  << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
+                  << '\n';
+        ++stream_count_by_track[object.track_name];
+        ++object_index;
+    }
+
+    for (const auto& track : tracks) {
+        const auto publish_ok_it = publish_ok_by_request_id.find(request_id_by_track.at(track.name));
+        if (publish_ok_it == publish_ok_by_request_id.end()) {
+            return TransportStatus::failure("missing PUBLISH_OK for published track");
+        }
+        if (publish_ok_it->second.forward == 0) {
+            std::cerr << "[moqt-session] selected publish accepted without forwarding track=" << track.name
+                      << " request_id=" << request_id_by_track.at(track.name) << '\n';
+            continue;
+        }
+        status = transport.write_stream(control_stream_id,
+                                        encode_publish_done_message(request_id_by_track.at(track.name),
+                                                                    stream_count_by_track[track.name]),
+                                        false);
+        if (!status.ok) {
+            return status;
+        }
+    }
+
+    return TransportStatus::success();
+}
+
 }  // namespace
 
 MoqtSession::MoqtSession(PublisherTransport& transport,
                          std::string track_namespace,
                          bool auto_forward,
+                         bool publish_catalog,
                          bool paced,
                          std::chrono::seconds subscriber_timeout)
     : transport_(transport),
       track_namespace_(std::move(track_namespace)),
       auto_forward_(auto_forward),
+      publish_catalog_(publish_catalog),
       paced_(paced),
       subscriber_timeout_(subscriber_timeout) {}
 
@@ -1067,6 +1345,45 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
             paced_,
             subscriber_timeout_,
             pending_control_bytes_);
+    }
+
+    if (publish_catalog_) {
+        std::map<std::uint64_t, DormantPublishedTrack> dormant_published_tracks;
+        std::map<std::uint64_t, std::uint64_t> request_id_by_track_alias;
+        std::vector<PublishedTrack> selected_tracks;
+        for (const auto& track : tracks) {
+            if (track.name == "catalog") {
+                selected_tracks.push_back(track);
+            }
+        }
+        if (!selected_tracks.empty()) {
+            status = publish_selected_tracks(transport_,
+                                             control_stream_id_,
+                                             plan,
+                                             selected_tracks,
+                                             peer_max_request_id_,
+                                             track_namespace_,
+                                             paced_,
+                                             pending_control_bytes_,
+                                             &dormant_published_tracks,
+                                             &request_id_by_track_alias);
+            if (!status.ok) {
+                return status;
+            }
+
+            return serve_subscriptions(transport_,
+                                       control_stream_id_,
+                                       plan,
+                                       tracks_by_name,
+                                       plan.draft.version,
+                                       track_namespace_,
+                                       paced_,
+                                       subscriber_timeout_,
+                                       pending_control_bytes_,
+                                       true,
+                                       &dormant_published_tracks,
+                                       &request_id_by_track_alias);
+        }
     }
 
     std::cerr << "[moqt-session] awaiting SUBSCRIBE for tracks:";

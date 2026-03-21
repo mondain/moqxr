@@ -93,6 +93,11 @@ CliOptions parse_cli_options(int argc, char** argv) {
             }
             options.endpoint->alpn = std::string(require_value("--alpn"));
             options.endpoint_alpn_overridden = true;
+        } else if (argument == "--sni") {
+            if (!options.endpoint.has_value()) {
+                options.endpoint = transport::EndpointConfig{};
+            }
+            options.endpoint->sni = std::string(require_value("--sni"));
         } else if (argument == "--cert") {
             options.tls.certificate_path = std::string(require_value("--cert"));
         } else if (argument == "--key") {
@@ -107,6 +112,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
             options.track_namespace = std::string(require_value("--namespace"));
         } else if (argument == "--forward") {
             options.forward = parse_forward_flag(require_value("--forward"));
+        } else if (argument == "--publish-catalog") {
+            options.publish_catalog = true;
         } else if (argument == "--timeout") {
             options.subscriber_timeout = parse_timeout(require_value("--timeout"));
         } else if (argument == "--paced") {
@@ -127,7 +134,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
     }
 
     if (options.endpoint.has_value() && options.endpoint->host.empty()) {
-        throw std::runtime_error("--alpn requires --endpoint to be provided first");
+        throw std::runtime_error("--alpn and --sni require --endpoint to be provided first");
     }
     if (options.track_namespace.empty()) {
         throw std::runtime_error("--namespace must not be empty");
@@ -139,8 +146,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
            " --input <mp4> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
-           " [--paced] [--dump-plan] [--emit-dir <dir>]"
-           " [--endpoint host:port|moqt://host:port/path] [--alpn value]"
+           " [--publish-catalog] [--paced] [--dump-plan] [--emit-dir <dir>]"
+           " [--endpoint host:port|moqt://host:port/path] [--alpn value] [--sni value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }
 

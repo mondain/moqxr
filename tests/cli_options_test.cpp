@@ -47,6 +47,29 @@ int main() {
     }
 
     {
+        const CliOptions options = parse(
+            {"openmoq-publisher", "--input", "sample.mp4", "--endpoint", "203.0.113.10:443", "--sni", "moq-relay.red5.net"});
+        ok &= expect(options.endpoint.has_value(), "expected endpoint to be present when parsing --sni");
+        ok &= expect(options.endpoint->sni == "moq-relay.red5.net", "expected --sni to populate endpoint SNI");
+    }
+
+    {
+        bool threw = false;
+        try {
+            static_cast<void>(parse({"openmoq-publisher", "--input", "sample.mp4", "--sni", "moq-relay.red5.net"}));
+        } catch (const std::runtime_error& error) {
+            threw = std::string(error.what()) == "--alpn and --sni require --endpoint to be provided first";
+        }
+        ok &= expect(threw, "expected --sni without --endpoint to be rejected");
+    }
+
+    {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--publish-catalog"});
+        ok &= expect(options.publish_catalog, "expected --publish-catalog to enable proactive catalog publish");
+    }
+
+    {
         bool threw = false;
         try {
             static_cast<void>(parse({"openmoq-publisher", "--input", "sample.mp4", "--timeout", "-1"}));
