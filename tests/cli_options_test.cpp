@@ -77,6 +77,13 @@ int main() {
     }
 
     {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--coalesce-cmaf-chunk"});
+        ok &= expect(!options.split_cmaf_chunks,
+                     "expected --coalesce-cmaf-chunk compatibility alias to disable default chunk splitting");
+    }
+
+    {
         bool threw = false;
         try {
             static_cast<void>(parse({"openmoq-publisher", "--input", "sample.mp4", "--timeout", "-1"}));

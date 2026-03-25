@@ -306,22 +306,32 @@ ffmpeg -i input.mp4 \
   -f mp4 fragmented.mp4
 ```
 
-If the source codecs are not already compatible, re-encode instead of copying. For example:
+If the source codecs are not already compatible, re-encode instead of copying. For example (h264 and h265):
 
 ```bash
-ffmpeg -i input.mov \
-  -map 0:v -map 0:a \
+ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
+  -map 0:v:0 -map 0:a:0 \
   -map_metadata -1 \
   -sn -dn \
-  -c:v libx264 -preset medium -g 48 -keyint_min 48 \
-  -c:a aac -profile:a aac_low -b:a 128k \
-  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
-  -f mp4 fragmented.mp4
+  -c:v libx264 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
+  -c:a aac -b:a 160k -ar 48000 -ac 2 \
+  -movflags +frag_keyframe+empty_moov+default_base_moof \
+  -f mp4 sunflower-frag.mp4
+
+ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
+  -map 0:v:0 -map 0:a:0 \
+  -map_metadata -1 \
+  -sn -dn \
+  -c:v libx265 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
+  -c:a aac -b:a 160k -ar 48000 -ac 2 \
+  -movflags +frag_keyframe+empty_moov+default_base_moof \
+  -f mp4 sunflower265-frag.mp4
 ```
 
 Practical notes:
 
 - `-map 0:v -map 0:a` keeps only video and audio streams, excluding subtitle and other non-A/V tracks
+- `-map 0:v:0 -map 0:a:0` uses first audio stream if multiple exist
 - `-sn -dn` explicitly disables subtitle and data or text streams
 - `-map_metadata -1` drops container-level metadata from the output
 - `+frag_keyframe` starts a new fragment on keyframes
