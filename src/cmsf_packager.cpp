@@ -21,6 +21,10 @@ std::string object_filename(const CmsfObject& object) {
     if (object.kind == CmsfObjectKind::kInitialization && object.track_name == "catalog") {
         return "catalog.json";
     }
+    if (object.kind == CmsfObjectKind::kMetadata) {
+        return object.track_name + "_g" + std::to_string(object.group_id) + "_o" + std::to_string(object.object_id) +
+               ".json";
+    }
 
     return object.track_name + "_g" + std::to_string(object.group_id) + "_o" + std::to_string(object.object_id) +
            "_media.mp4";
@@ -133,6 +137,18 @@ std::string track_role(std::string_view handler_type) {
     return "data";
 }
 
+std::string object_kind_name(CmsfObjectKind kind, std::string_view track_name) {
+    switch (kind) {
+        case CmsfObjectKind::kInitialization:
+            return track_name == "catalog" ? "catalog" : "init";
+        case CmsfObjectKind::kMetadata:
+            return "metadata";
+        case CmsfObjectKind::kMedia:
+            return "media";
+    }
+    return "unknown";
+}
+
 std::string json_number(double value) {
     std::ostringstream out;
     const double rounded = std::round(value);
@@ -142,6 +158,99 @@ std::string json_number(double value) {
         out << std::fixed << std::setprecision(3) << value;
     }
     return out.str();
+}
+
+std::string sap_track_name(std::string_view media_track_name) {
+    return std::string(media_track_name) + "_sap";
+}
+
+std::uint32_t next_synthetic_track_id(const std::vector<TrackDescription>& tracks) {
+    std::uint32_t next_id = 1;
+    for (const auto& track : tracks) {
+        next_id = std::max(next_id, track.track_id + 1);
+    }
+    return next_id;
+}
+
+const TrackDescription* find_track_by_name(const std::vector<TrackDescription>& tracks, std::string_view track_name) {
+    const auto it = std::find_if(tracks.begin(), tracks.end(), [&](const TrackDescription& track) {
+        return track.track_name == track_name;
+    });
+    return it == tracks.end() ? nullptr : &*it;
+}
+
+std::uint64_t round_us_to_ms(std::uint64_t value_us) {
+    return (value_us + 500ULL) / 1000ULL;
+}
+
+std::vector<std::uint8_t> build_sap_timeline_payload(const SegmentedMp4& segmented_mp4,
+                                                     const TrackDescription& media_track) {
+    std::ostringstream payload;
+    payload << '[';
+    bool first = true;
+    for (const auto& fragment : segmented_mp4.fragments) {
+        if (fragment.track_name != media_track.track_name) {
+            continue;
+        }
+        if (!first) {
+            payload << ',';
+        }
+        first = false;
+        payload << '{'
+                << "\"l\":[" << fragment.group_id << "," << fragment.object_id << "],"
+                << "\"data\":[" << static_cast<unsigned int>(fragment.sap_type) << ','
+                << round_us_to_ms(fragment.earliest_presentation_time_us) << ']'
+                << '}';
+    }
+    payload << ']';
+    const std::string text = payload.str();
+    return std::vector<std::uint8_t>(text.begin(), text.end());
+}
+
+void append_catalog_track_json(std::ostringstream& catalog,
+                               const TrackDescription& track,
+                               const std::map<std::string, std::string>& init_data_by_track) {
+    catalog << '{'
+            << "\"name\":\"" << json_escape(track.track_name) << "\","
+            << "\"id\":" << track.track_id << ','
+            << "\"role\":\"" << track_role(track.handler_type) << "\","
+            << "\"packaging\":\"" << json_escape(track.packaging) << "\","
+            << "\"renderGroup\":1,"
+            << "\"isLive\":false";
+    if (!track.codec.empty()) {
+        catalog << ",\"codec\":\"" << json_escape(track.codec) << '"';
+    }
+    if (track.handler_type == "vide") {
+        catalog << ",\"width\":" << track.width
+                << ",\"height\":" << track.height;
+        if (track.frame_rate > 0.0) {
+            catalog << ",\"frameRate\":" << json_number(track.frame_rate);
+        }
+    } else if (track.handler_type == "soun") {
+        catalog << ",\"sampleRate\":" << track.sample_rate
+                << ",\"channelCount\":" << track.channel_count;
+    }
+    if (!track.event_type.empty()) {
+        catalog << ",\"eventType\":\"" << json_escape(track.event_type) << '"';
+    }
+    if (!track.mime_type.empty()) {
+        catalog << ",\"mimeType\":\"" << json_escape(track.mime_type) << '"';
+    }
+    if (!track.depends.empty()) {
+        catalog << ",\"depends\":[";
+        for (std::size_t index = 0; index < track.depends.size(); ++index) {
+            if (index != 0) {
+                catalog << ',';
+            }
+            catalog << '"' << json_escape(track.depends[index]) << '"';
+        }
+        catalog << ']';
+    }
+    const auto init_it = init_data_by_track.find(track.track_name);
+    if (init_it != init_data_by_track.end()) {
+        catalog << ",\"initData\":\"" << init_it->second << '"';
+    }
+    catalog << '}';
 }
 
 std::uint32_t track_id_from_trak(const Mp4Box& trak, std::span<const std::uint8_t> bytes) {
@@ -313,12 +422,30 @@ std::vector<std::uint8_t> build_track_codec_init_data(std::span<const std::uint8
 
 PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion version) {
     std::vector<TrackDescription> tracks = segmented_mp4.tracks;
+    std::uint32_t synthetic_track_id = next_synthetic_track_id(tracks);
+    for (const auto& media_track : segmented_mp4.tracks) {
+        tracks.push_back(TrackDescription{
+            .track_id = synthetic_track_id++,
+            .handler_type = "meta",
+            .codec = {},
+            .sample_entry_type = "eventtimeline",
+            .track_name = sap_track_name(media_track.track_name),
+            .packaging = "eventtimeline",
+            .event_type = "org.ietf.moq.cmsf.sap",
+            .mime_type = "application/json",
+            .depends = {media_track.track_name},
+        });
+    }
     tracks.insert(tracks.begin(), TrackDescription{
                                     .track_id = 0,
                                     .handler_type = "meta",
                                     .codec = "catalog",
                                     .sample_entry_type = "catalog",
                                     .track_name = "catalog",
+                                    .packaging = "catalog",
+                                    .event_type = {},
+                                    .mime_type = {},
+                                    .depends = {},
                                 });
 
     PublishPlan plan{
@@ -348,33 +475,16 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
     catalog << "\"version\":1,";
     catalog << "\"format\":\"cmsf\",";
     catalog << "\"tracks\":[";
-    for (std::size_t index = 0; index < segmented_mp4.tracks.size(); ++index) {
-        const auto& track = segmented_mp4.tracks[index];
-        if (index != 0) {
+    bool first_catalog_track = true;
+    for (const auto& track : plan.tracks) {
+        if (track.track_name == "catalog") {
+            continue;
+        }
+        if (!first_catalog_track) {
             catalog << ',';
         }
-        catalog << '{'
-                << "\"name\":\"" << json_escape(track.track_name) << "\","
-                << "\"id\":" << track.track_id << ','
-                << "\"role\":\"" << track_role(track.handler_type) << "\","
-                << "\"codec\":\"" << json_escape(track.codec) << "\","
-                << "\"packaging\":\"cmaf\","
-                << "\"renderGroup\":1,"
-                << "\"isLive\":false,";
-        if (track.handler_type == "vide") {
-            catalog << "\"width\":" << track.width << ','
-                    << "\"height\":" << track.height;
-            if (track.frame_rate > 0.0) {
-                catalog << ','
-                        << "\"frameRate\":" << json_number(track.frame_rate);
-            }
-            catalog << ',';
-        } else if (track.handler_type == "soun") {
-            catalog << "\"sampleRate\":" << track.sample_rate << ','
-                    << "\"channelCount\":" << track.channel_count << ',';
-        }
-        catalog << "\"initData\":\"" << init_data_by_track.at(track.track_name) << "\""
-                << '}';
+        first_catalog_track = false;
+        append_catalog_track_json(catalog, track, init_data_by_track);
     }
     catalog << "]}";
     const std::string catalog_text = catalog.str();
@@ -392,12 +502,26 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
         plan.objects.push_back({
             .kind = CmsfObjectKind::kMedia,
             .track_name = fragment.track_name,
-            .group_id = fragment.sequence,
-            .object_id = 0,
+            .group_id = fragment.group_id,
+            .object_id = fragment.object_id,
             .media_time_us = fragment.start_time_us,
             .media_duration_us = fragment.duration_us,
             .payload = fragment.payload.span,
             .owned_payload = fragment.payload.owned_bytes,
+        });
+    }
+
+    for (const auto& media_track : segmented_mp4.tracks) {
+        if (find_track_by_name(plan.tracks, sap_track_name(media_track.track_name)) == nullptr) {
+            continue;
+        }
+        plan.objects.push_back({
+            .kind = CmsfObjectKind::kMetadata,
+            .track_name = sap_track_name(media_track.track_name),
+            .group_id = 0,
+            .object_id = 0,
+            .payload = {},
+            .owned_payload = build_sap_timeline_payload(segmented_mp4, media_track),
         });
     }
 
@@ -416,7 +540,7 @@ std::string render_publish_plan(const PublishPlan& plan) {
                << " bytes=" << (object.owned_payload.empty() ? object.payload.size : object.owned_payload.size())
                << " time_us=" << object.media_time_us
                << " kind="
-               << (object.kind == CmsfObjectKind::kInitialization ? "catalog" : "media") << '\n';
+               << object_kind_name(object.kind, object.track_name) << '\n';
     }
 
     return stream.str();

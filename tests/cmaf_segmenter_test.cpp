@@ -51,6 +51,19 @@ std::vector<std::uint8_t> make_full_box(const std::string& type, const std::vect
     return make_box(type, out);
 }
 
+std::vector<std::uint8_t> make_full_box_with_flags(const std::string& type,
+                                                   std::uint8_t version,
+                                                   std::uint32_t flags,
+                                                   const std::vector<std::uint8_t>& payload) {
+    std::vector<std::uint8_t> out;
+    out.push_back(version);
+    out.push_back(static_cast<std::uint8_t>((flags >> 16U) & 0xFFU));
+    out.push_back(static_cast<std::uint8_t>((flags >> 8U) & 0xFFU));
+    out.push_back(static_cast<std::uint8_t>(flags & 0xFFU));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return make_box(type, out);
+}
+
 std::vector<std::uint8_t> concat(std::initializer_list<std::vector<std::uint8_t>> boxes) {
     std::vector<std::uint8_t> out;
     for (const auto& box : boxes) {
@@ -108,6 +121,37 @@ std::vector<std::uint8_t> make_multitrack_fragmented_test_mp4() {
         make_fragment(1, 1000, 1000, {0x12, 0x13}),
         make_fragment(2, 1000, 1000, {0x22, 0x23}),
     });
+}
+
+std::vector<std::uint8_t> make_fragmented_non_sync_ept_test_mp4() {
+    const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
+    const auto tkhd = make_full_box("tkhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    const auto mdhd = make_full_box("mdhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 232, 0, 0, 0, 0, 0, 0, 0, 0});
+    const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
+    auto visual_header = std::vector<std::uint8_t>(70, 0);
+    visual_header[24] = 0x01;
+    visual_header[25] = 0x40;
+    visual_header[26] = 0x00;
+    visual_header[27] = 0xf0;
+    const auto sample_entry = make_box("avc1", concat({visual_header, make_box("avcC", {1, 100, 0, 12, 0xff})}));
+    const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
+    const auto stbl = make_box("stbl", stsd);
+    const auto minf = make_box("minf", stbl);
+    const auto mdia = make_box("mdia", concat({mdhd, hdlr, minf}));
+    const auto trak = make_box("trak", concat({tkhd, mdia}));
+    const auto moov = make_box("moov", trak);
+    const auto tfhd = make_full_box("tfhd", be32_bytes(1));
+    const auto tfdt = make_full_box("tfdt", be32_bytes(0));
+    const auto trun = make_full_box_with_flags("trun",
+                                               1,
+                                               0x000D00,
+                                               concat({be32_bytes(1), be32_bytes(1000), be32_bytes(0x01010000), be32_bytes(500)}));
+    const auto traf = make_box("traf", concat({tfhd, tfdt, trun}));
+    const auto moof = make_box("moof", traf);
+    const auto mdat = make_box("mdat", {0x01, 0x02, 0x03, 0x04});
+    return concat({ftyp, moov, moof, mdat});
 }
 
 std::vector<std::uint8_t> make_progressive_test_mp4() {
@@ -238,6 +282,10 @@ std::vector<std::uint8_t> base64_decode(std::string_view text) {
     return decoded;
 }
 
+std::string object_text(const openmoq::publisher::CmsfObject& object) {
+    return std::string(object.owned_payload.begin(), object.owned_payload.end());
+}
+
 bool expect(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << '\n';
@@ -265,9 +313,10 @@ int main() {
     ParsedMp4 fragmented{
         .bytes = fragmented_bytes,
         .top_level_boxes = parse_mp4_boxes(fragmented_bytes),
-        .tracks = {},
+        .tracks = {
+            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1", .timescale = 24000},
+        },
     };
-    fragmented.tracks = extract_tracks(fragmented.top_level_boxes, fragmented.bytes);
 
     const auto segmented = segment_for_cmaf(fragmented);
     const auto plan = build_publish_plan(segmented, DraftVersion::kDraft14);
@@ -276,8 +325,11 @@ int main() {
     ok &= expect(fragmented.tracks.size() == 1, "expected one extracted fragmented track");
     ok &= expect(fragmented.tracks.front().codec == "avc1.64000C", "expected RFC 6381 avc1 codec");
     ok &= expect(segmented.fragments.size() == 1, "expected one fragmented media fragment");
-    ok &= expect(plan.objects.size() == 2, "expected catalog plus one fragmented media object");
+    ok &= expect(plan.objects.size() == 3, "expected catalog, one fragmented media object, and one SAP timeline object");
     ok &= expect(plan.objects.front().track_name == "catalog", "expected catalog object first");
+    ok &= expect(plan.objects.back().track_name == "vide_1_sap", "expected SAP timeline object for fragmented video");
+    ok &= expect_contains(object_text(plan.objects.back()), "\"l\":[0,0]", "expected fragmented SAP timeline location");
+    ok &= expect_contains(object_text(plan.objects.back()), "\"data\":[2,0]", "expected fragmented SAP type and EPT");
     ok &= expect(payload_size(segmented.initialization_segment) > 0, "expected fragmented init payload");
     ok &= expect(payload_size(segmented.fragments.front().payload) > 0, "expected fragmented media payload");
 
@@ -292,14 +344,31 @@ int main() {
     };
     const auto segmented_multitrack = segment_for_cmaf(multitrack_fragmented);
     ok &= expect(segmented_multitrack.fragments.size() == 4, "expected four multitrack fragmented media fragments");
-    ok &= expect(segmented_multitrack.fragments[0].track_name == "vide_1" && segmented_multitrack.fragments[0].sequence == 0,
+    ok &= expect(segmented_multitrack.fragments[0].track_name == "vide_1" && segmented_multitrack.fragments[0].group_id == 0,
                  "expected first video fragment group sequence to start at zero");
-    ok &= expect(segmented_multitrack.fragments[1].track_name == "soun_2" && segmented_multitrack.fragments[1].sequence == 0,
+    ok &= expect(segmented_multitrack.fragments[1].track_name == "soun_2" && segmented_multitrack.fragments[1].group_id == 0,
                  "expected first audio fragment group sequence to start at zero");
-    ok &= expect(segmented_multitrack.fragments[2].track_name == "vide_1" && segmented_multitrack.fragments[2].sequence == 1,
+    ok &= expect(segmented_multitrack.fragments[2].track_name == "vide_1" && segmented_multitrack.fragments[2].group_id == 1,
                  "expected second video fragment group sequence to advance independently");
-    ok &= expect(segmented_multitrack.fragments[3].track_name == "soun_2" && segmented_multitrack.fragments[3].sequence == 1,
+    ok &= expect(segmented_multitrack.fragments[3].track_name == "soun_2" && segmented_multitrack.fragments[3].group_id == 1,
                  "expected second audio fragment group sequence to advance independently");
+
+    const auto non_sync_fragmented_bytes = make_fragmented_non_sync_ept_test_mp4();
+    ParsedMp4 non_sync_fragmented{
+        .bytes = non_sync_fragmented_bytes,
+        .top_level_boxes = parse_mp4_boxes(non_sync_fragmented_bytes),
+        .tracks = {
+            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1", .timescale = 1000},
+        },
+    };
+    const auto non_sync_segmented = segment_for_cmaf(non_sync_fragmented);
+    const auto non_sync_plan = build_publish_plan(non_sync_segmented, DraftVersion::kDraft14);
+    ok &= expect(non_sync_segmented.fragments.size() == 1, "expected one non-sync fragmented media fragment");
+    ok &= expect(non_sync_segmented.fragments.front().sap_type == 0, "expected non-sync fragmented SAP type 0");
+    ok &= expect(non_sync_segmented.fragments.front().earliest_presentation_time_us == 500000,
+                 "expected derived fragmented earliest presentation time");
+    ok &= expect_contains(object_text(non_sync_plan.objects.back()), "\"data\":[0,500]",
+                         "expected SAP timeline to expose non-sync fragment and EPT");
 
     const auto progressive_bytes = make_progressive_test_mp4();
     ParsedMp4 progressive{
@@ -314,11 +383,14 @@ int main() {
 
     ok &= expect(progressive.tracks.size() == 1, "expected one progressive track");
     ok &= expect(!remuxed.initialization_segment.owned_bytes.empty(), "expected synthesized init segment");
-    ok &= expect(remuxed.fragments.size() == 1, "expected one remuxed fragment");
+    ok &= expect(remuxed.fragments.size() == 2, "expected split remuxed samples to produce two media objects");
     ok &= expect(!remuxed.fragments.front().payload.owned_bytes.empty(), "expected synthesized media fragment");
-    ok &= expect(remuxed_plan.objects.size() == 2, "expected catalog and media objects for remuxed file");
+    ok &= expect(!remuxed.fragments[1].payload.owned_bytes.empty(), "expected second synthesized media fragment");
+    ok &= expect(remuxed_plan.objects.size() == 4, "expected catalog, two media objects, and SAP timeline object for remuxed file");
     ok &= expect(remuxed_plan.objects.front().track_name == "catalog", "expected remuxed catalog object first");
     ok &= expect(remuxed_plan.objects[1].track_name == "vide_1", "expected remuxed track naming");
+    ok &= expect(remuxed_plan.objects[2].track_name == "vide_1", "expected second remuxed media object");
+    ok &= expect(remuxed_plan.objects[3].track_name == "vide_1_sap", "expected remuxed SAP timeline track");
     ok &= expect(remuxed_plan.track_initializations.size() == 1, "expected one remuxed track init payload");
     ok &= expect(remuxed_plan.track_initializations.front().track_name == "vide_1",
                  "expected remuxed init payload to follow the media track name");
@@ -354,7 +426,19 @@ int main() {
     ok &= expect_contains(catalog_text, "\"channelCount\":2", "expected audio channel count in catalog");
     ok &= expect_contains(catalog_text, "\"renderGroup\":1", "expected renderGroup in catalog");
     ok &= expect_contains(catalog_text, "\"isLive\":false", "expected VOD isLive flag in catalog");
+    ok &= expect_contains(catalog_text, "\"name\":\"vide_1_sap\"", "expected video SAP timeline track in catalog");
+    ok &= expect_contains(catalog_text, "\"name\":\"soun_2_sap\"", "expected audio SAP timeline track in catalog");
+    ok &= expect_contains(catalog_text, "\"packaging\":\"eventtimeline\"", "expected event timeline packaging in catalog");
+    ok &= expect_contains(catalog_text, "\"eventType\":\"org.ietf.moq.cmsf.sap\"", "expected CMSF SAP event type in catalog");
+    ok &= expect_contains(catalog_text, "\"mimeType\":\"application/json\"", "expected event timeline mime type in catalog");
+    ok &= expect_contains(catalog_text, "\"depends\":[\"vide_1\"]", "expected video SAP timeline dependency");
+    ok &= expect_contains(catalog_text, "\"depends\":[\"soun_2\"]", "expected audio SAP timeline dependency");
     ok &= expect(multitrack_plan.track_initializations.size() == 2, "expected per-track init payloads in plan");
+    ok &= expect(multitrack_plan.objects.size() == 3, "expected catalog plus per-track SAP timeline objects without media");
+    ok &= expect(multitrack_plan.objects[1].track_name == "vide_1_sap", "expected video SAP object after catalog");
+    ok &= expect(multitrack_plan.objects[2].track_name == "soun_2_sap", "expected audio SAP object after catalog");
+    ok &= expect_contains(object_text(multitrack_plan.objects[1]), "[]", "expected empty SAP timeline for init-only video plan");
+    ok &= expect_contains(object_text(multitrack_plan.objects[2]), "[]", "expected empty SAP timeline for init-only audio plan");
 
     const auto video_init_bytes = base64_decode(video_init_data);
     const auto audio_init_bytes = base64_decode(audio_init_data);

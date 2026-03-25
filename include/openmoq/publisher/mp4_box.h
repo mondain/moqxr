@@ -27,6 +27,10 @@ struct TrackDescription {
     std::string codec;
     std::string sample_entry_type;
     std::string track_name;
+    std::string packaging = "cmaf";
+    std::string event_type;
+    std::string mime_type;
+    std::vector<std::string> depends;
     std::uint32_t timescale = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;

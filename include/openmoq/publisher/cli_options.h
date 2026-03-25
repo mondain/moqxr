@@ -20,6 +20,7 @@ struct CliOptions {
     bool endpoint_alpn_overridden = false;
     bool forward = false;
     bool publish_catalog = false;
+    bool split_cmaf_chunks = true;
     bool paced = false;
     bool dump_plan = false;
     std::chrono::seconds subscriber_timeout = std::chrono::seconds(3);

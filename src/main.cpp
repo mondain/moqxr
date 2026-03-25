@@ -14,7 +14,9 @@ int main(int argc, char** argv) {
     try {
         const CliOptions options = parse_cli_options(argc, argv);
         const ParsedMp4 parsed_mp4 = parse_mp4_file(options.input_path.string());
-        const SegmentedMp4 segmented_mp4 = segment_for_cmaf(parsed_mp4);
+        const SegmentedMp4 segmented_mp4 = segment_for_cmaf(parsed_mp4,
+                                                            options.split_cmaf_chunks ? CmafObjectMode::kSplit
+                                                                                      : CmafObjectMode::kCoalesced);
         const PublishPlan plan = build_publish_plan(segmented_mp4, options.draft_version);
 
         if (options.dump_plan || !options.emit_dir.has_value()) {

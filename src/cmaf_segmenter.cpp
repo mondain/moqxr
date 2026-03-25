@@ -28,9 +28,20 @@ struct TrackRemuxInfo {
     std::vector<bool> sync_samples;
 };
 
+struct SampleObjectInfo {
+    std::uint64_t decode_time = 0;
+    std::uint32_t duration = 0;
+    std::uint32_t size = 0;
+    std::uint32_t flags = 0;
+    std::int32_t composition_offset = 0;
+    ByteSpan payload_span;
+};
+
 struct FragmentTiming {
     std::uint64_t start_time_us = 0;
     std::uint64_t duration_us = 0;
+    std::uint64_t earliest_presentation_time_us = 0;
+    std::uint8_t sap_type = 0;
 };
 
 std::uint32_t read_be32(std::span<const std::uint8_t> bytes, std::size_t offset) {
@@ -59,7 +70,7 @@ std::string fragment_track_name(const Mp4Box& moof,
     const Mp4Box* traf = find_child_box(moof, "traf");
     const Mp4Box* tfhd = traf == nullptr ? nullptr : find_child_box(*traf, "tfhd");
     if (tfhd == nullptr || tfhd->payload.size < 8) {
-        return "media";
+        return tracks.size() == 1 ? tracks.front().track_name : "media";
     }
 
     const std::uint32_t track_id = read_be32(bytes, tfhd->payload.offset + 4);
@@ -77,7 +88,7 @@ const TrackDescription* fragment_track_description(const Mp4Box& moof,
     const Mp4Box* traf = find_child_box(moof, "traf");
     const Mp4Box* tfhd = traf == nullptr ? nullptr : find_child_box(*traf, "tfhd");
     if (tfhd == nullptr || tfhd->payload.size < 8) {
-        return nullptr;
+        return tracks.size() == 1 ? &tracks.front() : nullptr;
     }
 
     const std::uint32_t track_id = read_be32(bytes, tfhd->payload.offset + 4);
@@ -95,6 +106,17 @@ std::uint64_t read_be64(std::span<const std::uint8_t> bytes, std::size_t offset)
         value = (value << 8U) | bytes[offset + index];
     }
     return value;
+}
+
+std::uint32_t read_be32_or_zero(std::span<const std::uint8_t> bytes, std::size_t offset) {
+    if (offset + 4 > bytes.size()) {
+        return 0;
+    }
+    return read_be32(bytes, offset);
+}
+
+std::uint32_t track_id_from_trex(const Mp4Box& trex, std::span<const std::uint8_t> bytes) {
+    return read_be32_or_zero(bytes, trex.payload.offset + 4);
 }
 
 void append_be32(std::vector<std::uint8_t>& out, std::uint32_t value) {
@@ -257,6 +279,7 @@ std::vector<std::int32_t> parse_composition_offsets(const Mp4Box* ctts,
 
 FragmentTiming fragment_timing(const Mp4Box& moof,
                                const std::vector<TrackDescription>& tracks,
+                               const std::vector<Mp4Box>& top_level_boxes,
                                std::span<const std::uint8_t> bytes) {
     const TrackDescription* track = fragment_track_description(moof, tracks, bytes);
     if (track == nullptr || track->timescale == 0) {
@@ -265,8 +288,15 @@ FragmentTiming fragment_timing(const Mp4Box& moof,
 
     const Mp4Box* traf = find_child_box(moof, "traf");
     if (traf == nullptr) {
-        return {};
+        return {
+            .start_time_us = 0,
+            .duration_us = 0,
+            .earliest_presentation_time_us = 0,
+            .sap_type = static_cast<std::uint8_t>(track->handler_type == "vide" ? 2 : 1),
+        };
     }
+
+    const std::uint32_t track_id = track->track_id;
 
     std::uint64_t base_decode_time = 0;
     if (const Mp4Box* tfdt = find_child_box(*traf, "tfdt")) {
@@ -280,6 +310,7 @@ FragmentTiming fragment_timing(const Mp4Box& moof,
     }
 
     std::uint32_t default_sample_duration = 0;
+    std::uint32_t default_sample_flags = 0x02000000U;
     if (const Mp4Box* tfhd = find_child_box(*traf, "tfhd")) {
         const std::uint32_t flags = read_full_box_flags(*tfhd, bytes);
         std::size_t cursor = tfhd->payload.offset + 8;
@@ -291,10 +322,35 @@ FragmentTiming fragment_timing(const Mp4Box& moof,
         }
         if ((flags & 0x000008U) != 0 && cursor + 4 <= bytes.size()) {
             default_sample_duration = read_be32(bytes, cursor);
+            cursor += 4;
+        }
+        if ((flags & 0x000010U) != 0 && cursor + 4 <= bytes.size()) {
+            cursor += 4;
+        }
+        if ((flags & 0x000020U) != 0 && cursor + 4 <= bytes.size()) {
+            default_sample_flags = read_be32(bytes, cursor);
+        }
+    }
+
+    if (const Mp4Box* moov = find_first_box(top_level_boxes, "moov")) {
+        if (const Mp4Box* mvex = find_child_box(*moov, "mvex")) {
+            for (const auto& child : mvex->children) {
+                if (child.type != "trex") {
+                    continue;
+                }
+                if (track_id_from_trex(child, bytes) != track_id) {
+                    continue;
+                }
+                default_sample_flags = read_be32_or_zero(bytes, child.payload.offset + 20);
+                break;
+            }
         }
     }
 
     std::uint64_t duration = 0;
+    std::uint64_t earliest_presentation_time = base_decode_time;
+    bool earliest_presentation_time_set = false;
+    std::uint32_t first_sample_flags = default_sample_flags;
     if (const Mp4Box* trun = find_child_box(*traf, "trun")) {
         const std::uint32_t flags = read_full_box_flags(*trun, bytes);
         std::size_t cursor = trun->payload.offset + 4;
@@ -304,32 +360,62 @@ FragmentTiming fragment_timing(const Mp4Box& moof,
             if ((flags & 0x000001U) != 0) {
                 cursor += 4;
             }
+            bool first_sample_flags_present = false;
             if ((flags & 0x000004U) != 0) {
+                first_sample_flags = read_be32_or_zero(bytes, cursor);
+                first_sample_flags_present = true;
                 cursor += 4;
             }
+            std::uint64_t sample_decode_time = base_decode_time;
             for (std::uint32_t index = 0; index < sample_count && cursor <= bytes.size(); ++index) {
                 std::uint32_t sample_duration = default_sample_duration;
                 if ((flags & 0x000100U) != 0 && cursor + 4 <= bytes.size()) {
                     sample_duration = read_be32(bytes, cursor);
                     cursor += 4;
                 }
+                std::uint32_t sample_flags = first_sample_flags_present && index == 0 ? first_sample_flags : default_sample_flags;
+                if ((flags & 0x000400U) != 0 && cursor + 4 <= bytes.size()) {
+                    sample_flags = read_be32(bytes, cursor);
+                    cursor += 4;
+                }
+                std::int32_t composition_offset = 0;
+                if ((flags & 0x000800U) != 0 && cursor + 4 <= bytes.size()) {
+                    composition_offset = static_cast<std::int32_t>(read_be32(bytes, cursor));
+                    cursor += 4;
+                }
+                const std::int64_t presentation_time_signed =
+                    static_cast<std::int64_t>(sample_decode_time) + static_cast<std::int64_t>(composition_offset);
+                const std::uint64_t presentation_time =
+                    presentation_time_signed < 0 ? 0 : static_cast<std::uint64_t>(presentation_time_signed);
+                if (!earliest_presentation_time_set || presentation_time < earliest_presentation_time) {
+                    earliest_presentation_time = presentation_time;
+                    earliest_presentation_time_set = true;
+                }
+                if (index == 0 && (flags & 0x000400U) != 0) {
+                    first_sample_flags = sample_flags;
+                }
                 duration += sample_duration;
                 if ((flags & 0x000200U) != 0) {
                     cursor += 4;
                 }
-                if ((flags & 0x000400U) != 0) {
-                    cursor += 4;
-                }
-                if ((flags & 0x000800U) != 0) {
-                    cursor += 4;
-                }
+                sample_decode_time += sample_duration;
             }
         }
+    }
+
+    std::uint8_t sap_type = 0;
+    const bool first_sample_is_sync = (first_sample_flags & 0x00010000U) == 0;
+    if (track->handler_type != "vide") {
+        sap_type = 1;
+    } else if (first_sample_is_sync) {
+        sap_type = 2;
     }
 
     return {
         .start_time_us = scale_to_us(base_decode_time, track->timescale),
         .duration_us = scale_to_us(duration, track->timescale),
+        .earliest_presentation_time_us = scale_to_us(earliest_presentation_time, track->timescale),
+        .sap_type = sap_type,
     };
 }
 
@@ -479,6 +565,49 @@ std::vector<std::uint8_t> build_trun_box(const TrackRemuxInfo& track, std::uint3
     return make_full_box("trun", 1, 0x000F01, trun_payload);
 }
 
+std::vector<std::uint8_t> build_single_sample_trun_box(const SampleObjectInfo& sample, std::uint32_t data_offset) {
+    std::vector<std::uint8_t> trun_payload;
+    append_be32(trun_payload, 1);
+    append_be32(trun_payload, data_offset);
+    append_be32(trun_payload, sample.duration);
+    append_be32(trun_payload, sample.size);
+    append_be32(trun_payload, sample.flags);
+    append_be32(trun_payload, static_cast<std::uint32_t>(sample.composition_offset));
+    return make_full_box("trun", 1, 0x000F01, trun_payload);
+}
+
+std::vector<std::uint8_t> build_sample_object(std::uint32_t track_id,
+                                              std::size_t sequence,
+                                              const SampleObjectInfo& sample,
+                                              std::span<const std::uint8_t> bytes) {
+    const auto sample_bytes = slice_bytes(bytes, sample.payload_span);
+    std::vector<std::uint8_t> mdat_payload(sample_bytes.begin(), sample_bytes.end());
+
+    std::vector<std::uint8_t> mfhd_payload;
+    append_be32(mfhd_payload, static_cast<std::uint32_t>(sequence + 1));
+    const std::vector<std::uint8_t> mfhd = make_full_box("mfhd", 0, 0, mfhd_payload);
+
+    std::vector<std::uint8_t> tfhd_payload;
+    append_be32(tfhd_payload, track_id);
+    const std::vector<std::uint8_t> tfhd = make_full_box("tfhd", 0, 0x020000, tfhd_payload);
+
+    std::vector<std::uint8_t> tfdt_payload;
+    append_be32(tfdt_payload, static_cast<std::uint32_t>(sample.decode_time));
+    const std::vector<std::uint8_t> tfdt = make_full_box("tfdt", 0, 0, tfdt_payload);
+
+    const std::vector<std::uint8_t> placeholder_trun = build_single_sample_trun_box(sample, 0);
+    const std::vector<std::uint8_t> placeholder_traf = make_box("traf", concat_boxes({tfhd, tfdt, placeholder_trun}));
+    const std::vector<std::uint8_t> placeholder_moof = make_box("moof", concat_boxes({mfhd, placeholder_traf}));
+    const std::uint32_t data_offset = static_cast<std::uint32_t>(placeholder_moof.size() + 8);
+
+    const std::vector<std::uint8_t> trun = build_single_sample_trun_box(sample, data_offset);
+    const std::vector<std::uint8_t> traf = make_box("traf", concat_boxes({tfhd, tfdt, trun}));
+    const std::vector<std::uint8_t> moof = make_box("moof", concat_boxes({mfhd, traf}));
+    const std::vector<std::uint8_t> mdat = make_box("mdat", mdat_payload);
+
+    return concat_boxes({moof, mdat});
+}
+
 std::vector<std::uint8_t> build_remuxed_fragment(const TrackRemuxInfo& track,
                                                  std::size_t sequence,
                                                  std::span<const std::uint8_t> bytes) {
@@ -523,9 +652,137 @@ std::uint64_t remux_fragment_duration_us(const TrackRemuxInfo& track) {
                        track.timescale);
 }
 
+std::uint8_t sap_type_from_flags(std::string_view handler_type, std::uint32_t sample_flags) {
+    if (handler_type != "vide") {
+        return 1;
+    }
+    return (sample_flags & 0x00010000U) == 0 ? 2 : 0;
+}
+
+std::uint64_t presentation_time_us(std::uint64_t decode_time,
+                                   std::int32_t composition_offset,
+                                   std::uint32_t timescale) {
+    const std::int64_t presentation_time_signed =
+        static_cast<std::int64_t>(decode_time) + static_cast<std::int64_t>(composition_offset);
+    return scale_to_us(presentation_time_signed < 0 ? 0 : static_cast<std::uint64_t>(presentation_time_signed),
+                       timescale);
+}
+
+std::vector<SampleObjectInfo> parse_fragment_samples(const Mp4Box& moof,
+                                                     const Mp4Box& mdat,
+                                                     const TrackDescription& track,
+                                                     const std::vector<Mp4Box>& top_level_boxes,
+                                                     std::span<const std::uint8_t> bytes) {
+    const Mp4Box* traf = find_child_box(moof, "traf");
+    const Mp4Box* trun = traf == nullptr ? nullptr : find_child_box(*traf, "trun");
+    if (traf == nullptr || trun == nullptr) {
+        return {};
+    }
+
+    std::uint64_t base_decode_time = 0;
+    if (const Mp4Box* tfdt = find_child_box(*traf, "tfdt")) {
+        const std::uint8_t version = bytes[tfdt->payload.offset];
+        const std::size_t time_offset = tfdt->payload.offset + 4;
+        if (version == 1 && time_offset + 8 <= bytes.size()) {
+            base_decode_time = read_be64(bytes, time_offset);
+        } else if (time_offset + 4 <= bytes.size()) {
+            base_decode_time = read_be32(bytes, time_offset);
+        }
+    }
+
+    std::uint32_t default_sample_duration = 0;
+    std::uint32_t default_sample_flags = 0x02000000U;
+    if (const Mp4Box* tfhd = find_child_box(*traf, "tfhd")) {
+        const std::uint32_t flags = read_full_box_flags(*tfhd, bytes);
+        std::size_t cursor = tfhd->payload.offset + 8;
+        if ((flags & 0x000001U) != 0) {
+            cursor += 8;
+        }
+        if ((flags & 0x000002U) != 0) {
+            cursor += 4;
+        }
+        if ((flags & 0x000008U) != 0 && cursor + 4 <= bytes.size()) {
+            default_sample_duration = read_be32(bytes, cursor);
+            cursor += 4;
+        }
+        if ((flags & 0x000010U) != 0 && cursor + 4 <= bytes.size()) {
+            cursor += 4;
+        }
+        if ((flags & 0x000020U) != 0 && cursor + 4 <= bytes.size()) {
+            default_sample_flags = read_be32(bytes, cursor);
+        }
+    }
+    if (const Mp4Box* moov = find_first_box(top_level_boxes, "moov")) {
+        if (const Mp4Box* mvex = find_child_box(*moov, "mvex")) {
+            for (const auto& child : mvex->children) {
+                if (child.type == "trex" && track_id_from_trex(child, bytes) == track.track_id) {
+                    default_sample_flags = read_be32_or_zero(bytes, child.payload.offset + 20);
+                    break;
+                }
+            }
+        }
+    }
+
+    const std::uint32_t trun_flags = read_full_box_flags(*trun, bytes);
+    std::size_t cursor = trun->payload.offset + 4;
+    if (cursor + 4 > bytes.size()) {
+        return {};
+    }
+    const std::uint32_t sample_count = read_be32(bytes, cursor);
+    cursor += 4;
+    if ((trun_flags & 0x000001U) != 0) {
+        cursor += 4;
+    }
+    std::uint32_t first_sample_flags = default_sample_flags;
+    bool first_sample_flags_present = false;
+    if ((trun_flags & 0x000004U) != 0 && cursor + 4 <= bytes.size()) {
+        first_sample_flags = read_be32(bytes, cursor);
+        first_sample_flags_present = true;
+        cursor += 4;
+    }
+
+    std::vector<SampleObjectInfo> samples;
+    samples.reserve(sample_count);
+    std::uint64_t sample_decode_time = base_decode_time;
+    std::size_t payload_offset = mdat.payload.offset;
+    for (std::uint32_t index = 0; index < sample_count && cursor <= bytes.size(); ++index) {
+        std::uint32_t sample_duration = default_sample_duration;
+        if ((trun_flags & 0x000100U) != 0 && cursor + 4 <= bytes.size()) {
+            sample_duration = read_be32(bytes, cursor);
+            cursor += 4;
+        }
+        std::uint32_t sample_size = 0;
+        if ((trun_flags & 0x000200U) != 0 && cursor + 4 <= bytes.size()) {
+            sample_size = read_be32(bytes, cursor);
+            cursor += 4;
+        }
+        std::uint32_t sample_flags = first_sample_flags_present && index == 0 ? first_sample_flags : default_sample_flags;
+        if ((trun_flags & 0x000400U) != 0 && cursor + 4 <= bytes.size()) {
+            sample_flags = read_be32(bytes, cursor);
+            cursor += 4;
+        }
+        std::int32_t composition_offset = 0;
+        if ((trun_flags & 0x000800U) != 0 && cursor + 4 <= bytes.size()) {
+            composition_offset = static_cast<std::int32_t>(read_be32(bytes, cursor));
+            cursor += 4;
+        }
+        samples.push_back({
+            .decode_time = sample_decode_time,
+            .duration = sample_duration,
+            .size = sample_size,
+            .flags = sample_flags,
+            .composition_offset = composition_offset,
+            .payload_span = {.offset = payload_offset, .size = sample_size},
+        });
+        payload_offset += sample_size;
+        sample_decode_time += sample_duration;
+    }
+    return samples;
+}
+
 }  // namespace
 
-SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
+SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4, CmafObjectMode object_mode) {
     const Mp4Box* ftyp = find_first_box(parsed_mp4.top_level_boxes, "ftyp");
     const Mp4Box* moov = find_first_box(parsed_mp4.top_level_boxes, "moov");
     if (ftyp == nullptr || moov == nullptr) {
@@ -553,19 +810,52 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
             throw std::runtime_error("fragmented MP4 must contain matched moof/mdat pairs");
         }
 
-        std::map<std::string, std::size_t> next_sequence_by_track;
+        std::map<std::string, std::size_t> next_group_by_track;
         for (std::size_t index = 0; index < moofs.size(); ++index) {
             if (moofs[index]->span.offset > mdats[index]->span.offset) {
                 throw std::runtime_error("expected moof to precede matching mdat");
             }
-            const FragmentTiming timing = fragment_timing(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes);
             const std::string track_name = fragment_track_name(*moofs[index], parsed_mp4.tracks, parsed_mp4.bytes);
+            const FragmentTiming timing = fragment_timing(*moofs[index], parsed_mp4.tracks, parsed_mp4.top_level_boxes, parsed_mp4.bytes);
+            const std::size_t group_id = next_group_by_track[track_name]++;
+
+            const auto track_it = std::find_if(parsed_mp4.tracks.begin(), parsed_mp4.tracks.end(), [&](const TrackDescription& track) {
+                return track.track_name == track_name;
+            });
+            if (object_mode == CmafObjectMode::kSplit && track_it != parsed_mp4.tracks.end()) {
+                const std::vector<SampleObjectInfo> samples =
+                    parse_fragment_samples(*moofs[index], *mdats[index], *track_it, parsed_mp4.top_level_boxes, parsed_mp4.bytes);
+                if (!samples.empty()) {
+                    for (std::size_t sample_index = 0; sample_index < samples.size(); ++sample_index) {
+                        const auto& sample = samples[sample_index];
+                        segmented.fragments.push_back({
+                            .group_id = group_id,
+                            .object_id = sample_index,
+                            .track_name = track_name,
+                            .start_time_us = scale_to_us(sample.decode_time, track_it->timescale),
+                            .duration_us = scale_to_us(sample.duration, track_it->timescale),
+                            .earliest_presentation_time_us =
+                                presentation_time_us(sample.decode_time, sample.composition_offset, track_it->timescale),
+                            .sap_type = sap_type_from_flags(track_it->handler_type, sample.flags),
+                            .payload = {.span = {},
+                                        .owned_bytes = build_sample_object(track_it->track_id,
+                                                                           group_id * 1000 + sample_index,
+                                                                           sample,
+                                                                           parsed_mp4.bytes)},
+                        });
+                    }
+                    continue;
+                }
+            }
 
             segmented.fragments.push_back({
-                .sequence = next_sequence_by_track[track_name]++,
+                .group_id = group_id,
+                .object_id = 0,
                 .track_name = track_name,
                 .start_time_us = timing.start_time_us,
                 .duration_us = timing.duration_us,
+                .earliest_presentation_time_us = timing.earliest_presentation_time_us,
+                .sap_type = timing.sap_type,
                 .payload = {.span = {.offset = moofs[index]->span.offset,
                                      .size = moofs[index]->span.size + mdats[index]->span.size},
                             .owned_bytes = {}},
@@ -589,13 +879,52 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4) {
         }
 
         const TrackRemuxInfo track_info = parse_track_remux_info(child, parsed_mp4.tracks[track_index], parsed_mp4.bytes);
-        segmented.fragments.push_back({
-            .sequence = track_index,
-            .track_name = track_info.description.track_name,
-            .start_time_us = 0,
-            .duration_us = remux_fragment_duration_us(track_info),
-            .payload = {.span = {}, .owned_bytes = build_remuxed_fragment(track_info, track_index, parsed_mp4.bytes)},
-        });
+        if (object_mode == CmafObjectMode::kSplit) {
+            std::uint64_t decode_time = 0;
+            for (std::size_t sample_index = 0; sample_index < track_info.sample_sizes.size(); ++sample_index) {
+                const SampleObjectInfo sample{
+                    .decode_time = decode_time,
+                    .duration = track_info.sample_durations[sample_index],
+                    .size = track_info.sample_sizes[sample_index],
+                    .flags = sample_flags_for(track_info, sample_index),
+                    .composition_offset = track_info.composition_offsets[sample_index],
+                    .payload_span = {.offset = static_cast<std::size_t>(track_info.sample_offsets[sample_index]),
+                                     .size = track_info.sample_sizes[sample_index]},
+                };
+                segmented.fragments.push_back({
+                    .group_id = track_index,
+                    .object_id = sample_index,
+                    .track_name = track_info.description.track_name,
+                    .start_time_us = scale_to_us(sample.decode_time, track_info.timescale),
+                    .duration_us = scale_to_us(sample.duration, track_info.timescale),
+                    .earliest_presentation_time_us =
+                        presentation_time_us(sample.decode_time, sample.composition_offset, track_info.timescale),
+                    .sap_type = sap_type_from_flags(track_info.description.handler_type, sample.flags),
+                    .payload = {.span = {},
+                                .owned_bytes = build_sample_object(track_info.description.track_id,
+                                                                   track_index * 1000 + sample_index,
+                                                                   sample,
+                                                                   parsed_mp4.bytes)},
+                });
+                decode_time += sample.duration;
+            }
+        } else {
+            segmented.fragments.push_back({
+                .group_id = track_index,
+                .object_id = 0,
+                .track_name = track_info.description.track_name,
+                .start_time_us = 0,
+                .duration_us = remux_fragment_duration_us(track_info),
+                .earliest_presentation_time_us = track_info.composition_offsets.empty()
+                                                     ? 0
+                                                     : scale_to_us(static_cast<std::uint64_t>(std::max(track_info.composition_offsets.front(), 0)),
+                                                                   track_info.timescale),
+                .sap_type = static_cast<std::uint8_t>(track_info.description.handler_type == "vide"
+                                ? (track_info.sync_samples.empty() || track_info.sync_samples.front() ? 2 : 0)
+                                : 1),
+                .payload = {.span = {}, .owned_bytes = build_remuxed_fragment(track_info, track_index, parsed_mp4.bytes)},
+            });
+        }
         ++track_index;
     }
 

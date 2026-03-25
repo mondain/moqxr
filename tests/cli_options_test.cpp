@@ -37,6 +37,7 @@ int main() {
         const CliOptions options = parse({"openmoq-publisher", "--input", "sample.mp4"});
         ok &= expect(options.subscriber_timeout == std::chrono::seconds(3),
                      "expected default subscriber timeout to remain 3 seconds");
+        ok &= expect(options.split_cmaf_chunks, "expected chunk splitting to be enabled by default");
     }
 
     {
@@ -67,6 +68,12 @@ int main() {
         const CliOptions options =
             parse({"openmoq-publisher", "--input", "sample.mp4", "--publish-catalog"});
         ok &= expect(options.publish_catalog, "expected --publish-catalog to enable proactive catalog publish");
+    }
+
+    {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--coalesce-cmaf-chunks"});
+        ok &= expect(!options.split_cmaf_chunks, "expected --coalesce-cmaf-chunks to disable default chunk splitting");
     }
 
     {

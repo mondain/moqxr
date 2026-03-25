@@ -9,7 +9,7 @@ It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-s
 - Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`
 - Remuxes progressive MP4 input into synthesized fragmented media objects
 - Extracts track metadata and RFC 6381 codec identifiers from MP4 sample tables
-- Builds a publish plan with initialization and media objects
+- Builds a publish plan with catalog, SAP event timeline, and media objects
 - Emits generated objects and catalog metadata to disk for inspection
 - Supports a configurable track namespace, optional paced publication, and draft-aware MOQT control/object encoding
 - Includes packaging, CLI, and MOQT session tests through CTest
@@ -21,7 +21,8 @@ It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-s
 For already fragmented input:
 
 - `ftyp` + `moov` are reused as the initialization segment
-- each `moof`/`mdat` pair is reused directly as a media object payload
+- by default, each fragmented input is split into lower-latency MOQT media objects within the same group when per-sample boundaries can be derived
+- `--coalesce-cmaf-chunks` keeps the older one-object-per-fragment behavior
 - the pipeline preserves source-byte spans until optional file emission
 
 ### Progressive MP4 remux path
@@ -31,6 +32,7 @@ For non-fragmented input:
 - the tool reads `stbl` tables such as `stsz`, `stsc`, `stco` or `co64`, `stts`, and optional `ctts` and `stss`
 - it synthesizes a fragmented initialization segment by adding `mvex` and `trex`
 - it builds synthetic `moof` + `mdat` payloads from the original sample data
+- by default, progressive remux output is split into multiple MOQT objects per group for lower latency
 
 This keeps the project aligned with CMAF-style publication while reusing the same publish-plan model for local inspection and transport-driven publication.
 
@@ -126,7 +128,8 @@ This covers:
 Publish-plan numbering note:
 
 - `group_id` is allocated per track, not across all tracks, so interleaved audio and video fragments can both use `0, 1, 2, ...`
-- `object_id` is currently `0` for each emitted fragment because this publisher currently emits one object per group
+- by default, `object_id` advances within a group when CMAF content is split into multiple MOQT objects for lower latency
+- `--coalesce-cmaf-chunks` forces `object_id = 0` for the current one-object-per-group fallback
 
 If you want the packaging and transport tests without the CLI target, use the secondary build tree:
 
@@ -169,6 +172,7 @@ Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
 The output directory should contain:
 
 - `catalog.json`
+- one `*_sap_g*_o*.json` file per emitted SAP event timeline object
 - one `*_init.mp4` file per media track
 - one `*_media.mp4` file per emitted media object
 - one `*_probe.mp4` file per emitted media object for direct `ffprobe` use
@@ -179,6 +183,7 @@ The catalog format includes:
 - `role` with values such as `video` and `audio`
 - RFC 6381 `codec` strings such as `avc1.64000C` and `mp4a.40.2`
 - `renderGroup` and `isLive`
+- SAP event timeline tracks with `packaging: "eventtimeline"` and `eventType: "org.ietf.moq.cmsf.sap"`
 - `width` and `height` for video tracks
 - `sampleRate` and `channelCount` for audio tracks
 - base64-encoded per-track CMAF initialization segment (`ftyp` + `moov`) in `initData`
@@ -216,6 +221,8 @@ Behavior notes:
 - `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
 - with `--forward 0`, subscribers are still expected to request tracks explicitly; by default that includes subscribing to `catalog` if they need track discovery
 - `--publish-catalog` keeps `--forward 0` for media tracks but proactively publishes the `catalog` track through the normal `PUBLISH` / `PUBLISH_OK` path so downstream consumers can discover available tracks without first subscribing to `catalog`
+- media packaging defaults to lower-latency split MOQT objects per group when chunk/sample boundaries are available
+- `--coalesce-cmaf-chunks` disables that split and falls back to one media object per group
 - when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
 - `--forward 1` proactively publishes tracks and objects after namespace setup completes
 - `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 3 seconds
@@ -267,6 +274,11 @@ Transport-oriented CLI flags are also present now:
   --insecure
 ```
 
+Chunk/object mapping:
+
+- default behavior is lower-latency split publication, which emits multiple MOQT objects in the same group when CMAF chunk/sample boundaries are available
+- `--coalesce-cmaf-chunks` restores one media object per group
+
 ALPN selection:
 
 - draft-14 defaults to `moq-00`
@@ -276,7 +288,8 @@ ALPN selection:
 Catalog note:
 
 - `catalog.json` uses the CMSF-style `role` field such as `video` and `audio`
-- `publish-plan.txt` and `--dump-plan` still print an internal debug `kind=` label for object type (`catalog` vs `media`); that debug label is not part of the catalog spec
+- `catalog.json` also advertises per-track SAP event timeline tracks using CMSF `eventtimeline` metadata
+- `publish-plan.txt` and `--dump-plan` still print an internal debug `kind=` label for object type (`catalog`, `metadata`, or `media`); that debug label is not part of the catalog spec
 
 ## Creating Fragmented MP4 with FFmpeg
 

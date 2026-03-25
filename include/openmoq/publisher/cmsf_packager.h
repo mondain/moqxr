@@ -12,6 +12,7 @@ namespace openmoq::publisher {
 
 enum class CmsfObjectKind {
     kInitialization,
+    kMetadata,
     kMedia,
 };
 
