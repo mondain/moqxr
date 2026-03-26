@@ -30,6 +30,7 @@ struct CliOptions {
     bool endpoint_alpn_overridden = false;
     bool forward = false;
     bool publish_catalog = false;
+    bool include_sap = false;
     bool split_cmaf_chunks = true;
     bool paced = false;
     bool dump_plan = false;

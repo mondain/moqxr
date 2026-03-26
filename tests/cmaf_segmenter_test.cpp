@@ -303,6 +303,10 @@ bool expect_contains(std::string_view haystack, std::string_view needle, const s
     return expect(haystack.find(needle) != std::string_view::npos, message);
 }
 
+bool expect_not_contains(std::string_view haystack, std::string_view needle, const std::string& message) {
+    return expect(haystack.find(needle) == std::string_view::npos, message);
+}
+
 }  // namespace
 
 int main() {
@@ -321,16 +325,18 @@ int main() {
 
     const auto segmented = segment_for_cmaf(fragmented);
     const auto plan = build_publish_plan(segmented, DraftVersion::kDraft14);
+    const auto sap_plan = build_publish_plan(segmented, DraftVersion::kDraft14, true);
 
     ok &= expect(fragmented.top_level_boxes.size() == 4, "expected 4 top-level boxes");
     ok &= expect(fragmented.tracks.size() == 1, "expected one extracted fragmented track");
     ok &= expect(fragmented.tracks.front().codec == "avc1.64000C", "expected RFC 6381 avc1 codec");
     ok &= expect(segmented.fragments.size() == 1, "expected one fragmented media fragment");
-    ok &= expect(plan.objects.size() == 3, "expected catalog, one fragmented media object, and one SAP timeline object");
+    ok &= expect(plan.objects.size() == 2, "expected catalog and one fragmented media object when SAP is disabled");
     ok &= expect(plan.objects.front().track_name == "catalog", "expected catalog object first");
-    ok &= expect(plan.objects.back().track_name == "vide_1_sap", "expected SAP timeline object for fragmented video");
-    ok &= expect_contains(object_text(plan.objects.back()), "\"l\":[0,0]", "expected fragmented SAP timeline location");
-    ok &= expect_contains(object_text(plan.objects.back()), "\"data\":[2,0]", "expected fragmented SAP type and EPT");
+    ok &= expect(sap_plan.objects.size() == 3, "expected SAP-enabled plan to add one SAP timeline object");
+    ok &= expect(sap_plan.objects.back().track_name == "vide_1_sap", "expected SAP timeline object for fragmented video");
+    ok &= expect_contains(object_text(sap_plan.objects.back()), "\"l\":[0,0]", "expected fragmented SAP timeline location");
+    ok &= expect_contains(object_text(sap_plan.objects.back()), "\"data\":[2,0]", "expected fragmented SAP type and EPT");
     ok &= expect(payload_size(segmented.initialization_segment) > 0, "expected fragmented init payload");
     ok &= expect(payload_size(segmented.fragments.front().payload) > 0, "expected fragmented media payload");
 
@@ -372,7 +378,7 @@ int main() {
         },
     };
     const auto non_sync_segmented = segment_for_cmaf(non_sync_fragmented);
-    const auto non_sync_plan = build_publish_plan(non_sync_segmented, DraftVersion::kDraft14);
+    const auto non_sync_plan = build_publish_plan(non_sync_segmented, DraftVersion::kDraft14, true);
     ok &= expect(non_sync_segmented.fragments.size() == 1, "expected one non-sync fragmented media fragment");
     ok &= expect(non_sync_segmented.fragments.front().sap_type == 0, "expected non-sync fragmented SAP type 0");
     ok &= expect(non_sync_segmented.fragments.front().earliest_presentation_time_us == 500000,
@@ -390,17 +396,19 @@ int main() {
 
     const auto remuxed = segment_for_cmaf(progressive);
     const auto remuxed_plan = build_publish_plan(remuxed, DraftVersion::kDraft14);
+    const auto remuxed_sap_plan = build_publish_plan(remuxed, DraftVersion::kDraft14, true);
 
     ok &= expect(progressive.tracks.size() == 1, "expected one progressive track");
     ok &= expect(!remuxed.initialization_segment.owned_bytes.empty(), "expected synthesized init segment");
     ok &= expect(remuxed.fragments.size() == 2, "expected split remuxed samples to produce two media objects");
     ok &= expect(!remuxed.fragments.front().payload.owned_bytes.empty(), "expected synthesized media fragment");
     ok &= expect(!remuxed.fragments[1].payload.owned_bytes.empty(), "expected second synthesized media fragment");
-    ok &= expect(remuxed_plan.objects.size() == 4, "expected catalog, two media objects, and SAP timeline object for remuxed file");
+    ok &= expect(remuxed_plan.objects.size() == 3, "expected catalog and two media objects for remuxed file by default");
     ok &= expect(remuxed_plan.objects.front().track_name == "catalog", "expected remuxed catalog object first");
     ok &= expect(remuxed_plan.objects[1].track_name == "vide_1", "expected remuxed track naming");
     ok &= expect(remuxed_plan.objects[2].track_name == "vide_1", "expected second remuxed media object");
-    ok &= expect(remuxed_plan.objects[3].track_name == "vide_1_sap", "expected remuxed SAP timeline track");
+    ok &= expect(remuxed_sap_plan.objects.size() == 4, "expected SAP-enabled remuxed plan to add timeline object");
+    ok &= expect(remuxed_sap_plan.objects[3].track_name == "vide_1_sap", "expected remuxed SAP timeline track");
     ok &= expect(remuxed_plan.track_initializations.size() == 1, "expected one remuxed track init payload");
     ok &= expect(remuxed_plan.track_initializations.front().track_name == "vide_1",
                  "expected remuxed init payload to follow the media track name");
@@ -419,8 +427,11 @@ int main() {
         },
     };
     const auto multitrack_plan = build_publish_plan(multitrack_segmented, DraftVersion::kDraft14);
+    const auto multitrack_sap_plan = build_publish_plan(multitrack_segmented, DraftVersion::kDraft14, true);
     const std::string catalog_text(multitrack_plan.objects.front().owned_payload.begin(),
                                    multitrack_plan.objects.front().owned_payload.end());
+    const std::string sap_catalog_text(multitrack_sap_plan.objects.front().owned_payload.begin(),
+                                       multitrack_sap_plan.objects.front().owned_payload.end());
     const std::string video_init_data = catalog_init_data(catalog_text, "vide_1");
     const std::string audio_init_data = catalog_init_data(catalog_text, "soun_2");
     ok &= expect(!video_init_data.empty(), "expected video initData in catalog");
@@ -436,19 +447,22 @@ int main() {
     ok &= expect_contains(catalog_text, "\"channelCount\":2", "expected audio channel count in catalog");
     ok &= expect_contains(catalog_text, "\"renderGroup\":1", "expected renderGroup in catalog");
     ok &= expect_contains(catalog_text, "\"isLive\":false", "expected VOD isLive flag in catalog");
-    ok &= expect_contains(catalog_text, "\"name\":\"vide_1_sap\"", "expected video SAP timeline track in catalog");
-    ok &= expect_contains(catalog_text, "\"name\":\"soun_2_sap\"", "expected audio SAP timeline track in catalog");
-    ok &= expect_contains(catalog_text, "\"packaging\":\"eventtimeline\"", "expected event timeline packaging in catalog");
-    ok &= expect_contains(catalog_text, "\"eventType\":\"org.ietf.moq.cmsf.sap\"", "expected CMSF SAP event type in catalog");
-    ok &= expect_contains(catalog_text, "\"mimeType\":\"application/json\"", "expected event timeline mime type in catalog");
-    ok &= expect_contains(catalog_text, "\"depends\":[\"vide_1\"]", "expected video SAP timeline dependency");
-    ok &= expect_contains(catalog_text, "\"depends\":[\"soun_2\"]", "expected audio SAP timeline dependency");
+    ok &= expect_not_contains(catalog_text, "\"name\":\"vide_1_sap\"", "expected video SAP track to be absent from the default catalog");
+    ok &= expect_not_contains(catalog_text, "\"name\":\"soun_2_sap\"", "expected audio SAP track to be absent from the default catalog");
+    ok &= expect_contains(sap_catalog_text, "\"name\":\"vide_1_sap\"", "expected video SAP timeline track in SAP-enabled catalog");
+    ok &= expect_contains(sap_catalog_text, "\"name\":\"soun_2_sap\"", "expected audio SAP timeline track in SAP-enabled catalog");
+    ok &= expect_contains(sap_catalog_text, "\"packaging\":\"eventtimeline\"", "expected event timeline packaging in SAP-enabled catalog");
+    ok &= expect_contains(sap_catalog_text, "\"eventType\":\"org.ietf.moq.cmsf.sap\"", "expected CMSF SAP event type in SAP-enabled catalog");
+    ok &= expect_contains(sap_catalog_text, "\"mimeType\":\"application/json\"", "expected event timeline mime type in SAP-enabled catalog");
+    ok &= expect_contains(sap_catalog_text, "\"depends\":[\"vide_1\"]", "expected video SAP timeline dependency");
+    ok &= expect_contains(sap_catalog_text, "\"depends\":[\"soun_2\"]", "expected audio SAP timeline dependency");
     ok &= expect(multitrack_plan.track_initializations.size() == 2, "expected per-track init payloads in plan");
-    ok &= expect(multitrack_plan.objects.size() == 3, "expected catalog plus per-track SAP timeline objects without media");
-    ok &= expect(multitrack_plan.objects[1].track_name == "vide_1_sap", "expected video SAP object after catalog");
-    ok &= expect(multitrack_plan.objects[2].track_name == "soun_2_sap", "expected audio SAP object after catalog");
-    ok &= expect_contains(object_text(multitrack_plan.objects[1]), "[]", "expected empty SAP timeline for init-only video plan");
-    ok &= expect_contains(object_text(multitrack_plan.objects[2]), "[]", "expected empty SAP timeline for init-only audio plan");
+    ok &= expect(multitrack_plan.objects.size() == 1, "expected only the catalog object in the default init-only plan");
+    ok &= expect(multitrack_sap_plan.objects.size() == 3, "expected catalog plus per-track SAP timeline objects when SAP is enabled");
+    ok &= expect(multitrack_sap_plan.objects[1].track_name == "vide_1_sap", "expected video SAP object after catalog");
+    ok &= expect(multitrack_sap_plan.objects[2].track_name == "soun_2_sap", "expected audio SAP object after catalog");
+    ok &= expect_contains(object_text(multitrack_sap_plan.objects[1]), "[]", "expected empty SAP timeline for init-only video plan");
+    ok &= expect_contains(object_text(multitrack_sap_plan.objects[2]), "[]", "expected empty SAP timeline for init-only audio plan");
 
     const auto video_init_bytes = base64_decode(video_init_data);
     const auto audio_init_bytes = base64_decode(audio_init_data);

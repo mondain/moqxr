@@ -121,6 +121,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
             options.forward = parse_forward_flag(require_value("--forward"));
         } else if (argument == "--publish-catalog") {
             options.publish_catalog = true;
+        } else if (argument == "--sap") {
+            options.include_sap = true;
         } else if (argument == "--coalesce-cmaf-chunks" || argument == "--coalesce-cmaf-chunk") {
             options.split_cmaf_chunks = false;
         } else if (argument == "--timeout") {
@@ -155,7 +157,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
            " --input <mp4|-> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
-           " [--publish-catalog] [--coalesce-cmaf-chunks|--coalesce-cmaf-chunk] [--paced] [--dump-plan] [--emit-dir <dir>]"
+           " [--publish-catalog] [--sap] [--coalesce-cmaf-chunks|--coalesce-cmaf-chunk] [--paced] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path] [--alpn value] [--sni value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }

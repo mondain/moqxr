@@ -42,6 +42,7 @@ int main() {
                      "expected file input to remain the default input source kind");
         ok &= expect(options.input_source.path == "sample.mp4",
                      "expected file input path to be preserved");
+        ok &= expect(!options.include_sap, "expected SAP track creation to be disabled by default");
     }
 
     {
@@ -72,6 +73,12 @@ int main() {
         const CliOptions options =
             parse({"openmoq-publisher", "--input", "sample.mp4", "--publish-catalog"});
         ok &= expect(options.publish_catalog, "expected --publish-catalog to enable proactive catalog publish");
+    }
+
+    {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--sap"});
+        ok &= expect(options.include_sap, "expected --sap to enable SAP track creation");
     }
 
     {

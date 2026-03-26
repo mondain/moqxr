@@ -12,6 +12,7 @@ It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-s
 - Builds a publish plan with catalog, SAP event timeline, and media objects
 - Emits generated objects and catalog metadata to disk for inspection
 - Supports a configurable track namespace, optional paced publication, and draft-aware MOQT control/object encoding
+- Can optionally add per-track SAP event timeline metadata with a CLI flag
 - Includes packaging, CLI, and MOQT session tests through CTest
 
 ## Design overview
@@ -102,6 +103,34 @@ Useful CMake options:
 - `-DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic`
 - `-DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON|OFF`
 
+## Quick Start
+
+If you already have a sample MP4 and just want to see what the publisher does, these are the most useful first commands:
+
+Inspect the publish plan with the default settings:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --dump-plan
+```
+
+Inspect the same input with SAP event timeline metadata enabled:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --sap --dump-plan
+```
+
+Emit the catalog and media objects to disk:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --emit-dir out/
+```
+
+Stream the input over stdin instead of reading it from a file path:
+
+```bash
+cat sample.mp4 | ./build/openmoq-publisher --input - --dump-plan
+```
+
 ## How To Test
 
 ### Packaging and session tests
@@ -130,6 +159,7 @@ Publish-plan numbering note:
 - `group_id` is allocated per track, not across all tracks, so interleaved audio and video fragments can both use `0, 1, 2, ...`
 - by default, `object_id` advances within a group when CMAF content is split into multiple MOQT objects for lower latency
 - `--coalesce-cmaf-chunks` forces `object_id = 0` for the current one-object-per-group fallback
+- SAP event timeline tracks are disabled by default; add `--sap` when you want catalog and metadata objects for `*_sap` tracks
 
 If you want the packaging and transport tests without the CLI target, use the secondary build tree:
 
@@ -162,12 +192,25 @@ Input source note:
 - `--input <path>` reads an MP4 from a regular file
 - `--input -` reads the MP4 byte stream from standard input, which allows `cat`, `ffmpeg`, or other producer pipelines to feed the publisher directly
 - fragmented and progressive MP4 inputs are both supported through either source type
+- SAP event timeline tracks are disabled by default; add `--sap` to include `*_sap` metadata tracks and objects in the publish plan
 
 Use `--dump-plan` to inspect the generated publish plan without touching the network:
 
 ```bash
 ./build/openmoq-publisher --input sample.mp4 --draft 14 --dump-plan
 ```
+
+Include SAP event timeline output explicitly:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --draft 14 --sap --dump-plan
+```
+
+The difference is:
+
+- default output includes the `catalog` object plus media objects
+- `--sap` additionally creates `*_sap` metadata tracks and objects
+- this affects both `--dump-plan` output and emitted files under `--emit-dir`
 
 Use stdin when the source is already being produced by another command:
 
@@ -192,14 +235,23 @@ Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
 ./build/openmoq-publisher --input sample.mp4 --draft 14 --emit-dir out/
 ```
 
+Emit the same plan with SAP metadata enabled:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --draft 14 --sap --emit-dir out/
+```
+
 The output directory should contain:
 
 - `catalog.json`
-- one `*_sap_g*_o*.json` file per emitted SAP event timeline object
 - one `*_init.mp4` file per media track
 - one `*_media.mp4` file per emitted media object
 - one `*_probe.mp4` file per emitted media object for direct `ffprobe` use
 - `publish-plan.txt`
+
+When `--sap` is enabled, the output directory also contains:
+
+- one `*_sap_g*_o*.json` file per emitted SAP event timeline object
 
 The catalog format includes:
 
@@ -210,6 +262,13 @@ The catalog format includes:
 - `width` and `height` for video tracks
 - `sampleRate` and `channelCount` for audio tracks
 - base64-encoded per-track CMAF initialization segment (`ftyp` + `moov`) in `initData`
+
+When `--sap` is enabled, `catalog.json` also includes:
+
+- one `*_sap` track per media track
+- `packaging: "eventtimeline"`
+- `eventType: "org.ietf.moq.cmsf.sap"`
+- `depends` pointing back to the corresponding media track
 
 ### Relay interoperability test
 
@@ -223,6 +282,20 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --forward 0 \
   --timeout 10 \
   --paced \
+  --insecure
+```
+
+Publish the same stream with SAP timeline tracks included:
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
+  --input sample.mp4 \
+  --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
+  --namespace interop \
+  --forward 0 \
+  --timeout 10 \
+  --paced \
+  --sap \
   --insecure
 ```
 
@@ -244,6 +317,7 @@ Behavior notes:
 - `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
 - with `--forward 0`, subscribers are still expected to request tracks explicitly; by default that includes subscribing to `catalog` if they need track discovery
 - `--publish-catalog` keeps `--forward 0` for media tracks but proactively publishes the `catalog` track through the normal `PUBLISH` / `PUBLISH_OK` path so downstream consumers can discover available tracks without first subscribing to `catalog`
+- `--sap` adds per-track `*_sap` event timeline tracks and metadata objects; by default those tracks are not created
 - media packaging defaults to lower-latency split MOQT objects per group when chunk/sample boundaries are available
 - `--coalesce-cmaf-chunks` disables that split and falls back to one media object per group
 - when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
@@ -272,10 +346,22 @@ Inspect the publish plan for an already fragmented MP4:
 ./build/openmoq-publisher --input sample-fragmented.mp4 --draft 14 --dump-plan
 ```
 
+Inspect the same fragmented MP4 with SAP metadata enabled:
+
+```bash
+./build/openmoq-publisher --input sample-fragmented.mp4 --draft 14 --sap --dump-plan
+```
+
 Emit object payloads for a progressive MP4 after remux:
 
 ```bash
 ./build/openmoq-publisher --input sample-progressive.mp4 --draft 14 --emit-dir out/
+```
+
+Emit a progressive MP4 after remux with SAP metadata enabled:
+
+```bash
+./build/openmoq-publisher --input sample-progressive.mp4 --draft 14 --sap --emit-dir out/
 ```
 
 Try the draft-16 compatibility profile:
@@ -297,6 +383,20 @@ Transport-oriented CLI flags are also present now:
   --insecure
 ```
 
+If you want subscribers or downstream tools to see SAP event timeline tracks, add `--sap`:
+
+```bash
+./build/openmoq-publisher \
+  --input sample.mp4 \
+  --endpoint localhost:4433 \
+  --namespace media \
+  --forward 0 \
+  --timeout 3 \
+  --paced \
+  --sap \
+  --insecure
+```
+
 The same CLI accepts stdin for transport publishing as well:
 
 ```bash
@@ -315,6 +415,11 @@ Chunk/object mapping:
 - default behavior is lower-latency split publication, which emits multiple MOQT objects in the same group when CMAF chunk/sample boundaries are available
 - `--coalesce-cmaf-chunks` restores one media object per group
 
+SAP metadata:
+
+- by default the catalog only includes media tracks plus the top-level `catalog` object
+- `--sap` adds per-track `*_sap` event timeline entries to the catalog and emits matching metadata objects
+
 ALPN selection:
 
 - draft-14 defaults to `moq-00`
@@ -324,7 +429,7 @@ ALPN selection:
 Catalog note:
 
 - `catalog.json` uses the CMSF-style `role` field such as `video` and `audio`
-- `catalog.json` also advertises per-track SAP event timeline tracks using CMSF `eventtimeline` metadata
+- with `--sap`, `catalog.json` also advertises per-track SAP event timeline tracks using CMSF `eventtimeline` metadata
 - `publish-plan.txt` and `--dump-plan` still print an internal debug `kind=` label for object type (`catalog`, `metadata`, or `media`); that debug label is not part of the catalog spec
 
 ## Creating Fragmented MP4 with FFmpeg

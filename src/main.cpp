@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
         const SegmentedMp4 segmented_mp4 = segment_for_cmaf(parsed_mp4,
                                                             options.split_cmaf_chunks ? CmafObjectMode::kSplit
                                                                                       : CmafObjectMode::kCoalesced);
-        const PublishPlan plan = build_publish_plan(segmented_mp4, options.draft_version);
+        const PublishPlan plan = build_publish_plan(segmented_mp4, options.draft_version, options.include_sap);
 
         if (options.dump_plan || !options.emit_dir.has_value()) {
             std::cout << render_publish_plan(plan);

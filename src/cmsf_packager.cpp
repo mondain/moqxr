@@ -420,21 +420,23 @@ std::vector<std::uint8_t> build_track_codec_init_data(std::span<const std::uint8
 
 }  // namespace
 
-PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion version) {
+PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion version, bool include_sap) {
     std::vector<TrackDescription> tracks = segmented_mp4.tracks;
-    std::uint32_t synthetic_track_id = next_synthetic_track_id(tracks);
-    for (const auto& media_track : segmented_mp4.tracks) {
-        tracks.push_back(TrackDescription{
-            .track_id = synthetic_track_id++,
-            .handler_type = "meta",
-            .codec = {},
-            .sample_entry_type = "eventtimeline",
-            .track_name = sap_track_name(media_track.track_name),
-            .packaging = "eventtimeline",
-            .event_type = "org.ietf.moq.cmsf.sap",
-            .mime_type = "application/json",
-            .depends = {media_track.track_name},
-        });
+    if (include_sap) {
+        std::uint32_t synthetic_track_id = next_synthetic_track_id(tracks);
+        for (const auto& media_track : segmented_mp4.tracks) {
+            tracks.push_back(TrackDescription{
+                .track_id = synthetic_track_id++,
+                .handler_type = "meta",
+                .codec = {},
+                .sample_entry_type = "eventtimeline",
+                .track_name = sap_track_name(media_track.track_name),
+                .packaging = "eventtimeline",
+                .event_type = "org.ietf.moq.cmsf.sap",
+                .mime_type = "application/json",
+                .depends = {media_track.track_name},
+            });
+        }
     }
     tracks.insert(tracks.begin(), TrackDescription{
                                     .track_id = 0,
@@ -511,18 +513,20 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
         });
     }
 
-    for (const auto& media_track : segmented_mp4.tracks) {
-        if (find_track_by_name(plan.tracks, sap_track_name(media_track.track_name)) == nullptr) {
-            continue;
+    if (include_sap) {
+        for (const auto& media_track : segmented_mp4.tracks) {
+            if (find_track_by_name(plan.tracks, sap_track_name(media_track.track_name)) == nullptr) {
+                continue;
+            }
+            plan.objects.push_back({
+                .kind = CmsfObjectKind::kMetadata,
+                .track_name = sap_track_name(media_track.track_name),
+                .group_id = 0,
+                .object_id = 0,
+                .payload = {},
+                .owned_payload = build_sap_timeline_payload(segmented_mp4, media_track),
+            });
         }
-        plan.objects.push_back({
-            .kind = CmsfObjectKind::kMetadata,
-            .track_name = sap_track_name(media_track.track_name),
-            .group_id = 0,
-            .object_id = 0,
-            .payload = {},
-            .owned_payload = build_sap_timeline_payload(segmented_mp4, media_track),
-        });
     }
 
     return plan;
