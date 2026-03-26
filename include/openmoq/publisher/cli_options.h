@@ -10,8 +10,18 @@
 
 namespace openmoq::publisher {
 
+enum class InputSourceKind {
+    kFile,
+    kStdin,
+};
+
+struct InputSource {
+    InputSourceKind kind = InputSourceKind::kFile;
+    std::filesystem::path path;
+};
+
 struct CliOptions {
-    std::filesystem::path input_path;
+    InputSource input_source;
     std::optional<std::filesystem::path> emit_dir;
     std::optional<transport::EndpointConfig> endpoint;
     transport::TlsConfig tls;

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <span>
 #include <string>
 #include <string_view>
@@ -46,6 +47,7 @@ struct ParsedMp4 {
 };
 
 ParsedMp4 parse_mp4_file(const std::string& path);
+ParsedMp4 parse_mp4_stream(std::istream& input, std::string_view source_name);
 std::vector<Mp4Box> parse_mp4_boxes(std::span<const std::uint8_t> bytes);
 std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_level_boxes,
                                              std::span<const std::uint8_t> bytes);

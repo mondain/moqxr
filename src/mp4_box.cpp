@@ -285,16 +285,43 @@ ParsedMp4 parse_mp4_file(const std::string& path) {
         throw std::runtime_error("failed to open MP4 file: " + path);
     }
 
-    input.seekg(0, std::ios::end);
-    const auto size = static_cast<std::size_t>(input.tellg());
-    input.seekg(0, std::ios::beg);
+    return parse_mp4_stream(input, path);
+}
 
+ParsedMp4 parse_mp4_stream(std::istream& input, std::string_view source_name) {
     ParsedMp4 parsed;
-    parsed.bytes.resize(size);
-    input.read(reinterpret_cast<char*>(parsed.bytes.data()), static_cast<std::streamsize>(size));
 
-    if (!input) {
-        throw std::runtime_error("failed to read MP4 file: " + path);
+    input.seekg(0, std::ios::end);
+    if (input.good()) {
+        const auto end = input.tellg();
+        if (end >= 0) {
+            parsed.bytes.resize(static_cast<std::size_t>(end));
+            input.seekg(0, std::ios::beg);
+            input.read(reinterpret_cast<char*>(parsed.bytes.data()), static_cast<std::streamsize>(parsed.bytes.size()));
+            if (!input) {
+                throw std::runtime_error("failed to read MP4 input: " + std::string(source_name));
+            }
+        }
+    }
+
+    if (parsed.bytes.empty()) {
+        input.clear();
+        input.seekg(0, std::ios::beg);
+
+        constexpr std::size_t kChunkSize = 16 * 1024;
+        std::array<char, kChunkSize> buffer{};
+        while (input) {
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const auto bytes_read = input.gcount();
+            if (bytes_read > 0) {
+                parsed.bytes.insert(parsed.bytes.end(),
+                                    reinterpret_cast<const std::uint8_t*>(buffer.data()),
+                                    reinterpret_cast<const std::uint8_t*>(buffer.data()) + bytes_read);
+            }
+        }
+        if (!input.eof()) {
+            throw std::runtime_error("failed to read MP4 input: " + std::string(source_name));
+        }
     }
 
     parsed.top_level_boxes = parse_mp4_boxes(parsed.bytes);

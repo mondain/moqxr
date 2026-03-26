@@ -13,7 +13,9 @@ int main(int argc, char** argv) {
 
     try {
         const CliOptions options = parse_cli_options(argc, argv);
-        const ParsedMp4 parsed_mp4 = parse_mp4_file(options.input_path.string());
+        const ParsedMp4 parsed_mp4 = options.input_source.kind == InputSourceKind::kStdin
+                                         ? parse_mp4_stream(std::cin, "stdin")
+                                         : parse_mp4_file(options.input_source.path.string());
         const SegmentedMp4 segmented_mp4 = segment_for_cmaf(parsed_mp4,
                                                             options.split_cmaf_chunks ? CmafObjectMode::kSplit
                                                                                       : CmafObjectMode::kCoalesced);

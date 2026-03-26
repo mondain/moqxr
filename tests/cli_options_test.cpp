@@ -38,6 +38,10 @@ int main() {
         ok &= expect(options.subscriber_timeout == std::chrono::seconds(3),
                      "expected default subscriber timeout to remain 3 seconds");
         ok &= expect(options.split_cmaf_chunks, "expected chunk splitting to be enabled by default");
+        ok &= expect(options.input_source.kind == openmoq::publisher::InputSourceKind::kFile,
+                     "expected file input to remain the default input source kind");
+        ok &= expect(options.input_source.path == "sample.mp4",
+                     "expected file input path to be preserved");
     }
 
     {
@@ -91,6 +95,14 @@ int main() {
             threw = std::string(error.what()) == "subscriber timeout must be zero or greater";
         }
         ok &= expect(threw, "expected negative --timeout to be rejected");
+    }
+
+    {
+        const CliOptions options = parse({"openmoq-publisher", "--input", "-"});
+        ok &= expect(options.input_source.kind == openmoq::publisher::InputSourceKind::kStdin,
+                     "expected --input - to select stdin");
+        ok &= expect(options.input_source.path.empty(),
+                     "expected stdin input source to avoid storing a file path");
     }
 
     return ok ? 0 : 1;

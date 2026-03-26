@@ -157,10 +157,33 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher-picoquic-smoke-tests
 
 ### CLI dry-run testing
 
+Input source note:
+
+- `--input <path>` reads an MP4 from a regular file
+- `--input -` reads the MP4 byte stream from standard input, which allows `cat`, `ffmpeg`, or other producer pipelines to feed the publisher directly
+- fragmented and progressive MP4 inputs are both supported through either source type
+
 Use `--dump-plan` to inspect the generated publish plan without touching the network:
 
 ```bash
 ./build/openmoq-publisher --input sample.mp4 --draft 14 --dump-plan
+```
+
+Use stdin when the source is already being produced by another command:
+
+```bash
+cat sample.mp4 | ./build/openmoq-publisher --input - --draft 14 --dump-plan
+```
+
+For example, you can inspect an ffmpeg-produced fragmented stream without writing an intermediate file:
+
+```bash
+ffmpeg -i input.mp4 \
+  -map 0:v -map 0:a \
+  -c:v copy \
+  -c:a copy \
+  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
+  -f mp4 - | ./build/openmoq-publisher --input - --draft 14 --dump-plan
 ```
 
 Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
@@ -266,6 +289,19 @@ Transport-oriented CLI flags are also present now:
 ```bash
 ./build/openmoq-publisher \
   --input sample.mp4 \
+  --endpoint localhost:4433 \
+  --namespace media \
+  --forward 0 \
+  --timeout 3 \
+  --paced \
+  --insecure
+```
+
+The same CLI accepts stdin for transport publishing as well:
+
+```bash
+cat sample.mp4 | ./build/openmoq-publisher \
+  --input - \
   --endpoint localhost:4433 \
   --namespace media \
   --forward 0 \

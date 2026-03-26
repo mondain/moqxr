@@ -7,6 +7,13 @@ namespace openmoq::publisher {
 
 namespace {
 
+InputSource parse_input_source(std::string_view value) {
+    if (value == "-") {
+        return InputSource{.kind = InputSourceKind::kStdin, .path = {}};
+    }
+    return InputSource{.kind = InputSourceKind::kFile, .path = std::filesystem::path(value)};
+}
+
 DraftVersion parse_draft(std::string_view value) {
     if (value == "14") {
         return DraftVersion::kDraft14;
@@ -84,7 +91,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
         };
 
         if (argument == "--input") {
-            options.input_path = require_value("--input");
+            options.input_source = parse_input_source(require_value("--input"));
         } else if (argument == "--endpoint") {
             options.endpoint = parse_endpoint(require_value("--endpoint"));
         } else if (argument == "--alpn") {
@@ -131,7 +138,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
         }
     }
 
-    if (options.input_path.empty()) {
+    if (options.input_source.kind == InputSourceKind::kFile && options.input_source.path.empty()) {
         throw std::runtime_error("missing required --input argument");
     }
 
@@ -147,7 +154,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <mp4> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
+           " --input <mp4|-> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
            " [--publish-catalog] [--coalesce-cmaf-chunks|--coalesce-cmaf-chunk] [--paced] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path] [--alpn value] [--sni value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -332,6 +333,15 @@ int main() {
     ok &= expect_contains(object_text(plan.objects.back()), "\"data\":[2,0]", "expected fragmented SAP type and EPT");
     ok &= expect(payload_size(segmented.initialization_segment) > 0, "expected fragmented init payload");
     ok &= expect(payload_size(segmented.fragments.front().payload) > 0, "expected fragmented media payload");
+
+    std::stringstream fragmented_stream(std::ios::in | std::ios::out | std::ios::binary);
+    fragmented_stream.write(reinterpret_cast<const char*>(fragmented_bytes.data()),
+                            static_cast<std::streamsize>(fragmented_bytes.size()));
+    fragmented_stream.seekg(0, std::ios::beg);
+    const ParsedMp4 parsed_from_stream = parse_mp4_stream(fragmented_stream, "memory");
+    ok &= expect(parsed_from_stream.bytes == fragmented_bytes, "expected stream parser to preserve input bytes");
+    ok &= expect(parsed_from_stream.top_level_boxes.size() == 4, "expected stream parser to decode top-level boxes");
+    ok &= expect(parsed_from_stream.tracks.size() == 1, "expected stream parser to extract track metadata");
 
     const auto multitrack_fragmented_bytes = make_multitrack_fragmented_test_mp4();
     ParsedMp4 multitrack_fragmented{
