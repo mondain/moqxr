@@ -9,6 +9,7 @@ It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-s
 - Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`
 - Remuxes progressive MP4 input into synthesized fragmented media objects
 - Extracts track metadata and RFC 6381 codec identifiers from MP4 sample tables
+- Preserves HEVC track signaling and normalizes `hev1` to `hvc1` when samples do not carry in-band parameter sets
 - Builds a publish plan with catalog, SAP event timeline, and media objects
 - Emits generated objects and catalog metadata to disk for inspection
 - Supports a configurable track namespace, optional paced publication, and draft-aware MOQT control/object encoding
@@ -256,12 +257,19 @@ When `--sap` is enabled, the output directory also contains:
 The catalog format includes:
 
 - `role` with values such as `video` and `audio`
-- RFC 6381 `codec` strings such as `avc1.64000C` and `mp4a.40.2`
+- RFC 6381 `codec` strings such as `avc1.64000C`, `mp4a.40.2`, and HEVC values like `hvc1.1.6.L90.B0`
 - `renderGroup` and `isLive`
 - SAP event timeline tracks with `packaging: "eventtimeline"` and `eventType: "org.ietf.moq.cmsf.sap"`
 - `width` and `height` for video tracks
 - `sampleRate` and `channelCount` for audio tracks
 - base64-encoded per-track CMAF initialization segment (`ftyp` + `moov`) in `initData`
+
+HEVC-specific behavior:
+
+- compact HEVC RFC 6381 codec strings are derived from the track `hvcC` box
+- `hev1` tracks that do not carry in-band VPS, SPS, or PPS NAL units are normalized to `hvc1`
+- when in-band HEVC parameter sets are present, the publisher preserves `hev1`
+- emitted initialization segments are rewritten to match the normalized sample entry type, so catalog metadata and init segments stay aligned
 
 When `--sap` is enabled, `catalog.json` also includes:
 
@@ -434,7 +442,7 @@ Catalog note:
 
 ## Creating Fragmented MP4 with FFmpeg
 
-The publisher’s preferred fast path is already fragmented MP4 input. You can generate that with `ffmpeg` by copying compatible AAC-LC or H.264 streams and enabling CMAF-style fragmentation flags:
+The publisher’s preferred fast path is already fragmented MP4 input. You can generate that with `ffmpeg` by copying compatible AAC-LC, H.264, or HEVC streams and enabling CMAF-style fragmentation flags:
 
 ```bash
 ffmpeg -i input.mp4 \
@@ -447,7 +455,7 @@ ffmpeg -i input.mp4 \
   -f mp4 fragmented.mp4
 ```
 
-If the source codecs are not already compatible, re-encode instead of copying. For example (h264 and h265):
+If the source codecs are not already compatible, re-encode instead of copying. For example (`h264` and `hevc`):
 
 ```bash
 ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
@@ -478,6 +486,8 @@ Practical notes:
 - `+frag_keyframe` starts a new fragment on keyframes
 - `+empty_moov` writes initialization metadata up front
 - `+default_base_moof` and `+separate_moof` produce a layout that is easier for fragmented-MP4 pipelines to consume
+- for HEVC, prefer streams that are already `hvc1`-compatible; if a source is tagged `hev1` but keeps VPS/SPS/PPS only in the init segment, the publisher will normalize the advertised codec and emitted init segment to `hvc1`
+- if HEVC samples include in-band parameter sets, the publisher preserves `hev1` because rewriting those samples would be incorrect
 - if you start from a progressive MP4, this project can remux it internally, but pre-fragmented input is still the simpler and more efficient path
 
 ## CI
