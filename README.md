@@ -285,7 +285,7 @@ To attempt a live publish against a relay:
 ```bash
 OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --input sample.mp4 \
-  --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
+  --endpoint moqt://relay.example.com:443/moq \
   --namespace interop \
   --forward 0 \
   --timeout 10 \
@@ -298,7 +298,7 @@ Publish the same stream with SAP timeline tracks included:
 ```bash
 OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --input sample.mp4 \
-  --endpoint moqt://interop-relay.cloudflare.mediaoverquic.com:443/moq \
+  --endpoint moqt://relay.example.com:443/moq \
   --namespace interop \
   --forward 0 \
   --timeout 10 \
