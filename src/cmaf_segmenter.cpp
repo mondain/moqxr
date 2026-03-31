@@ -100,6 +100,59 @@ const TrackDescription* fragment_track_description(const Mp4Box& moof,
     return nullptr;
 }
 
+void patch_sample_entry_type(std::vector<std::uint8_t>& init_bytes, const TrackDescription& track, std::size_t track_index) {
+    const std::vector<Mp4Box> top_level_boxes = parse_mp4_boxes(init_bytes);
+    const Mp4Box* moov = find_first_box(top_level_boxes, "moov");
+    if (moov == nullptr) {
+        return;
+    }
+
+    std::size_t trak_index = 0;
+    for (const auto& child : moov->children) {
+        if (child.type != "trak") {
+            continue;
+        }
+
+        const Mp4Box* tkhd = find_child_box(child, "tkhd");
+        std::uint32_t child_track_id = 0;
+        if (tkhd != nullptr && tkhd->payload.size >= 20) {
+            const std::uint8_t version = init_bytes[tkhd->payload.offset];
+            const std::size_t track_id_offset = tkhd->payload.offset + (version == 1 ? 20 : 12);
+            if (track_id_offset + 4 <= init_bytes.size()) {
+                child_track_id = read_be32(init_bytes, track_id_offset);
+            }
+        }
+
+        const bool matches = track.track_id != 0 ? child_track_id == track.track_id : trak_index == track_index;
+        ++trak_index;
+        if (!matches) {
+            continue;
+        }
+
+        const Mp4Box* mdia = find_child_box(child, "mdia");
+        const Mp4Box* minf = mdia == nullptr ? nullptr : find_child_box(*mdia, "minf");
+        const Mp4Box* stbl = minf == nullptr ? nullptr : find_child_box(*minf, "stbl");
+        const Mp4Box* stsd = stbl == nullptr ? nullptr : find_child_box(*stbl, "stsd");
+        if (stsd == nullptr || stsd->payload.size < 16) {
+            return;
+        }
+
+        const std::size_t sample_entry_type_offset = stsd->payload.offset + 12;
+        if (sample_entry_type_offset + 4 > init_bytes.size() || track.sample_entry_type.size() != 4) {
+            return;
+        }
+
+        std::copy(track.sample_entry_type.begin(), track.sample_entry_type.end(), init_bytes.begin() + sample_entry_type_offset);
+        return;
+    }
+}
+
+void patch_init_segment_sample_entries(std::vector<std::uint8_t>& init_bytes, const std::vector<TrackDescription>& tracks) {
+    for (std::size_t index = 0; index < tracks.size(); ++index) {
+        patch_sample_entry_type(init_bytes, tracks[index], index);
+    }
+}
+
 std::uint64_t read_be64(std::span<const std::uint8_t> bytes, std::size_t offset) {
     std::uint64_t value = 0;
     for (int index = 0; index < 8; ++index) {
@@ -542,6 +595,7 @@ std::vector<std::uint8_t> build_fragmented_init_segment(const Mp4Box& ftyp,
     }
 
     init.insert(init.end(), moov_bytes.begin(), moov_bytes.end());
+    patch_init_segment_sample_entries(init, tracks);
     return init;
 }
 
@@ -804,6 +858,7 @@ SegmentedMp4 segment_for_cmaf(const ParsedMp4& parsed_mp4, CmafObjectMode object
         segmented.initialization_segment.owned_bytes.assign(
             slice_bytes(parsed_mp4.bytes, segmented.initialization_segment.span).begin(),
             slice_bytes(parsed_mp4.bytes, segmented.initialization_segment.span).end());
+        patch_init_segment_sample_entries(segmented.initialization_segment.owned_bytes, parsed_mp4.tracks);
         segmented.initialization_segment.span = {};
 
         if (moofs.size() != mdats.size()) {

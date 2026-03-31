@@ -11,6 +11,11 @@ namespace openmoq::publisher {
 
 namespace {
 
+struct ChunkMapEntry {
+    std::uint32_t first_chunk = 0;
+    std::uint32_t samples_per_chunk = 0;
+};
+
 constexpr std::array<const char*, 11> kContainerBoxes = {
     "moov", "trak", "mdia", "minf", "stbl", "moof", "traf", "mvex", "edts", "dinf", "meta"};
 
@@ -92,6 +97,37 @@ const Mp4Box* find_child(const Mp4Box& box, std::string_view type) {
     return nullptr;
 }
 
+const Mp4Box* find_track_box(const std::vector<Mp4Box>& top_level_boxes,
+                             std::span<const std::uint8_t> bytes,
+                             std::uint32_t track_id,
+                             std::size_t track_index) {
+    const Mp4Box* moov = find_first_box(top_level_boxes, "moov");
+    if (moov == nullptr) {
+        return nullptr;
+    }
+
+    std::size_t current_track_index = 0;
+    for (const auto& child : moov->children) {
+        if (child.type != "trak") {
+            continue;
+        }
+        const Mp4Box* tkhd = find_child(child, "tkhd");
+        std::uint32_t child_track_id = 0;
+        if (tkhd != nullptr && tkhd->payload.size >= 20) {
+            const std::uint8_t version = bytes[tkhd->payload.offset];
+            const std::size_t track_id_offset = tkhd->payload.offset + (version == 1 ? 20 : 12);
+            if (track_id_offset + 4 <= bytes.size()) {
+                child_track_id = read_be32(bytes, track_id_offset);
+            }
+        }
+        if ((track_id != 0 && child_track_id == track_id) || (track_id == 0 && current_track_index == track_index)) {
+            return &child;
+        }
+        ++current_track_index;
+    }
+    return nullptr;
+}
+
 std::string codec_from_stsd(const Mp4Box& stsd, std::span<const std::uint8_t> bytes) {
     if (stsd.payload.size < 16) {
         return "unknown";
@@ -139,6 +175,235 @@ std::string hevc_constraint_string(std::span<const std::uint8_t, 6> constraint_b
         out << hex_byte(constraint_bytes[index]);
     }
     return out.str();
+}
+
+std::vector<std::uint32_t> parse_sample_sizes(const Mp4Box& stsz, std::span<const std::uint8_t> bytes) {
+    const std::size_t table_offset = stsz.payload.offset + 4;
+    const std::uint32_t sample_size = read_be32(bytes, table_offset);
+    const std::uint32_t sample_count = read_be32(bytes, table_offset + 4);
+
+    std::vector<std::uint32_t> sizes;
+    sizes.reserve(sample_count);
+    if (sample_size != 0) {
+        sizes.assign(sample_count, sample_size);
+        return sizes;
+    }
+
+    std::size_t cursor = table_offset + 8;
+    for (std::uint32_t index = 0; index < sample_count && cursor + 4 <= bytes.size(); ++index) {
+        sizes.push_back(read_be32(bytes, cursor));
+        cursor += 4;
+    }
+    return sizes;
+}
+
+std::vector<std::uint64_t> parse_chunk_offsets(const Mp4Box& stbl, std::span<const std::uint8_t> bytes) {
+    if (const Mp4Box* stco = find_child(stbl, "stco")) {
+        const std::size_t table_offset = stco->payload.offset + 4;
+        const std::uint32_t count = read_be32(bytes, table_offset);
+        std::vector<std::uint64_t> offsets;
+        offsets.reserve(count);
+        std::size_t cursor = table_offset + 4;
+        for (std::uint32_t index = 0; index < count && cursor + 4 <= bytes.size(); ++index) {
+            offsets.push_back(read_be32(bytes, cursor));
+            cursor += 4;
+        }
+        return offsets;
+    }
+
+    if (const Mp4Box* co64 = find_child(stbl, "co64")) {
+        const std::size_t table_offset = co64->payload.offset + 4;
+        const std::uint32_t count = read_be32(bytes, table_offset);
+        std::vector<std::uint64_t> offsets;
+        offsets.reserve(count);
+        std::size_t cursor = table_offset + 4;
+        for (std::uint32_t index = 0; index < count && cursor + 8 <= bytes.size(); ++index) {
+            offsets.push_back(read_be64(bytes, cursor));
+            cursor += 8;
+        }
+        return offsets;
+    }
+
+    return {};
+}
+
+std::vector<ChunkMapEntry> parse_chunk_map(const Mp4Box& stsc, std::span<const std::uint8_t> bytes) {
+    const std::size_t table_offset = stsc.payload.offset + 4;
+    const std::uint32_t count = read_be32(bytes, table_offset);
+    std::vector<ChunkMapEntry> entries;
+    entries.reserve(count);
+    std::size_t cursor = table_offset + 4;
+    for (std::uint32_t index = 0; index < count && cursor + 12 <= bytes.size(); ++index) {
+        entries.push_back({
+            .first_chunk = read_be32(bytes, cursor),
+            .samples_per_chunk = read_be32(bytes, cursor + 4),
+        });
+        cursor += 12;
+    }
+    return entries;
+}
+
+std::vector<std::uint64_t> derive_sample_offsets(const std::vector<std::uint64_t>& chunk_offsets,
+                                                 const std::vector<ChunkMapEntry>& chunk_map,
+                                                 const std::vector<std::uint32_t>& sample_sizes) {
+    std::vector<std::uint64_t> sample_offsets;
+    sample_offsets.reserve(sample_sizes.size());
+
+    std::size_t sample_index = 0;
+    std::size_t map_index = 0;
+    for (std::size_t chunk_index = 0; chunk_index < chunk_offsets.size(); ++chunk_index) {
+        while (map_index + 1 < chunk_map.size() && chunk_map[map_index + 1].first_chunk <= chunk_index + 1) {
+            ++map_index;
+        }
+
+        std::uint64_t current_offset = chunk_offsets[chunk_index];
+        for (std::uint32_t in_chunk = 0; in_chunk < chunk_map[map_index].samples_per_chunk; ++in_chunk) {
+            if (sample_index >= sample_sizes.size()) {
+                break;
+            }
+            sample_offsets.push_back(current_offset);
+            current_offset += sample_sizes[sample_index++];
+        }
+    }
+
+    return sample_offsets;
+}
+
+bool hevc_sample_has_parameter_sets(std::span<const std::uint8_t> bytes, const ByteSpan& span) {
+    std::size_t cursor = span.offset;
+    const std::size_t end = span.offset + span.size;
+    while (cursor + 6 <= end) {
+        const std::uint32_t nal_size = read_be32(bytes, cursor);
+        cursor += 4;
+        if (nal_size < 2 || cursor + nal_size > end) {
+            return false;
+        }
+        const std::uint8_t nal_unit_type = static_cast<std::uint8_t>((bytes[cursor] >> 1U) & 0x3FU);
+        if (nal_unit_type == 32 || nal_unit_type == 33 || nal_unit_type == 34) {
+            return true;
+        }
+        cursor += nal_size;
+    }
+    return false;
+}
+
+[[maybe_unused]] bool progressive_hevc_samples_are_hvc1_compatible(const Mp4Box& trak, std::span<const std::uint8_t> bytes) {
+    const Mp4Box* mdia = find_child(trak, "mdia");
+    const Mp4Box* minf = mdia == nullptr ? nullptr : find_child(*mdia, "minf");
+    const Mp4Box* stbl = minf == nullptr ? nullptr : find_child(*minf, "stbl");
+    const Mp4Box* stsz = stbl == nullptr ? nullptr : find_child(*stbl, "stsz");
+    const Mp4Box* stsc = stbl == nullptr ? nullptr : find_child(*stbl, "stsc");
+    if (stbl == nullptr || stsz == nullptr || stsc == nullptr) {
+        return false;
+    }
+
+    const std::vector<std::uint32_t> sample_sizes = parse_sample_sizes(*stsz, bytes);
+    const std::vector<std::uint64_t> chunk_offsets = parse_chunk_offsets(*stbl, bytes);
+    const std::vector<ChunkMapEntry> chunk_map = parse_chunk_map(*stsc, bytes);
+    if (sample_sizes.empty() || chunk_offsets.empty() || chunk_map.empty()) {
+        return false;
+    }
+
+    const std::vector<std::uint64_t> sample_offsets = derive_sample_offsets(chunk_offsets, chunk_map, sample_sizes);
+    if (sample_offsets.size() != sample_sizes.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < sample_sizes.size(); ++index) {
+        const ByteSpan span{.offset = static_cast<std::size_t>(sample_offsets[index]), .size = sample_sizes[index]};
+        if (span.offset + span.size > bytes.size()) {
+            return false;
+        }
+        if (hevc_sample_has_parameter_sets(bytes, span)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool fragmented_hevc_samples_are_hvc1_compatible(std::uint32_t track_id,
+                                                 const std::vector<Mp4Box>& top_level_boxes,
+                                                 std::span<const std::uint8_t> bytes) {
+    const std::vector<const Mp4Box*> moofs = find_boxes(top_level_boxes, "moof");
+    const std::vector<const Mp4Box*> mdats = find_boxes(top_level_boxes, "mdat");
+    if (moofs.empty() || moofs.size() != mdats.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < moofs.size(); ++index) {
+        const Mp4Box* traf = find_child(*moofs[index], "traf");
+        const Mp4Box* tfhd = traf == nullptr ? nullptr : find_child(*traf, "tfhd");
+        const Mp4Box* trun = traf == nullptr ? nullptr : find_child(*traf, "trun");
+        if (traf == nullptr || tfhd == nullptr || trun == nullptr || tfhd->payload.size < 8) {
+            return false;
+        }
+
+        if (read_be32(bytes, tfhd->payload.offset + 4) != track_id) {
+            continue;
+        }
+
+        const std::uint32_t flags = (static_cast<std::uint32_t>(bytes[trun->payload.offset + 1]) << 16U) |
+                                    (static_cast<std::uint32_t>(bytes[trun->payload.offset + 2]) << 8U) |
+                                    static_cast<std::uint32_t>(bytes[trun->payload.offset + 3]);
+        std::size_t cursor = trun->payload.offset + 4;
+        if (cursor + 4 > bytes.size()) {
+            return false;
+        }
+        const std::uint32_t sample_count = read_be32(bytes, cursor);
+        cursor += 4;
+        if ((flags & 0x000001U) != 0) {
+            cursor += 4;
+        }
+        if ((flags & 0x000004U) != 0) {
+            cursor += 4;
+        }
+
+        std::size_t payload_offset = mdats[index]->payload.offset;
+        for (std::uint32_t sample_index = 0; sample_index < sample_count && cursor <= bytes.size(); ++sample_index) {
+            if ((flags & 0x000100U) != 0) {
+                cursor += 4;
+            }
+
+            std::uint32_t sample_size = 0;
+            if ((flags & 0x000200U) != 0 && cursor + 4 <= bytes.size()) {
+                sample_size = read_be32(bytes, cursor);
+                cursor += 4;
+            } else {
+                return false;
+            }
+
+            if ((flags & 0x000400U) != 0) {
+                cursor += 4;
+            }
+            if ((flags & 0x000800U) != 0) {
+                cursor += 4;
+            }
+
+            const ByteSpan span{.offset = payload_offset, .size = sample_size};
+            if (span.offset + span.size > bytes.size()) {
+                return false;
+            }
+            if (hevc_sample_has_parameter_sets(bytes, span)) {
+                return false;
+            }
+            payload_offset += sample_size;
+        }
+    }
+    return true;
+}
+
+bool hevc_track_is_hvc1_compatible(const std::vector<Mp4Box>& top_level_boxes,
+                                   std::span<const std::uint8_t> bytes,
+                                   std::uint32_t track_id,
+                                   std::size_t track_index) {
+    const Mp4Box* trak = find_track_box(top_level_boxes, bytes, track_id, track_index);
+    if (trak == nullptr) {
+        return false;
+    }
+    if (find_boxes(top_level_boxes, "moof").empty()) {
+        return false;
+    }
+    return fragmented_hevc_samples_are_hvc1_compatible(track_id, top_level_boxes, bytes);
 }
 
 std::size_t find_child_box_offset(const Mp4Box& sample_entry,
@@ -362,6 +627,7 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
         return tracks;
     }
 
+    std::size_t track_index = 0;
     for (const auto& trak : moov->children) {
         if (trak.type != "trak") {
             continue;
@@ -388,14 +654,14 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
 
         const std::size_t handler_offset = hdlr->payload.offset + 8;
         const std::string handler_type(reinterpret_cast<const char*>(bytes.data() + handler_offset), 4);
-        const std::string sample_entry_type = codec_from_stsd(*stsd, bytes);
+        const std::string source_sample_entry_type = codec_from_stsd(*stsd, bytes);
+        std::string sample_entry_type = source_sample_entry_type;
         const Mp4Box sample_entry{
             .type = sample_entry_type,
             .span = {.offset = stsd->payload.offset + 8, .size = read_be32(bytes, stsd->payload.offset + 8)},
             .payload = {.offset = stsd->payload.offset + 16, .size = read_be32(bytes, stsd->payload.offset + 8) - 8},
             .children = {},
         };
-        const std::string codec = codec_string_from_sample_entry(sample_entry, bytes);
         std::uint32_t track_id = 0;
         std::uint32_t timescale = 0;
         std::uint32_t width = 0;
@@ -417,6 +683,16 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
                 timescale = read_be32(bytes, timescale_offset);
             }
         }
+        if (source_sample_entry_type == "hev1" && hevc_track_is_hvc1_compatible(top_level_boxes, bytes, track_id, track_index)) {
+            sample_entry_type = "hvc1";
+        }
+        const Mp4Box effective_sample_entry{
+            .type = sample_entry_type,
+            .span = sample_entry.span,
+            .payload = sample_entry.payload,
+            .children = {},
+        };
+        const std::string codec = codec_string_from_sample_entry(effective_sample_entry, bytes);
         if ((sample_entry_type == "avc1" || sample_entry_type == "avc3" || sample_entry_type == "hvc1" ||
              sample_entry_type == "hev1") &&
             sample_entry.payload.offset + 28 <= bytes.size()) {
@@ -447,6 +723,7 @@ std::vector<TrackDescription> extract_tracks(const std::vector<Mp4Box>& top_leve
             .sample_rate = sample_rate,
             .frame_rate = frame_rate,
         });
+        ++track_index;
     }
 
     return tracks;

@@ -276,6 +276,95 @@ std::vector<std::uint8_t> make_hevc_init_mp4(std::uint8_t general_profile_byte,
     return concat({ftyp, moov});
 }
 
+std::vector<std::uint8_t> hevc_length_prefixed_sample(std::initializer_list<std::vector<std::uint8_t>> nal_units) {
+    std::vector<std::uint8_t> sample;
+    for (const auto& nal : nal_units) {
+        append_be32(sample, static_cast<std::uint32_t>(nal.size()));
+        sample.insert(sample.end(), nal.begin(), nal.end());
+    }
+    return sample;
+}
+
+std::vector<std::uint8_t> make_progressive_hevc_mp4(const std::vector<std::uint8_t>& sample_payload) {
+    const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
+    const auto tkhd = make_full_box("tkhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    const auto mdhd = make_full_box("mdhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 232, 0, 0, 3, 232, 0, 0, 0, 0});
+    const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
+    auto video_header = std::vector<std::uint8_t>(70, 0);
+    video_header[24] = 0x01;
+    video_header[25] = 0x40;
+    video_header[26] = 0x00;
+    video_header[27] = 0xf0;
+    const std::vector<std::uint8_t> hvcc_payload = {
+        0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 90,
+    };
+    const auto sample_entry = make_box("hev1", concat({video_header, make_box("hvcC", hvcc_payload)}));
+    const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
+    const auto stts = make_full_box("stts", {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3, 232});
+    const auto stsc = make_full_box("stsc", {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
+    const auto stsz = make_full_box("stsz",
+                                    concat({std::vector<std::uint8_t>{0, 0, 0, 0},
+                                            std::vector<std::uint8_t>{0, 0, 0, 1},
+                                            be32_bytes(static_cast<std::uint32_t>(sample_payload.size()))}));
+    auto stco = make_full_box("stco", {0, 0, 0, 1, 0, 0, 0, 0});
+    const auto stss = make_full_box("stss", {0, 0, 0, 1, 0, 0, 0, 1});
+    const auto stbl = make_box("stbl", concat({stsd, stts, stsc, stsz, stco, stss}));
+    const auto minf = make_box("minf", stbl);
+    const auto mdia = make_box("mdia", concat({mdhd, hdlr, minf}));
+    const auto trak = make_box("trak", concat({tkhd, mdia}));
+    const auto moov = make_box("moov", trak);
+    const auto mdat = make_box("mdat", sample_payload);
+
+    std::vector<std::uint8_t> file = concat({ftyp, moov, mdat});
+    const std::uint32_t mdat_payload_offset = static_cast<std::uint32_t>(ftyp.size() + moov.size() + 8);
+    const std::size_t stco_payload_offset =
+        ftyp.size() + 8 + tkhd.size() + 8 + mdhd.size() + hdlr.size() + 8 + 8 + stsd.size() + stts.size() +
+        stsc.size() + stsz.size() + 16;
+    patch_be32(file, stco_payload_offset, mdat_payload_offset);
+    return file;
+}
+
+std::vector<std::uint8_t> make_fragmented_hevc_mp4(const std::vector<std::uint8_t>& sample_payload) {
+    const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
+    const auto tkhd = make_full_box("tkhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    const auto mdhd = make_full_box("mdhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 232, 0, 0, 3, 232, 0, 0, 0, 0});
+    const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
+    auto video_header = std::vector<std::uint8_t>(70, 0);
+    video_header[24] = 0x01;
+    video_header[25] = 0x40;
+    video_header[26] = 0x00;
+    video_header[27] = 0xf0;
+    const std::vector<std::uint8_t> hvcc_payload = {
+        0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 90,
+    };
+    const auto sample_entry = make_box("hev1", concat({video_header, make_box("hvcC", hvcc_payload)}));
+    const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
+    const auto stbl = make_box("stbl", stsd);
+    const auto minf = make_box("minf", stbl);
+    const auto mdia = make_box("mdia", concat({mdhd, hdlr, minf}));
+    const auto trak = make_box("trak", concat({tkhd, mdia}));
+    const auto trex = make_full_box("trex", {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3, 232, 0, 0, 0, 0, 0, 0, 0, 0});
+    const auto mvex = make_box("mvex", trex);
+    const auto moov = make_box("moov", concat({trak, mvex}));
+
+    const auto tfhd = make_full_box("tfhd", be32_bytes(1));
+    const auto tfdt = make_full_box("tfdt", be32_bytes(0));
+    const auto trun = make_full_box_with_flags("trun",
+                                               0,
+                                               0x000201,
+                                               concat({be32_bytes(1),
+                                                       be32_bytes(0),
+                                                       be32_bytes(static_cast<std::uint32_t>(sample_payload.size()))}));
+    const auto traf = make_box("traf", concat({tfhd, tfdt, trun}));
+    const auto moof = make_box("moof", traf);
+    const auto mdat = make_box("mdat", sample_payload);
+    return concat({ftyp, moov, moof, mdat});
+}
+
 std::size_t find_after(std::string_view haystack, std::string_view needle, std::size_t start = 0) {
     const std::size_t pos = haystack.find(needle, start);
     return pos == std::string_view::npos ? pos : pos + needle.size();
@@ -535,6 +624,40 @@ int main() {
                  "expected compact RFC 6381 HEVC main-profile codec string");
     ok &= expect(hevc_high_tracks.front().codec == "hev1.2.4.H150.B0",
                  "expected compact RFC 6381 HEVC high-tier codec string");
+
+    const auto hevc_slice_only_bytes =
+        make_fragmented_hevc_mp4(hevc_length_prefixed_sample({{0x26, 0x01, 0x80, 0x00}}));
+    const auto hevc_inband_param_bytes =
+        make_fragmented_hevc_mp4(hevc_length_prefixed_sample({{0x40, 0x01, 0x0C}, {0x26, 0x01, 0x80, 0x00}}));
+    std::stringstream hevc_slice_only_stream(std::ios::in | std::ios::out | std::ios::binary);
+    hevc_slice_only_stream.write(reinterpret_cast<const char*>(hevc_slice_only_bytes.data()),
+                                 static_cast<std::streamsize>(hevc_slice_only_bytes.size()));
+    hevc_slice_only_stream.seekg(0, std::ios::beg);
+    const ParsedMp4 parsed_hevc_slice_only = parse_mp4_stream(hevc_slice_only_stream, "hevc-slice-only");
+    ok &= expect(parsed_hevc_slice_only.tracks.size() == 1, "expected one HEVC track in slice-only fragmented MP4");
+    ok &= expect(parsed_hevc_slice_only.tracks.front().sample_entry_type == "hvc1",
+                 "expected hev1 source without in-band parameter sets to normalize to hvc1");
+    ok &= expect(parsed_hevc_slice_only.tracks.front().codec == "hvc1.1.6.L90.B0",
+                 "expected normalized HEVC codec string to advertise hvc1");
+
+    const auto normalized_segmented = segment_for_cmaf(parsed_hevc_slice_only);
+    const auto normalized_init_tracks =
+        extract_tracks(parse_mp4_boxes(normalized_segmented.initialization_segment.owned_bytes),
+                       normalized_segmented.initialization_segment.owned_bytes);
+    ok &= expect(normalized_init_tracks.size() == 1, "expected one normalized HEVC track in init segment");
+    ok &= expect(normalized_init_tracks.front().sample_entry_type == "hvc1",
+                 "expected emitted init segment sample entry to be rewritten to hvc1");
+
+    std::stringstream hevc_inband_param_stream(std::ios::in | std::ios::out | std::ios::binary);
+    hevc_inband_param_stream.write(reinterpret_cast<const char*>(hevc_inband_param_bytes.data()),
+                                   static_cast<std::streamsize>(hevc_inband_param_bytes.size()));
+    hevc_inband_param_stream.seekg(0, std::ios::beg);
+    const ParsedMp4 parsed_hevc_inband_param = parse_mp4_stream(hevc_inband_param_stream, "hevc-inband-param");
+    ok &= expect(parsed_hevc_inband_param.tracks.size() == 1, "expected one HEVC track in in-band-param fragmented MP4");
+    ok &= expect(parsed_hevc_inband_param.tracks.front().sample_entry_type == "hev1",
+                 "expected in-band parameter sets to preserve hev1");
+    ok &= expect(parsed_hevc_inband_param.tracks.front().codec == "hev1.1.6.L90.B0",
+                 "expected in-band parameter set stream to keep hev1 codec string");
 
     return ok ? 0 : 1;
 }
