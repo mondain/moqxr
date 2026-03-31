@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <array>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -233,6 +234,45 @@ std::vector<std::uint8_t> make_multitrack_init_mp4() {
         make_full_box("trex", {0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
     const auto mvex = make_box("mvex", concat({trex_video, trex_audio}));
     const auto moov = make_box("moov", concat({video_trak, audio_trak, mvex}));
+    return concat({ftyp, moov});
+}
+
+std::vector<std::uint8_t> make_hevc_init_mp4(std::uint8_t general_profile_byte,
+                                             std::uint32_t compatibility_flags,
+                                             std::array<std::uint8_t, 6> constraint_bytes,
+                                             std::uint8_t level_idc) {
+    const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
+    const auto tkhd = make_full_box("tkhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
+    auto video_header = std::vector<std::uint8_t>(70, 0);
+    video_header[24] = 0x01;
+    video_header[25] = 0x40;
+    video_header[26] = 0x00;
+    video_header[27] = 0xf0;
+
+    std::vector<std::uint8_t> hvcc_payload = {
+        0x01,
+        general_profile_byte,
+        static_cast<std::uint8_t>((compatibility_flags >> 24U) & 0xFFU),
+        static_cast<std::uint8_t>((compatibility_flags >> 16U) & 0xFFU),
+        static_cast<std::uint8_t>((compatibility_flags >> 8U) & 0xFFU),
+        static_cast<std::uint8_t>(compatibility_flags & 0xFFU),
+        constraint_bytes[0],
+        constraint_bytes[1],
+        constraint_bytes[2],
+        constraint_bytes[3],
+        constraint_bytes[4],
+        constraint_bytes[5],
+        level_idc,
+    };
+    const auto sample_entry = make_box("hev1", concat({video_header, make_box("hvcC", hvcc_payload)}));
+    const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
+    const auto stbl = make_box("stbl", stsd);
+    const auto minf = make_box("minf", stbl);
+    const auto mdia = make_box("mdia", concat({hdlr, minf}));
+    const auto trak = make_box("trak", concat({tkhd, mdia}));
+    const auto moov = make_box("moov", trak);
     return concat({ftyp, moov});
 }
 
@@ -484,6 +524,17 @@ int main() {
                  "expected video initData to contain ftyp and moov boxes");
     ok &= expect(audio_init_boxes[0].type == "ftyp" && audio_init_boxes[1].type == "moov",
                  "expected audio initData to contain ftyp and moov boxes");
+
+    const auto hevc_main_bytes = make_hevc_init_mp4(0x01, 0x60000000, {0xB0, 0x00, 0x00, 0x00, 0x00, 0x00}, 90);
+    const auto hevc_high_bytes = make_hevc_init_mp4(0x22, 0x40000000, {0xB0, 0x00, 0x00, 0x00, 0x00, 0x00}, 150);
+    const auto hevc_main_tracks = extract_tracks(parse_mp4_boxes(hevc_main_bytes), hevc_main_bytes);
+    const auto hevc_high_tracks = extract_tracks(parse_mp4_boxes(hevc_high_bytes), hevc_high_bytes);
+    ok &= expect(hevc_main_tracks.size() == 1, "expected one HEVC main-profile track");
+    ok &= expect(hevc_high_tracks.size() == 1, "expected one HEVC high-tier track");
+    ok &= expect(hevc_main_tracks.front().codec == "hev1.1.6.L90.B0",
+                 "expected compact RFC 6381 HEVC main-profile codec string");
+    ok &= expect(hevc_high_tracks.front().codec == "hev1.2.4.H150.B0",
+                 "expected compact RFC 6381 HEVC high-tier codec string");
 
     return ok ? 0 : 1;
 }

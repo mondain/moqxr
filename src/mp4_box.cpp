@@ -115,6 +115,32 @@ std::string hex_byte(std::uint8_t value) {
     return out.str();
 }
 
+std::string trim_trailing_zero_nibbles(std::uint32_t value) {
+    std::ostringstream out;
+    out << std::uppercase << std::hex << value;
+    std::string text = out.str();
+    while (text.size() > 1 && text.back() == '0') {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::string hevc_constraint_string(std::span<const std::uint8_t, 6> constraint_bytes) {
+    std::size_t last_non_zero = constraint_bytes.size();
+    while (last_non_zero > 0 && constraint_bytes[last_non_zero - 1] == 0) {
+        --last_non_zero;
+    }
+    if (last_non_zero == 0) {
+        return {};
+    }
+
+    std::ostringstream out;
+    for (std::size_t index = 0; index < last_non_zero; ++index) {
+        out << hex_byte(constraint_bytes[index]);
+    }
+    return out.str();
+}
+
 std::size_t find_child_box_offset(const Mp4Box& sample_entry,
                                   std::span<const std::uint8_t> bytes,
                                   std::size_t child_offset,
@@ -172,14 +198,15 @@ std::string hevc_codec_string(const Mp4Box& sample_entry, std::span<const std::u
     const char profile_space = (profile_byte >> 6U) == 1 ? 'A' : (profile_byte >> 6U) == 2 ? 'B' : (profile_byte >> 6U) == 3 ? 'C' : '\0';
     const std::uint8_t profile_idc = profile_byte & 0x1FU;
     const std::uint32_t compatibility_flags = read_be32(bytes, hvcc_offset + 10);
-    const std::uint64_t constraint_indicator =
-        (static_cast<std::uint64_t>(bytes[hvcc_offset + 14]) << 40U) |
-        (static_cast<std::uint64_t>(bytes[hvcc_offset + 15]) << 32U) |
-        (static_cast<std::uint64_t>(bytes[hvcc_offset + 16]) << 24U) |
-        (static_cast<std::uint64_t>(bytes[hvcc_offset + 17]) << 16U) |
-        (static_cast<std::uint64_t>(bytes[hvcc_offset + 18]) << 8U) |
-        static_cast<std::uint64_t>(bytes[hvcc_offset + 19]);
     const std::uint8_t level_idc = bytes[hvcc_offset + 20];
+    const std::array<std::uint8_t, 6> constraint_bytes = {
+        bytes[hvcc_offset + 14],
+        bytes[hvcc_offset + 15],
+        bytes[hvcc_offset + 16],
+        bytes[hvcc_offset + 17],
+        bytes[hvcc_offset + 18],
+        bytes[hvcc_offset + 19],
+    };
 
     std::ostringstream out;
     out << sample_entry.type << '.';
@@ -187,17 +214,11 @@ std::string hevc_codec_string(const Mp4Box& sample_entry, std::span<const std::u
         out << profile_space;
     }
     out << static_cast<unsigned int>(profile_idc) << '.'
-        << std::uppercase << std::hex << compatibility_flags << '.'
-        << ((bytes[hvcc_offset + 13] & 0x20U) != 0 ? 'H' : 'L') << static_cast<unsigned int>(level_idc);
-    if (constraint_indicator != 0) {
-        out << '.';
-        for (int shift = 40; shift >= 0; shift -= 8) {
-            const auto component = static_cast<std::uint8_t>((constraint_indicator >> shift) & 0xFFU);
-            if (component == 0 && shift != 0) {
-                continue;
-            }
-            out << hex_byte(component);
-        }
+        << trim_trailing_zero_nibbles(compatibility_flags) << '.'
+        << ((profile_byte & 0x20U) != 0 ? 'H' : 'L') << static_cast<unsigned int>(level_idc);
+    const std::string constraint_string = hevc_constraint_string(constraint_bytes);
+    if (!constraint_string.empty()) {
+        out << '.' << constraint_string;
     }
     return out.str();
 }
