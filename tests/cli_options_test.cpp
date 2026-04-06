@@ -95,6 +95,12 @@ int main() {
     }
 
     {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--loop"});
+        ok &= expect(options.loop, "expected --loop to keep publishing after the file reaches EOF");
+    }
+
+    {
         bool threw = false;
         try {
             static_cast<void>(parse({"openmoq-publisher", "--input", "sample.mp4", "--timeout", "-1"}));

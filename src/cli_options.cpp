@@ -129,6 +129,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
             options.subscriber_timeout = parse_timeout(require_value("--timeout"));
         } else if (argument == "--paced") {
             options.paced = true;
+        } else if (argument == "--loop") {
+            options.loop = true;
         } else if (argument == "--emit-dir") {
             options.emit_dir = std::filesystem::path(require_value("--emit-dir"));
         } else if (argument == "--dump-plan") {
@@ -157,7 +159,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
            " --input <mp4|-> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
-           " [--publish-catalog] [--sap] [--coalesce-cmaf-chunks|--coalesce-cmaf-chunk] [--paced] [--dump-plan] [--emit-dir <dir>]"
+           " [--publish-catalog] [--sap] [--coalesce-cmaf-chunks|--coalesce-cmaf-chunk] [--paced] [--loop] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path] [--alpn value] [--sni value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }

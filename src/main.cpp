@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
                 options.forward,
                 options.publish_catalog,
                 options.paced,
+                options.loop,
                 options.subscriber_timeout);
 
             TransportStatus status = session.connect(endpoint, options.tls);

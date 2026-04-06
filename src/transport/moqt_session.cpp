@@ -183,6 +183,18 @@ void pace_until(std::chrono::steady_clock::time_point start_time,
     std::this_thread::sleep_until(start_time + std::chrono::microseconds(object.media_time_us - first_media_time_us));
 }
 
+struct TrackLoopInfo {
+    std::size_t group_span = 0;
+    std::size_t first_loop_object_index = 0;
+    bool has_loopable_objects = false;
+};
+
+struct LoopState {
+    bool enabled = false;
+    std::uint64_t cycle_duration_us = 0;
+    std::map<std::string, TrackLoopInfo> tracks;
+};
+
 struct PublishedTrack {
     std::string name;
     std::uint64_t alias = 0;
@@ -195,6 +207,7 @@ struct ActiveSubscription {
     SubscribeMessage subscribe;
     PublishedTrack track;
     std::uint64_t stream_count = 0;
+    std::size_t loop_cycle = 0;
     std::size_t next_object_index = 0;
     bool completed = false;
 };
@@ -203,6 +216,60 @@ struct DormantPublishedTrack {
     SubscribeMessage subscribe;
     PublishedTrack track;
 };
+
+LoopState build_loop_state(const openmoq::publisher::PublishPlan& plan, bool loop_enabled) {
+    LoopState state;
+    state.enabled = loop_enabled;
+    if (!loop_enabled) {
+        return state;
+    }
+
+    for (std::size_t index = 0; index < plan.objects.size(); ++index) {
+        const auto& object = plan.objects[index];
+        auto& track = state.tracks[object.track_name];
+        track.group_span = std::max(track.group_span, object.group_id + 1);
+        if (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization) {
+            continue;
+        }
+        if (!track.has_loopable_objects) {
+            track.first_loop_object_index = index;
+            track.has_loopable_objects = true;
+        }
+        if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia) {
+            state.cycle_duration_us = std::max(state.cycle_duration_us, object.media_time_us + object.media_duration_us);
+        }
+    }
+
+    return state;
+}
+
+const TrackLoopInfo* find_track_loop_info(const LoopState& loop_state, std::string_view track_name) {
+    const auto it = loop_state.tracks.find(std::string(track_name));
+    return it == loop_state.tracks.end() ? nullptr : &it->second;
+}
+
+bool track_can_loop(const LoopState& loop_state, std::string_view track_name) {
+    const TrackLoopInfo* info = find_track_loop_info(loop_state, track_name);
+    return info != nullptr && info->has_loopable_objects;
+}
+
+openmoq::publisher::CmsfObject make_looped_object(const openmoq::publisher::CmsfObject& object,
+                                                  const LoopState& loop_state,
+                                                  std::size_t loop_cycle) {
+    if (!loop_state.enabled || loop_cycle == 0) {
+        return object;
+    }
+
+    const TrackLoopInfo* info = find_track_loop_info(loop_state, object.track_name);
+    if (info == nullptr || !info->has_loopable_objects || object.kind == openmoq::publisher::CmsfObjectKind::kInitialization) {
+        return object;
+    }
+
+    openmoq::publisher::CmsfObject adjusted = object;
+    adjusted.group_id += info->group_span * loop_cycle;
+    adjusted.media_time_us += loop_state.cycle_duration_us * loop_cycle;
+    return adjusted;
+}
 
 std::vector<PublishedTrack> build_published_tracks(const openmoq::publisher::PublishPlan& plan) {
     std::map<std::string, PublishedTrack> tracks;
@@ -530,6 +597,29 @@ bool find_next_matching_object_index(const openmoq::publisher::PublishPlan& plan
     return false;
 }
 
+bool advance_subscription_to_next_loop_object(const openmoq::publisher::PublishPlan& plan,
+                                              const LoopState& loop_state,
+                                              ActiveSubscription& active) {
+    if (!loop_state.enabled || !track_can_loop(loop_state, active.track.name)) {
+        return false;
+    }
+
+    const TrackLoopInfo* info = find_track_loop_info(loop_state, active.track.name);
+    if (info == nullptr || !info->has_loopable_objects) {
+        return false;
+    }
+
+    std::size_t next_object_index = 0;
+    if (!find_next_matching_object_index(plan, active.subscribe, info->first_loop_object_index, next_object_index)) {
+        return false;
+    }
+
+    ++active.loop_cycle;
+    active.next_object_index = next_object_index;
+    active.completed = false;
+    return true;
+}
+
 bool is_final_object_in_group(const openmoq::publisher::PublishPlan& plan, std::size_t object_index) {
     const auto& object = plan.objects.at(object_index);
     for (std::size_t index = object_index + 1; index < plan.objects.size(); ++index) {
@@ -559,6 +649,7 @@ TransportStatus finalize_subscription(PublisherTransport& transport,
 TransportStatus serve_subscriptions(PublisherTransport& transport,
                                     std::uint64_t control_stream_id,
                                     const openmoq::publisher::PublishPlan& plan,
+                                    const LoopState& loop_state,
                                     const std::map<std::string, PublishedTrack>& tracks_by_name,
                                     openmoq::publisher::DraftVersion draft,
                                     std::string_view track_namespace,
@@ -649,7 +740,8 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                         active_it->second.completed = false;
                     } else {
                         active_it->second.next_object_index = plan.objects.size();
-                        active_it->second.completed = true;
+                        active_it->second.completed =
+                            !advance_subscription_to_next_loop_object(plan, loop_state, active_it->second);
                     }
                     buffer.erase(buffer.begin(), buffer.begin() + message_size);
                     continue;
@@ -662,6 +754,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                             .subscribe = dormant_it->second.subscribe,
                             .track = dormant_it->second.track,
                             .stream_count = 0,
+                            .loop_cycle = 0,
                             .next_object_index = 0,
                             .completed = false,
                         };
@@ -674,12 +767,16 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                             active.next_object_index = next_object_index;
                             active_subscriptions.insert_or_assign(remapped_request_id, std::move(active));
                         } else {
-                            const TransportStatus finalize_status = finalize_subscription(
-                                transport, control_stream_id, remapped_request_id, 0, completed_request_ids);
-                            if (!finalize_status.ok) {
-                                return finalize_status;
+                            if (advance_subscription_to_next_loop_object(plan, loop_state, active)) {
+                                active_subscriptions.insert_or_assign(remapped_request_id, std::move(active));
+                            } else {
+                                const TransportStatus finalize_status = finalize_subscription(
+                                    transport, control_stream_id, remapped_request_id, 0, completed_request_ids);
+                                if (!finalize_status.ok) {
+                                    return finalize_status;
+                                }
+                                served_any_subscription = true;
                             }
-                            served_any_subscription = true;
                         }
                         dormant_published_tracks->erase(dormant_it);
                         buffer.erase(buffer.begin(), buffer.begin() + message_size);
@@ -788,6 +885,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 .subscribe = subscribe,
                 .track = track_it->second,
                 .stream_count = 0,
+                .loop_cycle = 0,
                 .next_object_index = 0,
                 .completed = false,
             };
@@ -826,17 +924,25 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             }
 
             std::size_t next_plan_index = plan.objects.size();
+            std::size_t next_loop_cycle = 0;
             for (const auto& [request_id, active] : active_subscriptions) {
                 static_cast<void>(request_id);
                 if (active.completed) {
                     continue;
                 }
-                next_plan_index = std::min(next_plan_index, active.next_object_index);
+                if (next_plan_index == plan.objects.size() ||
+                    active.loop_cycle < next_loop_cycle ||
+                    (active.loop_cycle == next_loop_cycle && active.next_object_index < next_plan_index)) {
+                    next_plan_index = active.next_object_index;
+                    next_loop_cycle = active.loop_cycle;
+                }
             }
 
             if (next_plan_index < plan.objects.size()) {
-                const auto& object = plan.objects[next_plan_index];
-                const auto payload = object_payload(object);
+                const auto& source_object = plan.objects[next_plan_index];
+                const openmoq::publisher::CmsfObject object =
+                    make_looped_object(source_object, loop_state, next_loop_cycle);
+                const auto payload = object_payload(source_object);
                 if (payload.empty()) {
                     return TransportStatus::failure("transport publish requires materialized object payloads");
                 }
@@ -848,7 +954,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 pace_until(pacing_start, first_media_time_us, object, paced);
 
                 for (auto& [request_id, active] : active_subscriptions) {
-                    if (active.next_object_index != next_plan_index) {
+                    if (active.loop_cycle != next_loop_cycle || active.next_object_index != next_plan_index) {
                         continue;
                     }
 
@@ -866,7 +972,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     }
                     std::cerr << "[moqt-session] served object track=" << object.track_name
                               << " group=" << object.group_id << " object=" << object.object_id
-                              << " bytes=" << object_payload_size(object) << '\n';
+                              << " bytes=" << object_payload_size(source_object) << '\n';
                     ++active.stream_count;
 
                     std::size_t upcoming_object_index = 0;
@@ -877,8 +983,8 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                         active.next_object_index = upcoming_object_index;
                     } else {
                         static_cast<void>(request_id);
-                        active.completed = true;
                         active.next_object_index = plan.objects.size();
+                        active.completed = !advance_subscription_to_next_loop_object(plan, loop_state, active);
                     }
                 }
 
@@ -950,6 +1056,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 TransportStatus forward_published_tracks(PublisherTransport& transport,
                                          std::uint64_t control_stream_id,
                                          const openmoq::publisher::PublishPlan& plan,
+                                         const LoopState& loop_state,
                                          std::span<const PublishedTrack> tracks,
                                          std::uint64_t peer_max_request_id,
                                          std::string_view track_namespace,
@@ -1005,57 +1112,77 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
     const auto pacing_start = std::chrono::steady_clock::now();
     std::uint64_t first_media_time_us = 0;
     bool first_media_time_set = false;
-    std::size_t object_index = 0;
-    for (const auto& object : plan.objects) {
-        const auto track_it = tracks_by_name.find(object.track_name);
-        if (track_it == tracks_by_name.end()) {
-            ++object_index;
-            continue;
-        }
-        const auto publish_ok_it = publish_ok_by_request_id.find(request_id_by_track.at(object.track_name));
-        if (publish_ok_it == publish_ok_by_request_id.end()) {
-            return TransportStatus::failure("missing PUBLISH_OK for published track");
-        }
-        if (publish_ok_it->second.forward == 0) {
-            std::cerr << "[moqt-session] publish accepted without forwarding track=" << object.track_name
-                      << " request_id=" << request_id_by_track.at(object.track_name) << '\n';
-            downgraded_tracks_by_name.emplace(track_it->first, track_it->second);
-            ++object_index;
-            continue;
+    std::size_t loop_cycle = 0;
+    std::size_t cycle_start_index = 0;
+
+    while (true) {
+        for (std::size_t object_index = cycle_start_index; object_index < plan.objects.size(); ++object_index) {
+            const auto& source_object = plan.objects[object_index];
+            const auto track_it = tracks_by_name.find(source_object.track_name);
+            if (track_it == tracks_by_name.end()) {
+                continue;
+            }
+            const auto publish_ok_it = publish_ok_by_request_id.find(request_id_by_track.at(source_object.track_name));
+            if (publish_ok_it == publish_ok_by_request_id.end()) {
+                return TransportStatus::failure("missing PUBLISH_OK for published track");
+            }
+            if (publish_ok_it->second.forward == 0) {
+                std::cerr << "[moqt-session] publish accepted without forwarding track=" << source_object.track_name
+                          << " request_id=" << request_id_by_track.at(source_object.track_name) << '\n';
+                downgraded_tracks_by_name.emplace(track_it->first, track_it->second);
+                continue;
+            }
+
+            const openmoq::publisher::CmsfObject object =
+                make_looped_object(source_object, loop_state, loop_cycle);
+            const auto payload = object_payload(source_object);
+            if (payload.empty()) {
+                return TransportStatus::failure("transport publish requires materialized object payloads");
+            }
+            if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
+                first_media_time_us = object.media_time_us;
+                first_media_time_set = true;
+            }
+            pace_until(pacing_start, first_media_time_us, object, paced);
+
+            std::uint64_t stream_id = 0;
+            status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+            if (!status.ok) {
+                return status;
+            }
+            status = transport.write_stream(stream_id,
+                                            encode_object_stream(plan.draft.version,
+                                                                 track_it->second.alias,
+                                                                 object,
+                                                                 is_final_object_in_group(plan, object_index),
+                                                                 payload),
+                                            true);
+            if (!status.ok) {
+                return status;
+            }
+            std::cerr << "[moqt-session] sent object track=" << object.track_name << " group=" << object.group_id
+                      << " object=" << object.object_id << " bytes=" << object_payload_size(source_object)
+                      << " kind="
+                      << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
+                      << '\n';
+            ++stream_count_by_track[source_object.track_name];
         }
 
-        const auto payload = object_payload(object);
-        if (payload.empty()) {
-            return TransportStatus::failure("transport publish requires materialized object payloads");
+        if (!loop_state.enabled) {
+            break;
         }
-        if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
-            first_media_time_us = object.media_time_us;
-            first_media_time_set = true;
-        }
-        pace_until(pacing_start, first_media_time_us, object, paced);
 
-        std::uint64_t stream_id = 0;
-        status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-        if (!status.ok) {
-            return status;
+        cycle_start_index = plan.objects.size();
+        for (const auto& [track_name, info] : loop_state.tracks) {
+            static_cast<void>(track_name);
+            if (info.has_loopable_objects) {
+                cycle_start_index = std::min(cycle_start_index, info.first_loop_object_index);
+            }
         }
-        status = transport.write_stream(stream_id,
-                                        encode_object_stream(plan.draft.version,
-                                                             track_it->second.alias,
-                                                             object,
-                                                             is_final_object_in_group(plan, object_index),
-                                                             payload),
-                                        true);
-        if (!status.ok) {
-            return status;
+        if (cycle_start_index >= plan.objects.size()) {
+            break;
         }
-        std::cerr << "[moqt-session] sent object track=" << object.track_name << " group=" << object.group_id
-                  << " object=" << object.object_id << " bytes=" << object_payload_size(object)
-                  << " kind="
-                  << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
-                  << '\n';
-        ++stream_count_by_track[object.track_name];
-        ++object_index;
+        ++loop_cycle;
     }
 
     for (const auto& track : tracks) {
@@ -1065,6 +1192,9 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         }
         if (publish_ok_it->second.forward == 0) {
             downgraded_tracks_by_name.emplace(track.name, track);
+            continue;
+        }
+        if (loop_state.enabled && track_can_loop(loop_state, track.name)) {
             continue;
         }
         status = transport.write_stream(control_stream_id,
@@ -1082,6 +1212,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         status = serve_subscriptions(transport,
                                      control_stream_id,
                                      plan,
+                                     loop_state,
                                      downgraded_tracks_by_name,
                                      plan.draft.version,
                                      track_namespace,
@@ -1092,6 +1223,10 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         if (!status.ok) {
             return status;
         }
+    }
+
+    if (loop_state.enabled) {
+        return TransportStatus::success();
     }
 
     return transport.write_stream(control_stream_id,
@@ -1106,6 +1241,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
 TransportStatus publish_selected_tracks(PublisherTransport& transport,
                                         std::uint64_t control_stream_id,
                                         const openmoq::publisher::PublishPlan& plan,
+                                        const LoopState& loop_state,
                                         std::span<const PublishedTrack> tracks,
                                         std::uint64_t peer_max_request_id,
                                         std::string_view track_namespace,
@@ -1167,80 +1303,100 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
     bool first_media_time_set = false;
     std::map<std::string, std::uint64_t> stream_count_by_track;
 
-    std::size_t object_index = 0;
-    for (const auto& object : plan.objects) {
-        const auto track_it = tracks_by_name.find(object.track_name);
-        if (track_it == tracks_by_name.end()) {
-            ++object_index;
-            continue;
-        }
-
-        const auto publish_ok_it = publish_ok_by_request_id.find(request_id_by_track.at(object.track_name));
-        if (publish_ok_it == publish_ok_by_request_id.end()) {
-            return TransportStatus::failure("missing PUBLISH_OK for published track");
-        }
-        if (publish_ok_it->second.forward == 0) {
-            if (dormant_published_tracks != nullptr) {
-                dormant_published_tracks->insert_or_assign(
-                    request_id_by_track.at(object.track_name),
-                    DormantPublishedTrack{
-                        .subscribe =
-                            SubscribeMessage{
-                                .request_id = request_id_by_track.at(object.track_name),
-                                .track_namespace = split_track_namespace_components(track_namespace),
-                                .track_name = object.track_name,
-                                .subscriber_priority = publish_ok_it->second.subscriber_priority,
-                                .group_order = publish_ok_it->second.group_order,
-                                .forward = publish_ok_it->second.forward,
-                                .filter_type = publish_ok_it->second.filter_type == 0 ? 0x03 : publish_ok_it->second.filter_type,
-                                .start_group_id = 0,
-                                .start_object_id = 0,
-                                .end_group_id = 0,
-                            },
-                        .track = track_it->second,
-                    });
+    std::size_t loop_cycle = 0;
+    std::size_t cycle_start_index = 0;
+    while (true) {
+        for (std::size_t object_index = cycle_start_index; object_index < plan.objects.size(); ++object_index) {
+            const auto& source_object = plan.objects[object_index];
+            const auto track_it = tracks_by_name.find(source_object.track_name);
+            if (track_it == tracks_by_name.end()) {
+                continue;
             }
-            if (request_id_by_track_alias != nullptr) {
-                request_id_by_track_alias->insert_or_assign(track_it->second.alias, request_id_by_track.at(object.track_name));
+
+            const auto publish_ok_it = publish_ok_by_request_id.find(request_id_by_track.at(source_object.track_name));
+            if (publish_ok_it == publish_ok_by_request_id.end()) {
+                return TransportStatus::failure("missing PUBLISH_OK for published track");
             }
-            ++object_index;
-            continue;
+            if (publish_ok_it->second.forward == 0) {
+                if (dormant_published_tracks != nullptr) {
+                    dormant_published_tracks->insert_or_assign(
+                        request_id_by_track.at(source_object.track_name),
+                        DormantPublishedTrack{
+                            .subscribe =
+                                SubscribeMessage{
+                                    .request_id = request_id_by_track.at(source_object.track_name),
+                                    .track_namespace = split_track_namespace_components(track_namespace),
+                                    .track_name = source_object.track_name,
+                                    .subscriber_priority = publish_ok_it->second.subscriber_priority,
+                                    .group_order = publish_ok_it->second.group_order,
+                                    .forward = publish_ok_it->second.forward,
+                                    .filter_type = publish_ok_it->second.filter_type == 0 ? 0x03 : publish_ok_it->second.filter_type,
+                                    .start_group_id = 0,
+                                    .start_object_id = 0,
+                                    .end_group_id = 0,
+                                },
+                            .track = track_it->second,
+                        });
+                }
+                if (request_id_by_track_alias != nullptr) {
+                    request_id_by_track_alias->insert_or_assign(track_it->second.alias,
+                                                                request_id_by_track.at(source_object.track_name));
+                }
+                continue;
+            }
+
+            const openmoq::publisher::CmsfObject object =
+                make_looped_object(source_object, loop_state, loop_cycle);
+            const auto payload = object_payload(source_object);
+            if (payload.empty()) {
+                return TransportStatus::failure("transport publish requires materialized object payloads");
+            }
+            if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
+                first_media_time_us = object.media_time_us;
+                first_media_time_set = true;
+            }
+            pace_until(pacing_start, first_media_time_us, object, paced);
+
+            std::uint64_t stream_id = 0;
+            status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+            if (!status.ok) {
+                return status;
+            }
+            status = transport.write_stream(stream_id,
+                                            encode_object_stream(plan.draft.version,
+                                                                 track_it->second.alias,
+                                                                 object,
+                                                                 is_final_object_in_group(plan, object_index),
+                                                                 payload),
+                                            true);
+            if (!status.ok) {
+                return status;
+            }
+            std::cerr << "[moqt-session] sent selected object track=" << object.track_name
+                      << " group=" << object.group_id
+                      << " object=" << object.object_id
+                      << " bytes=" << object_payload_size(source_object)
+                      << " kind="
+                      << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
+                      << '\n';
+            ++stream_count_by_track[source_object.track_name];
         }
 
-        const auto payload = object_payload(object);
-        if (payload.empty()) {
-            return TransportStatus::failure("transport publish requires materialized object payloads");
+        if (!loop_state.enabled) {
+            break;
         }
-        if (object.kind == openmoq::publisher::CmsfObjectKind::kMedia && !first_media_time_set) {
-            first_media_time_us = object.media_time_us;
-            first_media_time_set = true;
-        }
-        pace_until(pacing_start, first_media_time_us, object, paced);
 
-        std::uint64_t stream_id = 0;
-        status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-        if (!status.ok) {
-            return status;
+        cycle_start_index = plan.objects.size();
+        for (const auto& track : tracks) {
+            const TrackLoopInfo* info = find_track_loop_info(loop_state, track.name);
+            if (info != nullptr && info->has_loopable_objects) {
+                cycle_start_index = std::min(cycle_start_index, info->first_loop_object_index);
+            }
         }
-        status = transport.write_stream(stream_id,
-                                        encode_object_stream(plan.draft.version,
-                                                             track_it->second.alias,
-                                                             object,
-                                                             is_final_object_in_group(plan, object_index),
-                                                             payload),
-                                        true);
-        if (!status.ok) {
-            return status;
+        if (cycle_start_index >= plan.objects.size()) {
+            break;
         }
-        std::cerr << "[moqt-session] sent selected object track=" << object.track_name
-                  << " group=" << object.group_id
-                  << " object=" << object.object_id
-                  << " bytes=" << object_payload_size(object)
-                  << " kind="
-                  << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
-                  << '\n';
-        ++stream_count_by_track[object.track_name];
-        ++object_index;
+        ++loop_cycle;
     }
 
     for (const auto& track : tracks) {
@@ -1251,6 +1407,9 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
         if (publish_ok_it->second.forward == 0) {
             std::cerr << "[moqt-session] selected publish accepted without forwarding track=" << track.name
                       << " request_id=" << request_id_by_track.at(track.name) << '\n';
+            continue;
+        }
+        if (loop_state.enabled && track_can_loop(loop_state, track.name)) {
             continue;
         }
         status = transport.write_stream(control_stream_id,
@@ -1273,11 +1432,27 @@ MoqtSession::MoqtSession(PublisherTransport& transport,
                          bool publish_catalog,
                          bool paced,
                          std::chrono::seconds subscriber_timeout)
+    : MoqtSession(transport,
+                  std::move(track_namespace),
+                  auto_forward,
+                  publish_catalog,
+                  paced,
+                  false,
+                  subscriber_timeout) {}
+
+MoqtSession::MoqtSession(PublisherTransport& transport,
+                         std::string track_namespace,
+                         bool auto_forward,
+                         bool publish_catalog,
+                         bool paced,
+                         bool loop,
+                         std::chrono::seconds subscriber_timeout)
     : transport_(transport),
       track_namespace_(std::move(track_namespace)),
       auto_forward_(auto_forward),
       publish_catalog_(publish_catalog),
       paced_(paced),
+      loop_(loop),
       subscriber_timeout_(subscriber_timeout) {}
 
 TransportStatus MoqtSession::connect(const EndpointConfig& endpoint, const TlsConfig& tls) {
@@ -1310,6 +1485,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
     std::cout << "connection_id=" << transport_.connection_id() << '\n' << std::flush;
 
     const std::vector<PublishedTrack> tracks = build_published_tracks(plan);
+    const LoopState loop_state = build_loop_state(plan, loop_);
 
     NamespaceMessage namespace_message{
         .draft = plan.draft.version,
@@ -1339,6 +1515,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
             transport_,
             control_stream_id_,
             plan,
+            loop_state,
             tracks,
             peer_max_request_id_,
             track_namespace_,
@@ -1360,6 +1537,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
             status = publish_selected_tracks(transport_,
                                              control_stream_id_,
                                              plan,
+                                             loop_state,
                                              selected_tracks,
                                              peer_max_request_id_,
                                              track_namespace_,
@@ -1374,6 +1552,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
             return serve_subscriptions(transport_,
                                        control_stream_id_,
                                        plan,
+                                       loop_state,
                                        tracks_by_name,
                                        plan.draft.version,
                                        track_namespace_,
@@ -1395,6 +1574,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
     return serve_subscriptions(transport_,
                                control_stream_id_,
                                plan,
+                               loop_state,
                                tracks_by_name,
                                plan.draft.version,
                                track_namespace_,

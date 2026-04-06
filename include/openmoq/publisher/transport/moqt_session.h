@@ -15,10 +15,18 @@ namespace openmoq::publisher::transport {
 class MoqtSession {
 public:
     explicit MoqtSession(PublisherTransport& transport,
+                         std::string track_namespace,
+                         bool auto_forward,
+                         bool publish_catalog,
+                         bool paced,
+                         std::chrono::seconds subscriber_timeout);
+
+    explicit MoqtSession(PublisherTransport& transport,
                          std::string track_namespace = "media",
                          bool auto_forward = false,
                          bool publish_catalog = false,
                          bool paced = false,
+                         bool loop = false,
                          std::chrono::seconds subscriber_timeout = std::chrono::seconds(3));
 
     TransportStatus connect(const EndpointConfig& endpoint, const TlsConfig& tls);
@@ -35,6 +43,7 @@ private:
     bool auto_forward_ = false;
     bool publish_catalog_ = false;
     bool paced_ = false;
+    bool loop_ = false;
     std::chrono::seconds subscriber_timeout_ = std::chrono::seconds(3);
     std::optional<EndpointConfig> endpoint_;
     std::uint64_t control_stream_id_ = 0;

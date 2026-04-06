@@ -33,6 +33,7 @@ struct CliOptions {
     bool include_sap = false;
     bool split_cmaf_chunks = true;
     bool paced = false;
+    bool loop = false;
     bool dump_plan = false;
     std::chrono::seconds subscriber_timeout = std::chrono::seconds(3);
 };
