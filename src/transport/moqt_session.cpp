@@ -23,6 +23,28 @@ bool trace_enabled() {
     return enabled;
 }
 
+std::string hex_dump(std::span<const std::uint8_t> bytes);
+
+TransportStatus try_read_wt_session_stream(PublisherTransport& transport,
+                                           bool& saw_bytes,
+                                           bool& fin) {
+    std::vector<std::uint8_t> session_chunk;
+    bool session_fin = false;
+    const TransportStatus session_status =
+        transport.read_stream(0, session_chunk, session_fin, std::chrono::milliseconds(0));
+    if (!session_status.ok) {
+        return session_status;
+    }
+    saw_bytes = !session_chunk.empty();
+    if (trace_enabled()) {
+        std::cerr << "[moqt-session] setup fallback read stream=0 bytes=" << session_chunk.size()
+                  << " fin=" << (session_fin ? 1 : 0)
+                  << " bytes=[" << hex_dump(session_chunk) << "]" << std::endl;
+    }
+    fin = session_fin;
+    return TransportStatus::success();
+}
+
 const char* control_message_type_name(std::uint64_t message_type) {
     switch (message_type) {
         case 0x02:
@@ -1027,9 +1049,8 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
         std::vector<std::uint8_t> chunk;
         const TransportStatus read_status = transport.read_stream(control_stream_id, chunk, fin, subscriber_timeout);
         if (!read_status.ok) {
-            if (served_any_subscription &&
-                (read_status.message == "timed out waiting for stream data" ||
-                 read_status.message == "no queued read for stream")) {
+            if (read_status.message == "timed out waiting for stream data" ||
+                read_status.message == "no queued read for stream") {
                 break;
             }
             return read_status;
@@ -1043,7 +1064,12 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
     }
 
     if (!served_any_subscription) {
-        return TransportStatus::failure("timed out waiting for subscribe request");
+        std::cerr << "[moqt-session] no downstream SUBSCRIBE before timeout; closing idle publish session" << '\n';
+        pending_control_bytes = std::move(buffer);
+        if (!send_namespace_done) {
+            return TransportStatus::success();
+        }
+        return transport.write_stream(control_stream_id, encode_publish_namespace_done_message(namespace_message), false);
     }
 
     pending_control_bytes = std::move(buffer);
@@ -1619,16 +1645,27 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
     }
 
     std::string authority = endpoint_->host + ":" + std::to_string(endpoint_->port);
-    status = write_frame(control_stream_id_,
-                         encode_setup_message({
-                             .draft = draft,
-                             .authority = authority,
-                             .path = endpoint_->path,
-                             .max_request_id = 100,
-                         }),
-                         false);
+    const std::uint64_t max_request_id =
+        endpoint_->transport == openmoq::publisher::transport::TransportKind::kWebTransport ? 128 : 100;
+    const std::vector<std::uint8_t> setup_bytes = encode_setup_message({
+        .draft = draft,
+        .transport = endpoint_->transport,
+        .authority = authority,
+        .path = endpoint_->path,
+        .max_request_id = max_request_id,
+    });
+    status = write_frame(control_stream_id_, setup_bytes, false);
     if (!status.ok) {
         return status;
+    }
+    if (trace_enabled()) {
+        std::cerr << "[moqt-session] sent CLIENT_SETUP stream=" << control_stream_id_
+                  << " draft=" << openmoq::publisher::to_string(draft)
+                  << " transport="
+                  << (endpoint_->transport == openmoq::publisher::transport::TransportKind::kWebTransport ? "webtransport"
+                                                                                                            : "raw")
+                  << " bytes=[" << hex_dump(setup_bytes) << "]"
+                  << std::endl;
     }
 
     std::vector<std::uint8_t> response = std::move(pending_control_bytes_);
@@ -1644,10 +1681,48 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
             if (fin) {
                 break;
             }
+            if (endpoint_->transport == openmoq::publisher::transport::TransportKind::kWebTransport) {
+                bool saw_session_bytes = false;
+                bool session_fin = false;
+                const TransportStatus session_status = try_read_wt_session_stream(transport_, saw_session_bytes, session_fin);
+                if (session_status.ok) {
+                    if (session_fin) {
+                        return TransportStatus::failure("webtransport session control stream closed during setup");
+                    }
+                    if (saw_session_bytes) {
+                        continue;
+                    }
+                    continue;
+                }
+            }
             chunk.clear();
             status = transport_.read_stream(control_stream_id_, chunk, fin, std::chrono::seconds(5));
             if (!status.ok) {
+                if (endpoint_->transport == openmoq::publisher::transport::TransportKind::kWebTransport) {
+                    bool saw_session_bytes = false;
+                    bool session_fin = false;
+                    const TransportStatus session_status = try_read_wt_session_stream(transport_, saw_session_bytes, session_fin);
+                    if (session_status.ok) {
+                        if (session_fin) {
+                            return TransportStatus::failure("webtransport session control stream closed during setup");
+                        }
+                        if (saw_session_bytes) {
+                            continue;
+                        }
+                        continue;
+                    }
+                }
+                if (trace_enabled()) {
+                    std::cerr << "[moqt-session] setup read failed stream=" << control_stream_id_
+                              << " error=" << status.message << std::endl;
+                }
                 return status;
+            }
+            if (trace_enabled()) {
+                std::cerr << "[moqt-session] setup read stream=" << control_stream_id_
+                          << " bytes=" << chunk.size()
+                          << " fin=" << (fin ? 1 : 0)
+                          << " buffered=" << response.size() + chunk.size() << std::endl;
             }
             response.insert(response.end(), chunk.begin(), chunk.end());
             continue;

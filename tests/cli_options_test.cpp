@@ -42,7 +42,21 @@ int main() {
                      "expected file input to remain the default input source kind");
         ok &= expect(options.input_source.path == "sample.mp4",
                      "expected file input path to be preserved");
+        ok &= expect(options.transport == openmoq::publisher::transport::TransportKind::kRawQuic,
+                     "expected raw transport to remain the default");
         ok &= expect(!options.include_sap, "expected SAP track creation to be disabled by default");
+    }
+
+    {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--transport", "webtransport",
+                   "--endpoint", "https://relay.example.com:443/moq"});
+        ok &= expect(options.transport == openmoq::publisher::transport::TransportKind::kWebTransport,
+                     "expected --transport webtransport to select WebTransport mode");
+        ok &= expect(options.endpoint.has_value(), "expected WebTransport endpoint to be parsed");
+        ok &= expect(options.endpoint->transport == openmoq::publisher::transport::TransportKind::kWebTransport,
+                     "expected endpoint transport kind to follow the CLI transport selection");
+        ok &= expect(options.endpoint->path == "/moq", "expected WebTransport endpoint path to be preserved");
     }
 
     {
@@ -67,6 +81,18 @@ int main() {
             threw = std::string(error.what()) == "--alpn and --sni require --endpoint to be provided first";
         }
         ok &= expect(threw, "expected --sni without --endpoint to be rejected");
+    }
+
+    {
+        bool threw = false;
+        try {
+            static_cast<void>(parse({"openmoq-publisher", "--input", "sample.mp4", "--transport", "webtransport",
+                                     "--endpoint", "relay.example.com:443"}));
+        } catch (const std::runtime_error& error) {
+            threw = std::string(error.what()) ==
+                    "--transport webtransport requires an endpoint path such as https://host:port/moq";
+        }
+        ok &= expect(threw, "expected WebTransport transport mode to reject endpoints without a path");
     }
 
     {

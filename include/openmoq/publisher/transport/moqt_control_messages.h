@@ -2,6 +2,7 @@
 
 #include "openmoq/publisher/cmsf_packager.h"
 #include "openmoq/publisher/moq_draft.h"
+#include "openmoq/publisher/transport/publisher_transport.h"
 
 #include <cstdint>
 #include <span>
@@ -13,6 +14,7 @@ namespace openmoq::publisher::transport {
 
 struct SetupMessage {
     DraftVersion draft = DraftVersion::kDraft14;
+    TransportKind transport = TransportKind::kRawQuic;
     std::string authority;
     std::string path = "/";
     std::uint64_t max_request_id = 0;

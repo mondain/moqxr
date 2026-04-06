@@ -321,11 +321,14 @@ std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message) {
         append_varint(payload, draft_version_number(message.draft));
     }
 
-    const std::vector<std::uint8_t> authority = to_bytes(message.authority);
-    const std::vector<std::uint8_t> path = to_bytes(message.path);
-    append_varint(payload, 3);
-    append_parameter(payload, kSetupParamAuthority, authority);
-    append_parameter(payload, kSetupParamPath, path);
+    const bool include_native_quic_location = message.transport == TransportKind::kRawQuic;
+    append_varint(payload, include_native_quic_location ? 3 : 1);
+    if (include_native_quic_location) {
+        const std::vector<std::uint8_t> authority = to_bytes(message.authority);
+        const std::vector<std::uint8_t> path = to_bytes(message.path);
+        append_parameter(payload, kSetupParamAuthority, authority);
+        append_parameter(payload, kSetupParamPath, path);
+    }
     std::vector<std::uint8_t> max_request_id;
     append_varint(max_request_id, message.max_request_id);
     append_parameter(payload, kSetupParamMaxRequestId, max_request_id);

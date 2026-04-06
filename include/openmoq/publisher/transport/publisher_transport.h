@@ -10,6 +10,11 @@
 
 namespace openmoq::publisher::transport {
 
+enum class TransportKind {
+    kRawQuic,
+    kWebTransport,
+};
+
 enum class StreamDirection {
     kBidirectional,
     kUnidirectional,
@@ -24,11 +29,14 @@ enum class ConnectionState {
 };
 
 struct EndpointConfig {
+    TransportKind transport = TransportKind::kRawQuic;
     std::string host;
     std::uint16_t port = 0;
     std::string alpn = "moq-00";
+    std::string application_protocol;
     std::string sni;
     std::string path = "/";
+    bool path_explicit = false;
 };
 
 struct TlsConfig {

@@ -25,11 +25,23 @@ DraftVersion parse_draft(std::string_view value) {
     throw std::runtime_error("unsupported draft value: expected 14 or 16");
 }
 
+transport::TransportKind parse_transport_kind(std::string_view value) {
+    if (value == "raw") {
+        return transport::TransportKind::kRawQuic;
+    }
+    if (value == "webtransport") {
+        return transport::TransportKind::kWebTransport;
+    }
+
+    throw std::runtime_error("unsupported --transport value: expected raw or webtransport");
+}
+
 transport::EndpointConfig parse_endpoint(std::string_view value) {
     transport::EndpointConfig endpoint;
     std::string_view authority = value;
 
     constexpr std::string_view kScheme = "moqt://";
+    constexpr std::string_view kHttpsScheme = "https://";
     if (authority.starts_with(kScheme)) {
         authority.remove_prefix(kScheme.size());
         const std::size_t slash = authority.find('/');
@@ -37,13 +49,24 @@ transport::EndpointConfig parse_endpoint(std::string_view value) {
             endpoint.path = "/";
         } else {
             endpoint.path = std::string(authority.substr(slash));
+            endpoint.path_explicit = true;
+            authority = authority.substr(0, slash);
+        }
+    } else if (authority.starts_with(kHttpsScheme)) {
+        authority.remove_prefix(kHttpsScheme.size());
+        const std::size_t slash = authority.find('/');
+        if (slash == std::string_view::npos) {
+            endpoint.path = "/";
+        } else {
+            endpoint.path = std::string(authority.substr(slash));
+            endpoint.path_explicit = true;
             authority = authority.substr(0, slash);
         }
     }
 
     const std::size_t colon = authority.rfind(':');
     if (colon == std::string_view::npos || colon == 0 || colon + 1 >= authority.size()) {
-        throw std::runtime_error("endpoint must be in host:port or moqt://host:port/path form");
+        throw std::runtime_error("endpoint must be in host:port, moqt://host:port/path, or https://host:port/path form");
     }
 
     endpoint.host = std::string(authority.substr(0, colon));
@@ -92,6 +115,8 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
         if (argument == "--input") {
             options.input_source = parse_input_source(require_value("--input"));
+        } else if (argument == "--transport") {
+            options.transport = parse_transport_kind(require_value("--transport"));
         } else if (argument == "--endpoint") {
             options.endpoint = parse_endpoint(require_value("--endpoint"));
         } else if (argument == "--alpn") {
@@ -149,6 +174,17 @@ CliOptions parse_cli_options(int argc, char** argv) {
     if (options.endpoint.has_value() && options.endpoint->host.empty()) {
         throw std::runtime_error("--alpn and --sni require --endpoint to be provided first");
     }
+    if (options.endpoint.has_value()) {
+        options.endpoint->transport = options.transport;
+    }
+    if (options.transport == transport::TransportKind::kWebTransport) {
+        if (!options.endpoint.has_value()) {
+            throw std::runtime_error("--transport webtransport requires --endpoint");
+        }
+        if (!options.endpoint->path_explicit) {
+            throw std::runtime_error("--transport webtransport requires an endpoint path such as https://host:port/moq");
+        }
+    }
     if (options.track_namespace.empty()) {
         throw std::runtime_error("--namespace must not be empty");
     }
@@ -158,9 +194,9 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <mp4|-> [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
+           " --input <mp4|-> [--transport raw|webtransport] [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
            " [--publish-catalog] [--sap] [--coalesce-cmaf-chunks|--coalesce-cmaf-chunk] [--paced] [--loop] [--dump-plan] [--emit-dir <dir>]"
-           " [--endpoint host:port|moqt://host:port/path] [--alpn value] [--sni value]"
+           " [--endpoint host:port|moqt://host:port/path|https://host:port/path] [--alpn value] [--sni value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";
 }
 

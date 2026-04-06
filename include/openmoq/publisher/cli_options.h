@@ -24,6 +24,7 @@ struct CliOptions {
     InputSource input_source;
     std::optional<std::filesystem::path> emit_dir;
     std::optional<transport::EndpointConfig> endpoint;
+    transport::TransportKind transport = transport::TransportKind::kRawQuic;
     transport::TlsConfig tls;
     DraftVersion draft_version = DraftVersion::kDraft14;
     std::string track_namespace = "media";

@@ -4,9 +4,40 @@
 #include "openmoq/publisher/mp4_box.h"
 #include "openmoq/publisher/transport/moqt_session.h"
 #include "openmoq/publisher/transport/picoquic_client.h"
+#include "openmoq/publisher/transport/webtransport_client.h"
 
 #include <exception>
 #include <iostream>
+#include <memory>
+
+namespace {
+
+std::string webtransport_protocol_offer(openmoq::publisher::DraftVersion version) {
+    switch (version) {
+        case openmoq::publisher::DraftVersion::kDraft14:
+            return "\"moq-00\", \"moqt-16\"";
+        case openmoq::publisher::DraftVersion::kDraft16:
+            return "\"moqt-16\", \"moq-00\"";
+    }
+
+    return "\"moq-00\"";
+}
+
+std::unique_ptr<openmoq::publisher::transport::PublisherTransport> create_transport(
+    openmoq::publisher::transport::TransportKind transport_kind) {
+    using namespace openmoq::publisher::transport;
+
+    switch (transport_kind) {
+        case TransportKind::kRawQuic:
+            return std::make_unique<PicoquicClient>();
+        case TransportKind::kWebTransport:
+            return std::make_unique<WebTransportClient>();
+    }
+
+    return nullptr;
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
     using namespace openmoq::publisher;
@@ -34,12 +65,22 @@ int main(int argc, char** argv) {
 
             const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
             EndpointConfig endpoint = *options.endpoint;
-            if (!options.endpoint_alpn_overridden && options.draft_version != DraftVersion::kDraft14) {
+            endpoint.application_protocol = endpoint.transport == transport::TransportKind::kWebTransport
+                                               ? webtransport_protocol_offer(options.draft_version)
+                                               : default_alpn(options.draft_version);
+            if (!options.endpoint_alpn_overridden && endpoint.transport == transport::TransportKind::kRawQuic &&
+                options.draft_version != DraftVersion::kDraft14) {
                 endpoint.alpn = default_alpn(options.draft_version);
+            } else if (!options.endpoint_alpn_overridden &&
+                       endpoint.transport == transport::TransportKind::kWebTransport) {
+                endpoint.alpn = "h3";
             }
-            PicoquicClient transport;
+            auto transport = create_transport(endpoint.transport);
+            if (!transport) {
+                throw std::runtime_error("failed to create requested transport");
+            }
             MoqtSession session(
-                transport,
+                *transport,
                 options.track_namespace,
                 options.forward,
                 options.publish_catalog,

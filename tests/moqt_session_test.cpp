@@ -316,6 +316,7 @@ std::optional<std::uint64_t> message_type(const std::vector<std::uint8_t>& bytes
 
 bool decode_setup_fields(const std::vector<std::uint8_t>& bytes,
                          DraftVersion expected_draft,
+                         openmoq::publisher::transport::TransportKind expected_transport,
                          std::string& authority,
                          std::string& path,
                          std::uint64_t& max_request_id) {
@@ -349,7 +350,9 @@ bool decode_setup_fields(const std::vector<std::uint8_t>& bytes,
     }
 
     std::uint64_t parameter_count = 0;
-    if (!decode_varint(bytes, offset, parameter_count) || parameter_count != 3) {
+    const std::uint64_t expected_parameter_count =
+        expected_transport == openmoq::publisher::transport::TransportKind::kRawQuic ? 3 : 1;
+    if (!decode_varint(bytes, offset, parameter_count) || parameter_count != expected_parameter_count) {
         return false;
     }
 
@@ -551,7 +554,13 @@ int main() {
         authority.clear();
         path.clear();
         max_request_id = 1;
-        ok &= expect(decode_setup_fields(transport.writes[0].bytes, DraftVersion::kDraft14, authority, path, max_request_id),
+        ok &= expect(
+            decode_setup_fields(transport.writes[0].bytes,
+                                DraftVersion::kDraft14,
+                                openmoq::publisher::transport::TransportKind::kRawQuic,
+                                authority,
+                                path,
+                                max_request_id),
                      "expected draft-14 CLIENT_SETUP to decode");
         ok &= expect(authority == "example.com:4433", "expected draft-14 CLIENT_SETUP authority");
         ok &= expect(path == "/", "expected draft-14 CLIENT_SETUP path");
@@ -1040,11 +1049,60 @@ int main() {
     path.clear();
     max_request_id = 1;
     ok &= expect(
-        decode_setup_fields(draft16_transport.writes[0].bytes, DraftVersion::kDraft16, authority, path, max_request_id),
+        decode_setup_fields(draft16_transport.writes[0].bytes,
+                            DraftVersion::kDraft16,
+                            openmoq::publisher::transport::TransportKind::kRawQuic,
+                            authority,
+                            path,
+                            max_request_id),
         "expected draft-16 CLIENT_SETUP to decode");
     ok &= expect(authority == "example.com:4433", "expected draft-16 CLIENT_SETUP authority");
     ok &= expect(path == "/", "expected draft-16 CLIENT_SETUP path");
     ok &= expect(max_request_id == kExpectedClientMaxRequestId, "expected draft-16 CLIENT_SETUP max_request_id");
+
+    const auto draft14_wt_setup = encode_setup_message({
+        .draft = DraftVersion::kDraft14,
+        .transport = openmoq::publisher::transport::TransportKind::kWebTransport,
+        .authority = "example.com:4433",
+        .path = "/moq",
+        .max_request_id = kExpectedClientMaxRequestId,
+    });
+    authority.clear();
+    path.clear();
+    max_request_id = 1;
+    ok &= expect(decode_setup_fields(draft14_wt_setup,
+                                     DraftVersion::kDraft14,
+                                     openmoq::publisher::transport::TransportKind::kWebTransport,
+                                     authority,
+                                     path,
+                                     max_request_id),
+                 "expected draft-14 WebTransport CLIENT_SETUP to decode");
+    ok &= expect(authority.empty(), "expected draft-14 WebTransport CLIENT_SETUP to omit authority");
+    ok &= expect(path.empty(), "expected draft-14 WebTransport CLIENT_SETUP to omit path");
+    ok &= expect(max_request_id == kExpectedClientMaxRequestId,
+                 "expected draft-14 WebTransport CLIENT_SETUP max_request_id");
+
+    const auto draft16_wt_setup = encode_setup_message({
+        .draft = DraftVersion::kDraft16,
+        .transport = openmoq::publisher::transport::TransportKind::kWebTransport,
+        .authority = "example.com:4433",
+        .path = "/moq",
+        .max_request_id = kExpectedClientMaxRequestId,
+    });
+    authority.clear();
+    path.clear();
+    max_request_id = 1;
+    ok &= expect(decode_setup_fields(draft16_wt_setup,
+                                     DraftVersion::kDraft16,
+                                     openmoq::publisher::transport::TransportKind::kWebTransport,
+                                     authority,
+                                     path,
+                                     max_request_id),
+                 "expected draft-16 WebTransport CLIENT_SETUP to decode");
+    ok &= expect(authority.empty(), "expected draft-16 WebTransport CLIENT_SETUP to omit authority");
+    ok &= expect(path.empty(), "expected draft-16 WebTransport CLIENT_SETUP to omit path");
+    ok &= expect(max_request_id == kExpectedClientMaxRequestId,
+                 "expected draft-16 WebTransport CLIENT_SETUP max_request_id");
     ok &= expect(message_type(draft16_transport.writes[1].bytes) == 0x06, "expected draft-16 PUBLISH_NAMESPACE");
     ok &= expect(draft16_transport.writes[1].bytes == std::vector<std::uint8_t>({0x06, 0x00, 0x0b, 0x00, 0x01, 0x07,
                                                                                   0x69, 0x6e, 0x74, 0x65, 0x72, 0x6f,
@@ -1156,6 +1214,28 @@ int main() {
                                timeout_transport.read_timeouts.end(),
                                std::chrono::seconds(11)) != timeout_transport.read_timeouts.end(),
                      "expected custom subscriber timeout to reach transport reads");
+    }
+
+    {
+        MockTransport idle_publish_transport;
+        idle_publish_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
+            .max_request_id = 8,
+        }));
+        idle_publish_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+        MoqtSession idle_publish_session(
+            idle_publish_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(5));
+        status = idle_publish_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected idle-publish session connect to succeed");
+        status = idle_publish_session.publish(make_multitrack_plan(DraftVersion::kDraft16));
+        ok &= expect(status.ok, "expected idle publish without subscribers to exit cleanly");
+        ok &= expect(!idle_publish_transport.writes.empty() &&
+                         message_type(idle_publish_transport.writes.back().bytes) == 0x09,
+                     "expected idle publish flow to send PUBLISH_NAMESPACE_DONE");
+        ok &= expect(std::find(idle_publish_transport.read_timeouts.begin(),
+                               idle_publish_transport.read_timeouts.end(),
+                               std::chrono::seconds(5)) != idle_publish_transport.read_timeouts.end(),
+                     "expected idle publish to honor the configured subscriber timeout");
     }
 
     return ok ? 0 : 1;

@@ -47,7 +47,7 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         set(FETCHCONTENT_SOURCE_DIR_PICOTLS "${OPENMOQ_PICOTLS_SOURCE_DIR}" CACHE PATH "" FORCE)
         set(picoquic_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(BUILD_DEMO OFF CACHE BOOL "" FORCE)
-        set(BUILD_HTTP OFF CACHE BOOL "" FORCE)
+        set(BUILD_HTTP ON CACHE BOOL "" FORCE)
         set(BUILD_PQBENCH OFF CACHE BOOL "" FORCE)
         set(BUILD_LOGLIB OFF CACHE BOOL "" FORCE)
         set(BUILD_LOGREADER OFF CACHE BOOL "" FORCE)
@@ -89,6 +89,7 @@ add_library(openmoq_publisher_lib
     src/transport/moqt_session.cpp
     src/transport/picoquic_client.cpp
     src/transport/publisher_transport.cpp
+    src/transport/webtransport_client.cpp
 )
 
 target_include_directories(openmoq_publisher_lib
@@ -101,6 +102,10 @@ target_compile_features(openmoq_publisher_lib PUBLIC cxx_std_20)
 if(OPENMOQ_HAS_PICOQUIC)
     target_compile_definitions(openmoq_publisher_lib PRIVATE OPENMOQ_HAS_PICOQUIC=1)
     target_link_libraries(openmoq_publisher_lib PRIVATE picoquic-core)
+    if(TARGET picohttp-core)
+        target_link_libraries(openmoq_publisher_lib PRIVATE picohttp-core)
+        target_include_directories(openmoq_publisher_lib PRIVATE "${OPENMOQ_PICOQUIC_SOURCE_DIR}/picohttp")
+    endif()
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -130,6 +135,12 @@ if(OPENMOQ_BUILD_TESTS)
     )
     target_link_libraries(openmoq-publisher-transport-tests PRIVATE openmoq_publisher_lib)
     add_test(NAME openmoq-publisher-transport-tests COMMAND openmoq-publisher-transport-tests)
+
+    add_executable(openmoq-publisher-webtransport-tests
+        tests/webtransport_client_test.cpp
+    )
+    target_link_libraries(openmoq-publisher-webtransport-tests PRIVATE openmoq_publisher_lib)
+    add_test(NAME openmoq-publisher-webtransport-tests COMMAND openmoq-publisher-webtransport-tests)
 
     if(OPENMOQ_HAS_PICOQUIC AND OPENMOQ_RUN_PICOQUIC_SMOKE_TESTS)
         add_executable(openmoq-publisher-picoquic-smoke-tests
