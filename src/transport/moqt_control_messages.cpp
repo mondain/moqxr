@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -226,6 +227,43 @@ void append_parameter(std::vector<std::uint8_t>& out,
     }
 }
 
+void append_parameter_delta(std::vector<std::uint8_t>& out,
+                            std::uint64_t& previous_type,
+                            std::uint64_t type,
+                            std::span<const std::uint8_t> value) {
+    const std::uint64_t delta = type - previous_type;
+    append_varint(out, delta);
+    if ((type & 0x1ULL) == 0) {
+        out.insert(out.end(), value.begin(), value.end());
+    } else {
+        append_varint(out, value.size());
+        out.insert(out.end(), value.begin(), value.end());
+    }
+    previous_type = type;
+}
+
+bool decode_parameter_type(std::span<const std::uint8_t> bytes,
+                           std::size_t& offset,
+                           std::uint64_t& previous_type,
+                           bool delta_encoded,
+                           std::uint64_t& parameter_type) {
+    std::uint64_t encoded_type = 0;
+    if (!decode_varint_impl(bytes, offset, encoded_type)) {
+        return false;
+    }
+    if (!delta_encoded) {
+        parameter_type = encoded_type;
+        previous_type = parameter_type;
+        return true;
+    }
+    if (encoded_type > std::numeric_limits<std::uint64_t>::max() - previous_type) {
+        return false;
+    }
+    parameter_type = previous_type + encoded_type;
+    previous_type = parameter_type;
+    return true;
+}
+
 std::uint64_t draft_version_number(DraftVersion draft) {
     switch (draft) {
         case DraftVersion::kDraft14:
@@ -323,15 +361,28 @@ std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message) {
 
     const bool include_native_quic_location = message.transport == TransportKind::kRawQuic;
     append_varint(payload, include_native_quic_location ? 3 : 1);
+    std::uint64_t previous_parameter_type = 0;
     if (include_native_quic_location) {
-        const std::vector<std::uint8_t> authority = to_bytes(message.authority);
         const std::vector<std::uint8_t> path = to_bytes(message.path);
-        append_parameter(payload, kSetupParamAuthority, authority);
-        append_parameter(payload, kSetupParamPath, path);
+        const std::vector<std::uint8_t> authority = to_bytes(message.authority);
+        if (message.draft == DraftVersion::kDraft16) {
+            append_parameter_delta(payload, previous_parameter_type, kSetupParamPath, path);
+        } else {
+            append_parameter(payload, kSetupParamAuthority, authority);
+            append_parameter(payload, kSetupParamPath, path);
+        }
     }
     std::vector<std::uint8_t> max_request_id;
     append_varint(max_request_id, message.max_request_id);
-    append_parameter(payload, kSetupParamMaxRequestId, max_request_id);
+    if (message.draft == DraftVersion::kDraft16) {
+        append_parameter_delta(payload, previous_parameter_type, kSetupParamMaxRequestId, max_request_id);
+        if (include_native_quic_location) {
+            const std::vector<std::uint8_t> authority = to_bytes(message.authority);
+            append_parameter_delta(payload, previous_parameter_type, kSetupParamAuthority, authority);
+        }
+    } else {
+        append_parameter(payload, kSetupParamMaxRequestId, max_request_id);
+    }
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kClientSetupType);
@@ -366,10 +417,16 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
     const std::uint8_t first_payload_byte = bytes[offset];
     if ((first_payload_byte & 0xc0) == 0xc0) {
         std::uint64_t selected_version = 0;
-        if (!decode_varint_impl(payload_bytes, offset, selected_version) || selected_version != kDraft14Version) {
+        if (!decode_varint_impl(payload_bytes, offset, selected_version)) {
             return false;
         }
-        message.draft = DraftVersion::kDraft14;
+        if (selected_version == kDraft14Version) {
+            message.draft = DraftVersion::kDraft14;
+        } else if (selected_version == kDraft16Version) {
+            message.draft = DraftVersion::kDraft16;
+        } else {
+            return false;
+        }
     } else {
         message.draft = DraftVersion::kDraft16;
     }
@@ -379,9 +436,11 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
         return false;
     }
 
+    std::uint64_t previous_parameter_type = 0;
+    const bool delta_encoded = message.draft == DraftVersion::kDraft16;
     for (std::uint64_t parameter_index = 0; parameter_index < parameter_count; ++parameter_index) {
         std::uint64_t parameter_type = 0;
-        if (!decode_varint_impl(payload_bytes, offset, parameter_type)) {
+        if (!decode_parameter_type(payload_bytes, offset, previous_parameter_type, delta_encoded, parameter_type)) {
             return false;
         }
 
@@ -413,9 +472,14 @@ std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& 
     }
 
     append_varint(payload, 1);
+    std::uint64_t previous_parameter_type = 0;
     std::vector<std::uint8_t> max_request_id;
     append_varint(max_request_id, message.max_request_id);
-    append_parameter(payload, kSetupParamMaxRequestId, max_request_id);
+    if (message.draft == DraftVersion::kDraft16) {
+        append_parameter_delta(payload, previous_parameter_type, kSetupParamMaxRequestId, max_request_id);
+    } else {
+        append_parameter(payload, kSetupParamMaxRequestId, max_request_id);
+    }
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kServerSetupType);

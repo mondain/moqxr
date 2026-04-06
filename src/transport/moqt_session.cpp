@@ -23,6 +23,12 @@ bool trace_enabled() {
     return enabled;
 }
 
+bool is_idle_subscribe_exit(std::string_view message) {
+    return message == "timed out waiting for stream data" ||
+           message == "no queued read for stream" ||
+           message == "webtransport connection closed";
+}
+
 std::string hex_dump(std::span<const std::uint8_t> bytes);
 
 TransportStatus try_read_wt_session_stream(PublisherTransport& transport,
@@ -1049,6 +1055,9 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
         std::vector<std::uint8_t> chunk;
         const TransportStatus read_status = transport.read_stream(control_stream_id, chunk, fin, subscriber_timeout);
         if (!read_status.ok) {
+            if (!served_any_subscription && is_idle_subscribe_exit(read_status.message)) {
+                break;
+            }
             if (read_status.message == "timed out waiting for stream data" ||
                 read_status.message == "no queued read for stream") {
                 break;
@@ -1496,6 +1505,14 @@ TransportStatus MoqtSession::connect(const EndpointConfig& endpoint, const TlsCo
         return status;
     }
 
+    if (trace_enabled()) {
+        std::cerr << "[moqt-session] transport connected id=" << transport_.connection_id()
+                  << " transport="
+                  << (endpoint.transport == openmoq::publisher::transport::TransportKind::kWebTransport ? "webtransport"
+                                                                                                         : "raw")
+                  << std::endl;
+    }
+
     return ensure_control_stream();
 }
 
@@ -1506,6 +1523,9 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
 
     TransportStatus status = ensure_setup(plan.draft.version);
     if (!status.ok) {
+        if (trace_enabled()) {
+            std::cerr << "[moqt-session] setup failed error=" << status.message << std::endl;
+        }
         return status;
     }
     std::cout << "connection_id=" << transport_.connection_id() << '\n' << std::flush;

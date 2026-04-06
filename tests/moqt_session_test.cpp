@@ -97,6 +97,9 @@ struct MockTransport final : PublisherTransport {
         }
         const auto it = reads.find(stream_id);
         if (it == reads.end()) {
+            if (!missing_read_error.empty()) {
+                return TransportStatus::failure(missing_read_error);
+            }
             return timeout == std::chrono::milliseconds(0) ? TransportStatus::failure("timed out waiting for stream data")
                                                            : TransportStatus::failure("no queued read for stream");
         }
@@ -132,6 +135,7 @@ struct MockTransport final : PublisherTransport {
     std::uint64_t next_uni_ = 2;
     std::uint64_t last_close_code = 0;
     std::size_t read_count = 0;
+    std::string missing_read_error;
     std::vector<WriteEvent> writes;
     std::vector<std::chrono::milliseconds> read_timeouts;
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
@@ -356,11 +360,17 @@ bool decode_setup_fields(const std::vector<std::uint8_t>& bytes,
         return false;
     }
 
+    std::uint64_t previous_parameter_type = 0;
     for (std::uint64_t index = 0; index < parameter_count; ++index) {
-        std::uint64_t parameter_type = 0;
-        if (!decode_varint(bytes, offset, parameter_type)) {
+        std::uint64_t encoded_type = 0;
+        if (!decode_varint(bytes, offset, encoded_type)) {
             return false;
         }
+        std::uint64_t parameter_type = encoded_type;
+        if (expected_draft == DraftVersion::kDraft16) {
+            parameter_type = previous_parameter_type + encoded_type;
+        }
+        previous_parameter_type = parameter_type;
 
         if ((parameter_type & 0x1ULL) == 0) {
             if (parameter_type != 0x02) {
@@ -1150,6 +1160,23 @@ int main() {
         materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
     ok &= expect(status.ok, "expected publish to succeed after SERVER_SETUP with extra even-numbered parameter");
 
+    MockTransport explicit_draft16_server_setup_transport;
+    explicit_draft16_server_setup_transport.reads[0].push_back(
+        std::vector<std::uint8_t>({0x21, 0x00, 0x0c, 0xc0, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x10, 0x01,
+                                   0x02, 0x40, 0x64}));
+    explicit_draft16_server_setup_transport.reads[0].push_back(
+        encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+    MoqtSession explicit_draft16_server_setup_session(explicit_draft16_server_setup_transport,
+                                                      std::string(kTestTrackNamespace),
+                                                      false,
+                                                      false,
+                                                      false,
+                                                      std::chrono::seconds(5));
+    status = explicit_draft16_server_setup_session.connect(endpoint, tls);
+    ok &= expect(status.ok, "expected explicit-version draft-16 SERVER_SETUP to connect successfully");
+    status = explicit_draft16_server_setup_session.publish(make_multitrack_plan(DraftVersion::kDraft16));
+    ok &= expect(status.ok, "expected publish to succeed after explicit-version draft-16 SERVER_SETUP");
+
     ok &= expect(bytes_equal(encode_varint(0), {0x00}), "expected single-byte varint encoding");
     ok &= expect(bytes_equal(encode_varint(63), {0x3f}), "expected max one-byte varint encoding");
     ok &= expect(bytes_equal(encode_varint(64), {0x40, 0x40}), "expected two-byte varint encoding");
@@ -1236,6 +1263,25 @@ int main() {
                                idle_publish_transport.read_timeouts.end(),
                                std::chrono::seconds(5)) != idle_publish_transport.read_timeouts.end(),
                      "expected idle publish to honor the configured subscriber timeout");
+    }
+
+    {
+        MockTransport closed_idle_publish_transport;
+        closed_idle_publish_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
+            .max_request_id = 8,
+        }));
+        closed_idle_publish_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+        closed_idle_publish_transport.missing_read_error = "webtransport connection closed";
+        MoqtSession closed_idle_publish_session(
+            closed_idle_publish_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(5));
+        status = closed_idle_publish_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected closed-idle session connect to succeed");
+        status = closed_idle_publish_session.publish(make_multitrack_plan(DraftVersion::kDraft16));
+        ok &= expect(status.ok, "expected idle publish to exit cleanly when the control stream closes");
+        ok &= expect(!closed_idle_publish_transport.writes.empty() &&
+                         message_type(closed_idle_publish_transport.writes.back().bytes) == 0x09,
+                     "expected closed-idle publish flow to send PUBLISH_NAMESPACE_DONE");
     }
 
     return ok ? 0 : 1;
