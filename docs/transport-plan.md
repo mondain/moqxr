@@ -68,11 +68,11 @@ This separation is important because MOQT draft churn should stay isolated to th
 
 ### Phase 3: WebTransport connection establishment
 
-- [ ] Require explicit transport path for WebTransport endpoints
-- [ ] Establish client HTTP/3 connection with ALPN `h3` by default
-- [ ] Bring up a WebTransport CONNECT session using picoquic `h3zero` helpers
-- [ ] Map WebTransport stream open/read/write operations onto `PublisherTransport`
-- [ ] Report WebTransport session establishment failures cleanly
+- [x] Require explicit transport path for WebTransport endpoints
+- [x] Establish client HTTP/3 connection with ALPN `h3` by default
+- [x] Bring up a WebTransport CONNECT session using picoquic `h3zero` helpers
+- [x] Map WebTransport stream open/read/write operations onto `PublisherTransport`
+- [x] Report WebTransport session establishment failures cleanly
 
 ### Phase 4: MOQT control plane
 
@@ -80,22 +80,23 @@ This separation is important because MOQT draft churn should stay isolated to th
 - [x] Implement setup and session negotiation scaffolding
 - [x] Implement namespace or publish announcement flow
 - [x] Represent draft-14 and draft-16 control-plane differences behind one abstraction
-- [ ] Confirm the same `MoqtSession` flow works unchanged on top of WebTransport streams
+- [x] Confirm the same `MoqtSession` flow works unchanged on top of WebTransport streams
 
 ### Phase 5: object publication
 
 - [x] Publish initialization object first
 - [x] Publish media objects according to `PublishPlan`
 - [x] Decide and document one stream mapping policy
-- [ ] Handle transport write backpressure
+- [x] Use picoquic's callback-driven write path for WebTransport application streams
+- [ ] Handle transport write backpressure beyond the current callback-driven queue
 
 ### Phase 6: observability and testing
 
-- [ ] Add structured logs for handshake, stream lifecycle, and object publication
+- [x] Add detailed trace logs for handshake, stream lifecycle, and object publication
 - [x] Add unit tests for session-to-transport mapping
 - [x] Add loopback integration tests for transport
 - [ ] Add interoperability tests against a raw OpenMOQ endpoint
-- [ ] Add interoperability tests against a WebTransport-capable endpoint
+- [x] Add manual interoperability coverage against WebTransport-capable endpoints
 
 ## Stream mapping
 
@@ -175,13 +176,16 @@ Does not own:
 
 - The transport seam and session façade are implemented.
 - CLI flags for endpoint, transport, ALPN, and TLS-related parameters are present.
-- The build can integrate local picoquic and picotls source checkouts directly.
-- The current workspace now compiles picoquic and picotls successfully.
-- A loopback smoke test now validates the local picoquic handshake and object publication path when it is run outside restricted sandboxes.
-- The session layer now uses a dedicated control-message encoder that keeps draft-14 and draft-16 naming differences out of the transport adapter.
+- The build integrates local picoquic, picohttp, and picotls source checkouts directly.
+- Raw QUIC and WebTransport publisher transports both build and pass local transport tests.
+- The session layer uses a dedicated control-message encoder that keeps draft-14 and draft-16 naming differences out of the transport adapter.
 - Subscriber-driven serving is implemented for `--forward 0`, including multitrack publication in publish-plan/media-time order rather than draining one subscribed track completely before the next.
-- Incremental downstream `SUBSCRIBE` handling now lets later-arriving tracks join future object servicing without restarting the session or losing interleaving for remaining media objects.
-- WebTransport mode is now represented in CLI/config and has a transport stub, but the actual `h3zero`-based client implementation remains to be done.
+- Incremental downstream `SUBSCRIBE` handling lets later-arriving tracks join future object servicing without restarting the session or losing interleaving for remaining media objects.
+- WebTransport mode is implemented on picoquic `h3zero` helpers and uses callback-driven WT app-stream writes instead of direct stream pushes.
+- Current live interoperability results are split:
+  - `draft-14.cloudflare.mediaoverquic.com` and `us-ord-1.moqx.akaleapi.net` reach `SERVER_SETUP` and `PUBLISH_NAMESPACE_OK`
+  - `fb.mvfst.net:9448` still rejects the tested resource path with HTTP `404` during CONNECT
+- After `PUBLISH_NAMESPACE_OK`, an idle `--forward 0` publisher now exits cleanly after the subscriber timeout, emits `PUBLISH_NAMESPACE_DONE`, and does not treat the absence of downstream `SUBSCRIBE` as a publish failure.
 
 ## Key risks
 

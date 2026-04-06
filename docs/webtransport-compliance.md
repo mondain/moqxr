@@ -105,6 +105,7 @@ Areas that are aligned with the drafts:
 - WT protocol offer is sent separately from QUIC ALPN
 - MoQ `CLIENT_SETUP` omits `AUTHORITY` and `PATH` in WT mode
 - local WT app streams are created through `picowt_create_local_stream()`
+- WebTransport app-stream writes use picoquic's callback-driven provide-data path instead of direct stream injection
 
 Areas that should be treated as suspect until proven:
 
@@ -134,3 +135,30 @@ The strongest remaining risk area is WebTransport stream handling in our client:
 - possible double-management of local stream context around writes
 
 The current evidence does not support parsing CONNECT-stream bytes as `SERVER_SETUP`.
+
+## Current interoperability state
+
+Observed behavior as of April 6, 2026:
+
+- `draft-14.cloudflare.mediaoverquic.com:443/moq`
+  - CONNECT succeeds
+  - `SERVER_SETUP` arrives on the first WT bidi application stream
+  - `PUBLISH_NAMESPACE_OK` arrives
+  - the relay may remain idle afterward until a downstream subscriber appears
+- `us-ord-1.moqx.akaleapi.net:4433/moq-relay`
+  - draft 16 CONNECT succeeds
+  - `SERVER_SETUP` and `PUBLISH_NAMESPACE_OK` arrive on the WT control stream as expected
+  - the relay may remain idle afterward until a downstream subscriber appears
+- `fb.mvfst.net:9448`
+  - the tested resource paths still return HTTP `404` during CONNECT
+  - that is currently treated as a server resource-path issue, not a post-CONNECT MoQ framing issue
+
+## Idle subscriber behavior
+
+For `--forward 0`, once `PUBLISH_NAMESPACE_OK` has been received:
+
+- the publisher waits up to `--timeout` seconds for downstream `SUBSCRIBE`
+- if no `SUBSCRIBE` arrives before that timeout, the session is treated as idle rather than failed
+- the publisher emits `PUBLISH_NAMESPACE_DONE` and exits successfully
+
+This behavior is intentional. It keeps interoperability probes from being reported as publish failures when the relay accepted the namespace but no subscriber appeared during the configured wait window.
