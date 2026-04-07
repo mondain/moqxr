@@ -28,6 +28,8 @@ namespace openmoq::publisher::transport {
 struct WebTransportClient::Impl {
     struct PendingWrite {
         std::uint64_t stream_id = 0;
+        std::vector<std::uint8_t> bytes;
+        bool fin = false;
     };
 
     struct PendingOpen {
@@ -36,12 +38,6 @@ struct WebTransportClient::Impl {
         bool completed = false;
         bool failed = false;
         std::string error;
-    };
-
-    struct OutgoingStreamData {
-        std::vector<std::uint8_t> bytes;
-        std::size_t offset = 0;
-        bool fin_requested = false;
     };
 
     struct ReceivedStreamData {
@@ -53,7 +49,6 @@ struct WebTransportClient::Impl {
     std::condition_variable condition;
     std::deque<PendingOpen*> pending_opens;
     std::deque<PendingWrite> pending_writes;
-    std::map<std::uint64_t, OutgoingStreamData> outgoing_streams;
     std::map<std::uint64_t, ReceivedStreamData> received_streams;
     std::set<std::uint64_t> application_streams;
     bool connected = false;
@@ -111,26 +106,6 @@ bool control_stream_connect_established(const WebTransportClient::Impl& impl) {
 
     const int status = stream_ctx->ps.stream_state.header.status;
     return stream_ctx->is_upgraded && status >= 200 && status < 300;
-}
-
-bool quic_connection_ready_for_webtransport(const WebTransportClient::Impl& impl) {
-    if (impl.cnx == nullptr) {
-        return false;
-    }
-
-    const auto state = picoquic_get_cnx_state(impl.cnx);
-    return state == picoquic_state_client_ready_start || state == picoquic_state_ready;
-}
-
-bool control_stream_ready_fallback(const WebTransportClient::Impl& impl) {
-    // Some relays clearly accept the WebTransport session and allow MoQ setup on
-    // the first non-zero bidi stream, but picohttp never surfaces
-    // picohttp_callback_connect_accepted on the CONNECT stream. Treat the QUIC
-    // connection becoming application-ready as sufficient to let MoQ setup
-    // validate the session on its real control stream.
-    return quic_connection_ready_for_webtransport(impl) &&
-           impl.control_stream_ctx != nullptr &&
-           impl.control_stream_ctx->is_open;
 }
 
 int webtransport_callback(picoquic_cnx_t* cnx,
@@ -203,10 +178,11 @@ int apply_pending_writes(WebTransportClient::Impl& impl) {
             return -1;
         }
 
-        if (picoquic_mark_active_stream(impl.cnx, write.stream_id, 1, stream_ctx) != 0) {
+        if (picoquic_add_to_stream_with_ctx(
+                impl.cnx, write.stream_id, write.bytes.data(), write.bytes.size(), write.fin ? 1 : 0, stream_ctx) != 0) {
             std::lock_guard<std::mutex> lock(impl.mutex);
             impl.failed = true;
-            impl.last_error = "failed to activate webtransport stream";
+            impl.last_error = "failed to queue webtransport stream data";
             impl.condition.notify_all();
             return -1;
         }
@@ -219,52 +195,6 @@ int apply_pending_writes(WebTransportClient::Impl& impl) {
             impl.last_error = "failed to close webtransport session";
             impl.condition.notify_all();
             return -1;
-        }
-    }
-
-    return 0;
-}
-
-int provide_pending_stream_data(WebTransportClient::Impl& impl,
-                                uint8_t* context,
-                                size_t space,
-                                h3zero_stream_ctx_t* stream_ctx) {
-    if (stream_ctx == nullptr) {
-        return 0;
-    }
-
-    std::lock_guard<std::mutex> lock(impl.mutex);
-    auto it = impl.outgoing_streams.find(stream_ctx->stream_id);
-    if (it == impl.outgoing_streams.end()) {
-        (void)picoquic_provide_stream_data_buffer(context, 0, 0, 0);
-        return 0;
-    }
-
-    auto& outgoing = it->second;
-    const std::size_t remaining = outgoing.bytes.size() - outgoing.offset;
-    const std::size_t to_send = std::min(space, remaining);
-    const bool send_fin = outgoing.fin_requested && to_send == remaining;
-    const bool still_active = to_send < remaining ? 1 : 0;
-
-    uint8_t* buffer = picoquic_provide_stream_data_buffer(context, to_send, send_fin ? 1 : 0, still_active ? 1 : 0);
-    if (buffer == nullptr) {
-        impl.failed = true;
-        impl.last_error = "failed to obtain stream send buffer";
-        impl.condition.notify_all();
-        return -1;
-    }
-
-    if (to_send != 0) {
-        std::memcpy(buffer, outgoing.bytes.data() + static_cast<std::ptrdiff_t>(outgoing.offset), to_send);
-        outgoing.offset += to_send;
-    }
-
-    if (to_send == remaining) {
-        if (send_fin || !outgoing.fin_requested) {
-            impl.outgoing_streams.erase(it);
-        } else {
-            outgoing.bytes.clear();
-            outgoing.offset = 0;
         }
     }
 
@@ -291,9 +221,8 @@ int webtransport_callback(picoquic_cnx_t* cnx,
         case picohttp_callback_provide_datagram:
         case picohttp_callback_free:
         case picohttp_callback_connecting:
-            return 0;
         case picohttp_callback_provide_data:
-            return provide_pending_stream_data(*impl, bytes, length, stream_ctx);
+            return 0;
         case picohttp_callback_connect_refused: {
             std::lock_guard<std::mutex> lock(impl->mutex);
             impl->failed = true;
@@ -388,9 +317,6 @@ int loop_callback(picoquic_quic_t* quic,
             if (!impl->connected && control_stream_connect_established(*impl)) {
                 impl->connected = true;
                 impl->condition.notify_all();
-            } else if (!impl->connected && control_stream_ready_fallback(*impl)) {
-                impl->connected = true;
-                impl->condition.notify_all();
             }
             if (impl->cnx != nullptr && picoquic_get_cnx_state(impl->cnx) == picoquic_state_disconnected) {
                 impl->disconnected = true;
@@ -415,14 +341,6 @@ int webtransport_connection_callback(picoquic_cnx_t* cnx,
                                      picoquic_call_back_event_t fin_or_event,
                                      void* callback_ctx,
                                      void* v_stream_ctx) {
-    if (auto* impl = find_connection_impl(cnx); impl != nullptr) {
-        if (fin_or_event == picoquic_callback_ready || fin_or_event == picoquic_callback_almost_ready) {
-            std::lock_guard<std::mutex> lock(impl->mutex);
-            impl->connected = true;
-            impl->condition.notify_all();
-        }
-    }
-
     return h3zero_callback(cnx, stream_id, bytes, length, fin_or_event, callback_ctx, v_stream_ctx);
 }
 
@@ -452,7 +370,6 @@ TransportStatus WebTransportClient::configure(const EndpointConfig& endpoint, co
     impl_->loop_exited = false;
     impl_->last_error.clear();
     impl_->pending_writes.clear();
-    impl_->outgoing_streams.clear();
     impl_->received_streams.clear();
     return TransportStatus::success();
 }
@@ -575,10 +492,10 @@ TransportStatus WebTransportClient::connect() {
 
     {
         std::unique_lock<std::mutex> lock(impl_->mutex);
-        const bool ready = impl_->condition.wait_for(lock, std::chrono::seconds(5), [&] {
+        const bool loop_ready = impl_->condition.wait_for(lock, std::chrono::seconds(5), [&] {
             return impl_->loop_ready || impl_->failed || impl_->disconnected || impl_->loop_exited;
         });
-        if (!ready) {
+        if (!loop_ready) {
             impl_->failed = true;
             impl_->last_error = "timed out waiting for webtransport packet loop";
         }
@@ -586,7 +503,17 @@ TransportStatus WebTransportClient::connect() {
             state_ = ConnectionState::kFailed;
             return TransportStatus::failure(impl_->last_error.empty() ? "webtransport startup failed" : impl_->last_error);
         }
-        impl_->connected = true;
+        const bool session_ready = impl_->condition.wait_for(lock, std::chrono::seconds(5), [&] {
+            return impl_->connected || impl_->failed || impl_->disconnected || impl_->loop_exited;
+        });
+        if (!session_ready) {
+            impl_->failed = true;
+            impl_->last_error = "timed out waiting for webtransport CONNECT acceptance";
+        }
+        if (impl_->failed || impl_->disconnected || impl_->loop_exited || !impl_->connected) {
+            state_ = ConnectionState::kFailed;
+            return TransportStatus::failure(impl_->last_error.empty() ? "webtransport startup failed" : impl_->last_error);
+        }
     }
 
     if (impl_->control_stream_ctx != nullptr) {
@@ -670,10 +597,11 @@ TransportStatus WebTransportClient::write_stream(std::uint64_t stream_id,
 #else
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
-        auto& outgoing = impl_->outgoing_streams[stream_id];
-        outgoing.bytes.insert(outgoing.bytes.end(), bytes.begin(), bytes.end());
-        outgoing.fin_requested = outgoing.fin_requested || fin;
-        impl_->pending_writes.push_back({.stream_id = stream_id});
+        impl_->pending_writes.push_back({
+            .stream_id = stream_id,
+            .bytes = std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
+            .fin = fin,
+        });
     }
 
     if (impl_->cnx != nullptr && impl_->quic != nullptr) {
