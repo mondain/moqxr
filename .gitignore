@@ -12,6 +12,7 @@ Testing/
 .DS_Store
 .idea/
 .vscode/
+.cache/
 *.swp
 *.swo
 .codex
