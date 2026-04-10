@@ -49,7 +49,7 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         set(BUILD_DEMO OFF CACHE BOOL "" FORCE)
         set(BUILD_HTTP ON CACHE BOOL "" FORCE)
         set(BUILD_PQBENCH OFF CACHE BOOL "" FORCE)
-        set(BUILD_LOGLIB OFF CACHE BOOL "" FORCE)
+        set(BUILD_LOGLIB ON CACHE BOOL "" FORCE)
         set(BUILD_LOGREADER OFF CACHE BOOL "" FORCE)
         if(APPLE)
             # picotls appends literal "(" and ")" list items when Brotli is
