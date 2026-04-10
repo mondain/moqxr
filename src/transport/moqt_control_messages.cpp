@@ -729,7 +729,6 @@ std::vector<std::uint8_t> encode_subscribe_error_message(std::uint64_t request_i
     append_varint(payload, request_id);
     append_varint(payload, error_code);
     append_string(payload, reason);
-    append_varint(payload, 0);
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kSubscribeErrorType);
