@@ -735,16 +735,19 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
             // Discard messages we don't act on (acknowledged responses,
             // FETCH, GOAWAY, UNSUBSCRIBE, and any future message types) so they
-            // never block the control-stream buffer. Log them for visibility.
+            // never block the control-stream buffer. Log them for visibility
+            // only when tracing is explicitly enabled.
             const bool is_handled_type =
                 message_type == 0x02 ||  // SUBSCRIBE_UPDATE
                 message_type == 0x11 ||  // SUBSCRIBE_NAMESPACE
                 message_type == 0x03;    // SUBSCRIBE
             if (!is_handled_type) {
-                std::cerr << "[moqt-session] skipping unhandled control message type=0x"
-                          << std::hex << message_type << std::dec
-                          << " (" << control_message_type_name(message_type) << ")"
-                          << " size=" << message_size << '\n';
+                if (trace_enabled()) {
+                    std::cerr << "[moqt-session] skipping unhandled control message type=0x"
+                              << std::hex << message_type << std::dec
+                              << " (" << control_message_type_name(message_type) << ")"
+                              << " size=" << message_size << '\n';
+                }
                 buffer.erase(buffer.begin(), buffer.begin() + message_size);
                 continue;
             }
