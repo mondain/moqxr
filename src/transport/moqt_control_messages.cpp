@@ -297,6 +297,7 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
     }
 
     switch (type) {
+        // uint16 payload length: type varint + uint16 length + payload
         case kClientSetupType:
         case kServerSetupType:
         case kSubscribeUpdateType:
@@ -307,7 +308,19 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
         case kPublishNamespaceOkType:
         case kPublishNamespaceErrorType:
         case kPublishNamespaceDoneType:
-        case kPublishDoneType: {
+        case kPublishDoneType:
+        case kMaxRequestIdType:
+        case kPublishType:
+        case kPublishOkType:
+        case kPublishErrorType:
+        case 0x0a:  // UNSUBSCRIBE
+        case 0x10:  // GOAWAY
+        case 0x14:  // SUBSCRIBE_DONE (draft-14)
+        case 0x16:  // FETCH
+        case 0x17:  // FETCH_OK
+        case 0x18:  // FETCH_CANCEL
+        case 0x1a:  // REQUESTS_BLOCKED (draft-16)
+        {
             if (offset + 2 > bytes.size()) {
                 return false;
             }
@@ -316,20 +329,13 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
             message_size = offset + 2 + payload_length;
             return bytes.size() >= message_size;
         }
-        case kSubscribeNamespaceType:
-        case kSubscribeNamespaceOkType:
-        case kPublishType:
-        case kPublishOkType:
-        case kPublishErrorType: {
-            if (type == kPublishType || type == kPublishOkType || type == kPublishErrorType) {
-                if (offset + 2 > bytes.size()) {
-                    return false;
-                }
-                const std::size_t payload_length =
-                    (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
-                message_size = offset + 2 + payload_length;
-                return bytes.size() >= message_size;
-            }
+        // varint payload length: type varint + varint length + payload
+        // SUBSCRIBE_NAMESPACE family — same framing as 0x11 and 0x12.
+        case kSubscribeNamespaceType:        // 0x11
+        case kSubscribeNamespaceOkType:      // 0x12
+        case 0x13:  // SUBSCRIBE_NAMESPACE_ERROR (draft-14)
+        case 0x1b:  // UNSUBSCRIBE_NAMESPACE  (draft-14)
+        {
             std::uint64_t payload_length = 0;
             if (!decode_varint_impl(bytes, offset, payload_length)) {
                 return false;
@@ -337,20 +343,8 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
             message_size = offset + static_cast<std::size_t>(payload_length);
             return bytes.size() >= message_size;
         }
-        case kMaxRequestIdType:
-        default: {
-            // All known length-prefixed messages (including unknown future types) use
-            // a uint16 payload length immediately after the type varint.  Attempt to
-            // consume the message this way so that unrecognised messages (e.g. FETCH,
-            // GOAWAY, UNSUBSCRIBE) do not block the buffer.
-            if (offset + 2 > bytes.size()) {
-                return false;
-            }
-            const std::size_t payload_length =
-                (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
-            message_size = offset + 2 + payload_length;
-            return bytes.size() >= message_size;
-        }
+        default:
+            return false;
     }
 }
 
