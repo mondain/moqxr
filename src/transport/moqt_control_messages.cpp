@@ -337,7 +337,12 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
             message_size = offset + static_cast<std::size_t>(payload_length);
             return bytes.size() >= message_size;
         }
-        case kMaxRequestIdType: {
+        case kMaxRequestIdType:
+        default: {
+            // All known length-prefixed messages (including unknown future types) use
+            // a uint16 payload length immediately after the type varint.  Attempt to
+            // consume the message this way so that unrecognised messages (e.g. FETCH,
+            // GOAWAY, UNSUBSCRIBE) do not block the buffer.
             if (offset + 2 > bytes.size()) {
                 return false;
             }
@@ -346,8 +351,6 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
             message_size = offset + 2 + payload_length;
             return bytes.size() >= message_size;
         }
-        default:
-            return false;
     }
 }
 
