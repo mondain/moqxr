@@ -87,6 +87,24 @@ const char* control_message_type_name(std::uint64_t message_type) {
             return "CLIENT_SETUP";
         case 0x21:
             return "SERVER_SETUP";
+        case 0x0a:
+            return "UNSUBSCRIBE";
+        case 0x10:
+            return "GOAWAY";
+        case 0x13:
+            return "SUBSCRIBE_NAMESPACE_ERROR";
+        case 0x14:
+            return "SUBSCRIBE_DONE";
+        case 0x16:
+            return "FETCH";
+        case 0x17:
+            return "FETCH_OK";
+        case 0x18:
+            return "FETCH_CANCEL";
+        case 0x1a:
+            return "REQUESTS_BLOCKED";
+        case 0x1b:
+            return "UNSUBSCRIBE_NAMESPACE";
         default:
             return "UNKNOWN";
     }
@@ -715,7 +733,22 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             }
             trace_control_message(message_bytes, draft);
 
-            if (message_type == 0x12 || message_type == 0x07 || message_type == 0x1e) {
+            // Discard parsed control messages we don't act on (for example,
+            // acknowledged responses, FETCH, GOAWAY, or UNSUBSCRIBE) so they
+            // do not block the control-stream buffer. This only applies to
+            // messages that next_control_message() can frame successfully;
+            // log them for visibility only when tracing is explicitly enabled.
+            const bool is_handled_type =
+                message_type == 0x02 ||  // SUBSCRIBE_UPDATE
+                message_type == 0x11 ||  // SUBSCRIBE_NAMESPACE
+                message_type == 0x03;    // SUBSCRIBE
+            if (!is_handled_type) {
+                if (trace_enabled()) {
+                    std::cerr << "[moqt-session] skipping unhandled control message type=0x"
+                              << std::hex << message_type << std::dec
+                              << " (" << control_message_type_name(message_type) << ")"
+                              << " size=" << message_size << '\n';
+                }
                 buffer.erase(buffer.begin(), buffer.begin() + message_size);
                 continue;
             }
@@ -847,8 +880,6 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 buffer.erase(buffer.begin(), buffer.begin() + message_size);
                 continue;
             }
-
-            return TransportStatus::failure("received unsupported control request");
         }
 
         if (!fin && !pending_subscription_order.empty()) {
