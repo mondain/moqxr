@@ -15,12 +15,19 @@ namespace {
 std::string webtransport_protocol_offer(openmoq::publisher::DraftVersion version) {
     switch (version) {
         case openmoq::publisher::DraftVersion::kDraft14:
-            return "\"moq-00\", \"moqt-16\"";
+            // Draft-14 (MOQT version 0xff00000e) predates the versioned
+            // moqt-XX subprotocol tokens. Offering moq-00 alone is not
+            // universally accepted: some deployments only advertise
+            // moqt-15/moqt-16. Offering no WebTransport subprotocol at all
+            // lets the server fall back to reading the version from
+            // CLIENT_SETUP/SERVER_SETUP, which is the interoperable path
+            // for draft-14 over WebTransport.
+            return "";
         case openmoq::publisher::DraftVersion::kDraft16:
-            return "\"moqt-16\", \"moq-00\"";
+            return "\"moqt-16\"";
     }
 
-    return "\"moq-00\"";
+    return "";
 }
 
 std::unique_ptr<openmoq::publisher::transport::PublisherTransport> create_transport(
