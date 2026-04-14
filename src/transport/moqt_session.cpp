@@ -1063,18 +1063,37 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 return read_status;
             }
 
+            // Pick the (loop_cycle, media_time_us) of the earliest pending
+            // object across all active subscriptions. Scheduling by media time
+            // — rather than plan-array index — keeps tracks properly
+            // interleaved when the plan lays tracks out track-by-track (e.g.
+            // a single giant video group followed by a single giant audio
+            // group). Ordering by plan index in that layout would send every
+            // video object before any audio object, starving the audio track.
             std::size_t next_plan_index = plan.objects.size();
             std::size_t next_loop_cycle = 0;
+            std::uint64_t next_media_time_us = 0;
+            bool have_candidate = false;
             for (const auto& [request_id, active] : active_subscriptions) {
                 static_cast<void>(request_id);
                 if (active.completed) {
                     continue;
                 }
-                if (next_plan_index == plan.objects.size() ||
-                    active.loop_cycle < next_loop_cycle ||
-                    (active.loop_cycle == next_loop_cycle && active.next_object_index < next_plan_index)) {
+                if (active.next_object_index >= plan.objects.size()) {
+                    continue;
+                }
+                const std::uint64_t candidate_time_us = plan.objects[active.next_object_index].media_time_us;
+                const bool is_earlier = !have_candidate ||
+                                        active.loop_cycle < next_loop_cycle ||
+                                        (active.loop_cycle == next_loop_cycle &&
+                                         (candidate_time_us < next_media_time_us ||
+                                          (candidate_time_us == next_media_time_us &&
+                                           active.next_object_index < next_plan_index)));
+                if (is_earlier) {
                     next_plan_index = active.next_object_index;
                     next_loop_cycle = active.loop_cycle;
+                    next_media_time_us = candidate_time_us;
+                    have_candidate = true;
                 }
             }
 
