@@ -733,10 +733,11 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             }
             trace_control_message(message_bytes, draft);
 
-            // Discard messages we don't act on (acknowledged responses,
-            // FETCH, GOAWAY, UNSUBSCRIBE, and any future message types) so they
-            // never block the control-stream buffer. Log them for visibility
-            // only when tracing is explicitly enabled.
+            // Discard parsed control messages we don't act on (for example,
+            // acknowledged responses, FETCH, GOAWAY, or UNSUBSCRIBE) so they
+            // do not block the control-stream buffer. This only applies to
+            // messages that next_control_message() can frame successfully;
+            // log them for visibility only when tracing is explicitly enabled.
             const bool is_handled_type =
                 message_type == 0x02 ||  // SUBSCRIBE_UPDATE
                 message_type == 0x11 ||  // SUBSCRIBE_NAMESPACE
