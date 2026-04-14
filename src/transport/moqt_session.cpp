@@ -159,7 +159,7 @@ void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq:
         }
     } else if (message_type == 0x03) {
         SubscribeMessage message;
-        if (decode_subscribe_message(message_bytes, message)) {
+        if (decode_subscribe_message(message_bytes, draft, message)) {
             std::cerr << " request_id=" << message.request_id << " track=" << message.track_name
                       << " forward=" << static_cast<unsigned int>(message.forward)
                       << " filter_type=" << message.filter_type;
@@ -836,7 +836,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
             if (message_type == 0x03) {
                 SubscribeMessage subscribe;
-                if (!decode_subscribe_message(message_bytes, subscribe)) {
+                if (!decode_subscribe_message(message_bytes, draft, subscribe)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE");
                 }
                 if (!namespace_matches(subscribe.track_namespace, track_namespace)) {

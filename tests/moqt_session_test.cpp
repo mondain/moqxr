@@ -179,7 +179,8 @@ std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t reque
 std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
                                                    std::string_view track_namespace,
                                                    std::string_view track_name,
-                                                   std::uint8_t forward) {
+                                                   std::uint8_t forward,
+                                                   DraftVersion draft = DraftVersion::kDraft14) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
     const std::vector<std::uint8_t> tuple_len = encode_varint(1);
     const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
@@ -189,17 +190,49 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     const std::vector<std::uint8_t> track_name_length = encode_varint(track_name.size());
     payload.insert(payload.end(), track_name_length.begin(), track_name_length.end());
     payload.insert(payload.end(), track_name.begin(), track_name.end());
-    payload.push_back(0x80);
-    payload.push_back(0x01);
-    payload.push_back(forward);
-    const std::vector<std::uint8_t> filter_type = encode_varint(0x03);
-    const std::vector<std::uint8_t> start_group = encode_varint(0);
-    const std::vector<std::uint8_t> start_object = encode_varint(0);
-    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
-    payload.insert(payload.end(), filter_type.begin(), filter_type.end());
-    payload.insert(payload.end(), start_group.begin(), start_group.end());
-    payload.insert(payload.end(), start_object.begin(), start_object.end());
-    payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+
+    if (draft == DraftVersion::kDraft14) {
+        payload.push_back(0x80);  // subscriber_priority
+        payload.push_back(0x01);  // group_order
+        payload.push_back(forward);  // forward
+        const std::vector<std::uint8_t> filter_type = encode_varint(0x03);  // AbsoluteStart
+        const std::vector<std::uint8_t> start_group = encode_varint(0);
+        const std::vector<std::uint8_t> start_object = encode_varint(0);
+        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        payload.insert(payload.end(), filter_type.begin(), filter_type.end());
+        payload.insert(payload.end(), start_group.begin(), start_group.end());
+        payload.insert(payload.end(), start_object.begin(), start_object.end());
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    } else {
+        // Draft-16: parameters as delta-encoded KVPs.
+        // FORWARD(0x10), SUBSCRIBER_PRIORITY(0x20), SUBSCRIPTION_FILTER(0x21)
+        const std::vector<std::uint8_t> parameter_count = encode_varint(3);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+        // FORWARD (0x10, even) delta=0x10, value=forward
+        const std::vector<std::uint8_t> forward_delta = encode_varint(0x10);
+        const std::vector<std::uint8_t> forward_value = encode_varint(forward);
+        payload.insert(payload.end(), forward_delta.begin(), forward_delta.end());
+        payload.insert(payload.end(), forward_value.begin(), forward_value.end());
+        // SUBSCRIBER_PRIORITY (0x20, even) delta=0x10
+        const std::vector<std::uint8_t> priority_delta = encode_varint(0x20 - 0x10);
+        const std::vector<std::uint8_t> priority_value = encode_varint(0x80);
+        payload.insert(payload.end(), priority_delta.begin(), priority_delta.end());
+        payload.insert(payload.end(), priority_value.begin(), priority_value.end());
+        // SUBSCRIPTION_FILTER (0x21, odd) delta=0x01
+        // Value: FilterType(0x03=AbsoluteStart) + StartGroup(0) + StartObject(0)
+        const std::vector<std::uint8_t> filter_delta = encode_varint(0x21 - 0x20);
+        std::vector<std::uint8_t> filter_value;
+        const std::vector<std::uint8_t> ft = encode_varint(0x03);
+        const std::vector<std::uint8_t> sg = encode_varint(0);
+        const std::vector<std::uint8_t> so = encode_varint(0);
+        filter_value.insert(filter_value.end(), ft.begin(), ft.end());
+        filter_value.insert(filter_value.end(), sg.begin(), sg.end());
+        filter_value.insert(filter_value.end(), so.begin(), so.end());
+        const std::vector<std::uint8_t> filter_len = encode_varint(filter_value.size());
+        payload.insert(payload.end(), filter_delta.begin(), filter_delta.end());
+        payload.insert(payload.end(), filter_len.begin(), filter_len.end());
+        payload.insert(payload.end(), filter_value.begin(), filter_value.end());
+    }
 
     std::vector<std::uint8_t> message = encode_varint(0x03);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
@@ -279,7 +312,7 @@ void queue_subscribe_requests(MockTransport& transport,
         transport.reads[0].push_back(encode_subscribe_namespace_message(1, track_namespace));
     }
     for (const auto& [request_id, track_name] : requests) {
-        transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name, forward));
+        transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name, forward, draft));
     }
 }
 
@@ -546,7 +579,7 @@ int main() {
             .draft = DraftVersion::kDraft14,
             .max_request_id = 8,
         }));
-        queue_subscribe_requests(transport, DraftVersion::kDraft14, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+        queue_subscribe_requests(transport, DraftVersion::kDraft14, kTestTrackNamespace, {{1, "catalog"}, {3, "vide_1"}});
         MoqtSession session(transport, std::string(kTestTrackNamespace), false);
 
         auto status = session.connect(endpoint, tls);
@@ -649,8 +682,8 @@ int main() {
             .max_request_id = 8,
         }));
         transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
-        transport.reads[0].push_back(encode_subscribe_message(2, kTestTrackNamespace, "catalog", 0));
-        transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "vide_1", 0));
+        transport.reads[0].push_back(encode_subscribe_message(1, kTestTrackNamespace, "catalog", 0));
+        transport.reads[0].push_back(encode_subscribe_message(3, kTestTrackNamespace, "vide_1", 0));
 
         bool saw_media_before_media_subscribe = false;
         transport.on_read = [&](const MockTransport& current, std::uint64_t stream_id) {
@@ -705,8 +738,8 @@ int main() {
             .max_request_id = 12,
         }));
         transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
-        transport.reads[0].push_back(encode_subscribe_message(2, kTestTrackNamespace, "vide_1", 0));
-        transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "soun_2", 0));
+        transport.reads[0].push_back(encode_subscribe_message(1, kTestTrackNamespace, "vide_1", 0));
+        transport.reads[0].push_back(encode_subscribe_message(3, kTestTrackNamespace, "soun_2", 0));
         MoqtSession session(transport, std::string(kTestTrackNamespace), false);
 
         auto status = session.connect(endpoint, tls);
@@ -752,14 +785,14 @@ int main() {
             .max_request_id = 12,
         }));
         transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
-        transport.reads[0].push_back(encode_subscribe_message(2, kTestTrackNamespace, "vide_1", 0));
+        transport.reads[0].push_back(encode_subscribe_message(1, kTestTrackNamespace, "vide_1", 0));
 
         bool queued_delayed_audio_subscribe = false;
         transport.on_read = [&](const MockTransport& current, std::uint64_t stream_id) {
             if (queued_delayed_audio_subscribe || stream_id != 0 || current.read_count != 4) {
                 return;
             }
-            transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "soun_2", 0));
+            transport.reads[0].push_back(encode_subscribe_message(3, kTestTrackNamespace, "soun_2", 0));
             queued_delayed_audio_subscribe = true;
         };
 
@@ -841,7 +874,7 @@ int main() {
         }));
         transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
         transport.reads[0].push_back(encode_publish_ok_message(DraftVersion::kDraft14, 2, 1));
-        transport.reads[0].push_back(encode_subscribe_message(4, kTestTrackNamespace, "vide_1", 0));
+        transport.reads[0].push_back(encode_subscribe_message(3, kTestTrackNamespace, "vide_1", 0));
         MoqtSession session(transport, std::string(kTestTrackNamespace), false, true);
 
         auto status = session.connect(endpoint, tls);
@@ -880,7 +913,7 @@ int main() {
         transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
         transport.reads[0].push_back(encode_publish_ok_message(DraftVersion::kDraft14, 2, 0));
         std::vector<std::uint8_t> control = encode_subscribe_update_message(1, 0);
-        const auto media_subscribe = encode_subscribe_message(4, kTestTrackNamespace, "vide_1", 0);
+        const auto media_subscribe = encode_subscribe_message(3, kTestTrackNamespace, "vide_1", 0);
         control.insert(control.end(), media_subscribe.begin(), media_subscribe.end());
         transport.reads[0].push_back(control);
         MoqtSession session(transport, std::string(kTestTrackNamespace), false, true);
@@ -921,7 +954,7 @@ int main() {
         std::vector<std::uint8_t> interleaved_control = encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0);
         const auto catalog_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 2, 0);
         interleaved_control.insert(interleaved_control.end(), catalog_publish_ok.begin(), catalog_publish_ok.end());
-        const auto catalog_subscribe = encode_subscribe_message(6, kTestTrackNamespace, "catalog", 0);
+        const auto catalog_subscribe = encode_subscribe_message(5, kTestTrackNamespace, "catalog", 0);
         interleaved_control.insert(interleaved_control.end(), catalog_subscribe.begin(), catalog_subscribe.end());
         const auto catalog_subscribe_update = encode_legacy_subscribe_update_message(0);
         interleaved_control.insert(interleaved_control.end(),
@@ -950,9 +983,9 @@ int main() {
         std::vector<std::uint8_t> interleaved_control = encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0);
         const auto catalog_publish_ok = encode_publish_ok_message(DraftVersion::kDraft14, 2, 0);
         interleaved_control.insert(interleaved_control.end(), catalog_publish_ok.begin(), catalog_publish_ok.end());
-        const auto catalog_subscribe = encode_subscribe_message(6, kTestTrackNamespace, "catalog", 0);
+        const auto catalog_subscribe = encode_subscribe_message(5, kTestTrackNamespace, "catalog", 0);
         interleaved_control.insert(interleaved_control.end(), catalog_subscribe.begin(), catalog_subscribe.end());
-        const auto catalog_subscribe_update = encode_subscribe_update_message(6);
+        const auto catalog_subscribe_update = encode_subscribe_update_message(7, 5);
         interleaved_control.insert(interleaved_control.end(),
                                    catalog_subscribe_update.begin(),
                                    catalog_subscribe_update.end());
@@ -997,8 +1030,8 @@ int main() {
             .max_request_id = 8,
         }));
         queue_publish_ok_responses(transport, DraftVersion::kDraft14, {2, 4}, 0);
-        transport.reads[0].push_back(encode_subscribe_message(6, kTestTrackNamespace, "catalog", 0));
-        transport.reads[0].push_back(encode_subscribe_message(8, kTestTrackNamespace, "vide_1", 0));
+        transport.reads[0].push_back(encode_subscribe_message(5, kTestTrackNamespace, "catalog", 0));
+        transport.reads[0].push_back(encode_subscribe_message(7, kTestTrackNamespace, "vide_1", 0));
         MoqtSession session(transport, std::string(kTestTrackNamespace), true);
 
         auto status = session.connect(endpoint, tls);
@@ -1043,7 +1076,7 @@ int main() {
         .draft = DraftVersion::kDraft16,
         .max_request_id = 8,
     }));
-    queue_subscribe_requests(draft16_transport, DraftVersion::kDraft16, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    queue_subscribe_requests(draft16_transport, DraftVersion::kDraft16, kTestTrackNamespace, {{1, "catalog"}, {3, "vide_1"}});
     MoqtSession draft16_session(draft16_transport, std::string(kTestTrackNamespace));
     status = draft16_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected draft-16 session connect to succeed");
@@ -1138,7 +1171,7 @@ int main() {
         std::vector<std::uint8_t>(split_server_setup.begin(), split_server_setup.begin() + 3));
     segmented_transport.reads[0].push_back(
         std::vector<std::uint8_t>(split_server_setup.begin() + 3, split_server_setup.end()));
-    queue_subscribe_requests(segmented_transport, DraftVersion::kDraft14, kTestTrackNamespace, {{2, "catalog"}, {4, "vide_1"}});
+    queue_subscribe_requests(segmented_transport, DraftVersion::kDraft14, kTestTrackNamespace, {{1, "catalog"}, {3, "vide_1"}});
     MoqtSession segmented_session(segmented_transport, std::string(kTestTrackNamespace));
     status = segmented_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected segmented setup connect to succeed");
@@ -1152,7 +1185,7 @@ int main() {
     queue_subscribe_requests(extra_server_setup_param_transport,
                              DraftVersion::kDraft14,
                              kTestTrackNamespace,
-                             {{2, "catalog"}, {4, "vide_1"}});
+                             {{1, "catalog"}, {3, "vide_1"}});
     MoqtSession extra_server_setup_param_session(extra_server_setup_param_transport, std::string(kTestTrackNamespace));
     status = extra_server_setup_param_session.connect(endpoint, tls);
     ok &= expect(status.ok, "expected SERVER_SETUP with extra even-numbered parameter to connect successfully");
@@ -1229,7 +1262,7 @@ int main() {
         queue_subscribe_requests(timeout_transport,
                                  DraftVersion::kDraft14,
                                  kTestTrackNamespace,
-                                 {{2, "catalog"}, {4, "vide_1"}});
+                                 {{1, "catalog"}, {3, "vide_1"}});
         MoqtSession timeout_session(
             timeout_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(11));
         status = timeout_session.connect(endpoint, tls);
@@ -1282,6 +1315,75 @@ int main() {
         ok &= expect(!closed_idle_publish_transport.writes.empty() &&
                          message_type(closed_idle_publish_transport.writes.back().bytes) == 0x09,
                      "expected closed-idle publish flow to send PUBLISH_NAMESPACE_DONE");
+    }
+
+    {
+        // Regression: draft-16 SUBSCRIBE wire bytes captured from the Akamai
+        // test relay. Namespace=["moqxr"], track="catalog", one parameter:
+        // SUBSCRIPTION_FILTER (0x21) with filter type Largest Object (0x02).
+        const std::vector<std::uint8_t> akamai_subscribe = {
+            0x03, 0x00, 0x14, 0x01, 0x01, 0x05, 0x6d, 0x6f, 0x71, 0x78, 0x72,
+            0x07, 0x63, 0x61, 0x74, 0x61, 0x6c, 0x6f, 0x67, 0x01, 0x21, 0x01, 0x02,
+        };
+        SubscribeMessage draft16_msg;
+        ok &= expect(openmoq::publisher::transport::decode_subscribe_message(
+                         akamai_subscribe, DraftVersion::kDraft16, draft16_msg),
+                     "expected draft-16 SUBSCRIBE from Akamai relay to decode");
+        ok &= expect(draft16_msg.request_id == 1, "expected request_id=1");
+        ok &= expect(draft16_msg.track_namespace.size() == 1 &&
+                         draft16_msg.track_namespace.front() == "moqxr",
+                     "expected namespace [\"moqxr\"]");
+        ok &= expect(draft16_msg.track_name == "catalog", "expected track_name=catalog");
+        ok &= expect(draft16_msg.filter_type == 0x02, "expected filter_type=Largest Object (0x02)");
+        ok &= expect(draft16_msg.subscriber_priority == 128, "expected default subscriber_priority=128");
+        ok &= expect(draft16_msg.forward == 1, "expected default forward=1");
+
+        // And confirm that parsing the same bytes as draft-14 still fails, so
+        // nothing is silently cross-wired.
+        SubscribeMessage draft14_msg;
+        ok &= expect(!openmoq::publisher::transport::decode_subscribe_message(
+                         akamai_subscribe, DraftVersion::kDraft14, draft14_msg),
+                     "expected draft-14 decoder to reject draft-16 SUBSCRIBE bytes");
+
+        // Spec §9.2: unknown Message Parameter MUST cause PROTOCOL_VIOLATION.
+        // Parameter type 0x40 is not defined for SUBSCRIBE in draft-16 — the
+        // decoder should reject it rather than silently skip. Built by
+        // replacing the SUBSCRIPTION_FILTER parameter with an unknown even
+        // parameter (0x40) with a varint value.
+        const std::vector<std::uint8_t> unknown_param_subscribe = {
+            0x03, 0x00, 0x14, 0x01, 0x01, 0x05, 0x6d, 0x6f, 0x71, 0x78, 0x72,
+            0x07, 0x63, 0x61, 0x74, 0x61, 0x6c, 0x6f, 0x67, 0x01, 0x40, 0x40, 0x00,
+        };
+        SubscribeMessage unknown_msg;
+        ok &= expect(!openmoq::publisher::transport::decode_subscribe_message(
+                         unknown_param_subscribe, DraftVersion::kDraft16, unknown_msg),
+                     "expected unknown draft-16 Message Parameter to be rejected");
+
+        // Spec §9.2.2.4: GROUP_ORDER=0 is not a legal wire value.
+        // Message: same namespace/track, 1 parameter: GROUP_ORDER (0x22) with
+        // value 0. Length: req(1)+tuple(1)+"moqxr"(6)+"catalog"(8)+nparams(1)+
+        // delta(1)+value(1) = 19 = 0x13.
+        const std::vector<std::uint8_t> group_order_zero_subscribe = {
+            0x03, 0x00, 0x13, 0x01, 0x01, 0x05, 0x6d, 0x6f, 0x71, 0x78, 0x72,
+            0x07, 0x63, 0x61, 0x74, 0x61, 0x6c, 0x6f, 0x67, 0x01, 0x22, 0x00,
+        };
+        SubscribeMessage group_order_zero_msg;
+        ok &= expect(!openmoq::publisher::transport::decode_subscribe_message(
+                         group_order_zero_subscribe, DraftVersion::kDraft16, group_order_zero_msg),
+                     "expected GROUP_ORDER=0 wire value to be rejected");
+
+        // Spec §9.2.2.2: DELIVERY_TIMEOUT=0 is not a legal wire value.
+        // Message: same namespace/track, 1 parameter: DELIVERY_TIMEOUT (0x02)
+        // with value 0. Length: req(1)+tuple(1)+"moqxr"(6)+"catalog"(8)+
+        // nparams(1)+delta(1)+value(1) = 19 = 0x13.
+        const std::vector<std::uint8_t> delivery_timeout_zero_subscribe = {
+            0x03, 0x00, 0x13, 0x01, 0x01, 0x05, 0x6d, 0x6f, 0x71, 0x78, 0x72,
+            0x07, 0x63, 0x61, 0x74, 0x61, 0x6c, 0x6f, 0x67, 0x01, 0x02, 0x00,
+        };
+        SubscribeMessage delivery_timeout_zero_msg;
+        ok &= expect(!openmoq::publisher::transport::decode_subscribe_message(
+                         delivery_timeout_zero_subscribe, DraftVersion::kDraft16, delivery_timeout_zero_msg),
+                     "expected DELIVERY_TIMEOUT=0 wire value to be rejected");
     }
 
     return ok ? 0 : 1;

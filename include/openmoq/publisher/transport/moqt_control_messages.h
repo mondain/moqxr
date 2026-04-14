@@ -118,7 +118,7 @@ bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
 bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draft, RequestError& message);
 bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, SubscribeNamespaceMessage& message);
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id);
-bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMessage& message);
+bool decode_subscribe_message(std::span<const std::uint8_t> bytes, DraftVersion draft, SubscribeMessage& message);
 bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, SubscribeUpdateMessage& message);
 std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
                                                       std::uint64_t request_id,
