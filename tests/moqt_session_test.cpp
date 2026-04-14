@@ -438,18 +438,19 @@ bool decode_object_stream_fields(const std::vector<std::uint8_t>& bytes,
                                  std::uint64_t& stream_type,
                                  std::uint64_t& track_alias,
                                  std::uint64_t& group_id,
-                                 std::uint64_t& subgroup_id,
-                                 std::uint64_t& publisher_priority,
                                  std::uint64_t& object_id_delta,
                                  std::uint64_t& payload_length,
                                  std::vector<std::uint8_t>& payload) {
+    // Matches the encoder in src/transport/moqt_control_messages.cpp: the
+    // subgroup header uses SUBGROUP_ID_MODE=0 (implicit value 0) and
+    // DEFAULT_PRIORITY=1 (priority byte omitted), so the on-wire field order
+    // is type | track_alias | group_id | object_id_delta | payload_length |
+    // payload.
     payload.clear();
     std::size_t offset = 0;
     if (!decode_varint(bytes, offset, stream_type) ||
         !decode_varint(bytes, offset, track_alias) ||
         !decode_varint(bytes, offset, group_id) ||
-        !decode_varint(bytes, offset, subgroup_id) ||
-        !decode_varint(bytes, offset, publisher_priority) ||
         !decode_varint(bytes, offset, object_id_delta) ||
         !decode_varint(bytes, offset, payload_length) ||
         offset + payload_length != bytes.size()) {
@@ -661,13 +662,11 @@ int main() {
         ok &= expect(message_type(transport.writes[2].bytes) == 0x04, "expected first SUBSCRIBE_OK");
         ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected second SUBSCRIBE_OK");
         ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x1c,
+        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x38,
                      "expected first object stream to use a subgroup header with end-of-group");
         std::uint64_t stream_type = 0;
         std::uint64_t track_alias = 0;
         std::uint64_t group_id = 0;
-        std::uint64_t subgroup_id = 0;
-        std::uint64_t publisher_priority = 0;
         std::uint64_t object_id_delta = 0;
         std::uint64_t payload_length = 0;
         std::vector<std::uint8_t> payload;
@@ -675,36 +674,30 @@ int main() {
                                                  stream_type,
                                                  track_alias,
                                                  group_id,
-                                                 subgroup_id,
-                                                 publisher_priority,
                                                  object_id_delta,
                                                  payload_length,
                                                  payload),
                      "expected first object stream to decode");
-        ok &= expect(stream_type == 0x1c, "expected subgroup stream type with end-of-group");
+        ok &= expect(stream_type == 0x38, "expected subgroup stream type with end-of-group");
         ok &= expect(group_id == 0, "expected catalog group id");
-        ok &= expect(subgroup_id == 0, "expected catalog subgroup id");
         ok &= expect(object_id_delta == 0, "expected catalog object id delta before payload length");
         ok &= expect(payload_length == 4, "expected catalog payload length to be encoded after object id delta");
         ok &= expect(payload == std::vector<std::uint8_t>({'I', 'N', 'I', 'T'}),
                      "expected catalog payload bytes after subgroup object fields");
         ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
         ok &= expect(transport.writes[5].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x1c,
+        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x38,
                      "expected second object stream to use a subgroup header with end-of-group");
         payload.clear();
         ok &= expect(decode_object_stream_fields(transport.writes[5].bytes,
                                                  stream_type,
                                                  track_alias,
                                                  group_id,
-                                                 subgroup_id,
-                                                 publisher_priority,
                                                  object_id_delta,
                                                  payload_length,
                                                  payload),
                      "expected second object stream to decode");
         ok &= expect(group_id == 1, "expected media group id");
-        ok &= expect(subgroup_id == 0, "expected media subgroup id");
         ok &= expect(object_id_delta == 0, "expected media object id delta before payload length");
         ok &= expect(payload_length == 3, "expected media payload length to be encoded after object id delta");
         ok &= expect(payload == std::vector<std::uint8_t>({'M', 'S', 'G'}),
@@ -744,8 +737,6 @@ int main() {
                 std::uint64_t stream_type = 0;
                 std::uint64_t track_alias = 0;
                 std::uint64_t group_id = 0;
-                std::uint64_t subgroup_id = 0;
-                std::uint64_t publisher_priority = 0;
                 std::uint64_t object_id_delta = 0;
                 std::uint64_t payload_length = 0;
                 std::vector<std::uint8_t> payload;
@@ -753,8 +744,6 @@ int main() {
                                                 stream_type,
                                                 track_alias,
                                                 group_id,
-                                                subgroup_id,
-                                                publisher_priority,
                                                 object_id_delta,
                                                 payload_length,
                                                 payload) &&
@@ -802,8 +791,6 @@ int main() {
             std::uint64_t stream_type = 0;
             std::uint64_t track_alias = 0;
             std::uint64_t group_id = 0;
-            std::uint64_t subgroup_id = 0;
-            std::uint64_t publisher_priority = 0;
             std::uint64_t object_id_delta = 0;
             std::uint64_t payload_length = 0;
             std::vector<std::uint8_t> payload;
@@ -811,8 +798,6 @@ int main() {
                                              stream_type,
                                              track_alias,
                                              group_id,
-                                             subgroup_id,
-                                             publisher_priority,
                                              object_id_delta,
                                              payload_length,
                                              payload)) {
@@ -858,8 +843,6 @@ int main() {
             std::uint64_t stream_type = 0;
             std::uint64_t track_alias = 0;
             std::uint64_t group_id = 0;
-            std::uint64_t subgroup_id = 0;
-            std::uint64_t publisher_priority = 0;
             std::uint64_t object_id_delta = 0;
             std::uint64_t payload_length = 0;
             std::vector<std::uint8_t> payload;
@@ -867,8 +850,6 @@ int main() {
                                              stream_type,
                                              track_alias,
                                              group_id,
-                                             subgroup_id,
-                                             publisher_priority,
                                              object_id_delta,
                                              payload_length,
                                              payload)) {
@@ -1480,10 +1461,10 @@ int main() {
             ok &= expect(transport.writes[vide_1_stream_writes[2]].fin,
                          "expected final write to FIN the subgroup stream");
 
-            // First write: SUBGROUP_HEADER (type=0x1c end-of-group set) + first object
-            // {Object ID Delta=0, payload_len=2, payload="V0"}.
+            // First write: SUBGROUP_HEADER (type=0x38 end-of-group set, mode=0, default priority) +
+            // first object {Object ID Delta=0, payload_len=2, payload="V0"}.
             const auto& w0 = transport.writes[vide_1_stream_writes[0]].bytes;
-            ok &= expect(!w0.empty() && w0.front() == 0x1c,
+            ok &= expect(!w0.empty() && w0.front() == 0x38,
                          "expected first write to begin with SUBGROUP_HEADER | END_OF_GROUP");
 
             // Second and third writes: no header, just {Object ID Delta, payload_len, payload}.

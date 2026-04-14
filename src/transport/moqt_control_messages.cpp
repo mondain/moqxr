@@ -29,7 +29,14 @@ constexpr std::uint64_t kMaxRequestIdType = 0x15;
 constexpr std::uint64_t kPublishType = 0x1d;
 constexpr std::uint64_t kPublishOkType = 0x1e;
 constexpr std::uint64_t kPublishErrorType = 0x1f;
-constexpr std::uint64_t kSubgroupHeaderType = 0x14;
+// SUBGROUP_HEADER type byte layout (draft-16 §10.4.2):
+//   bit 0: EXTENSIONS         (0 = no per-object extensions on this stream)
+//   bits 1-2: SUBGROUP_ID_MODE (00 = Subgroup ID absent, value is 0)
+//   bit 3: END_OF_GROUP       (set when this subgroup owns the group's largest)
+//   bit 4: always 1 (identifies a subgroup header)
+//   bit 5: DEFAULT_PRIORITY   (1 = priority byte omitted, use subscription default)
+// Base byte = 0x10 | 0x20 = 0x30. End-of-group variant = 0x38.
+constexpr std::uint64_t kSubgroupHeaderType = 0x30;
 constexpr std::uint64_t kSubgroupHeaderEndOfGroupBit = 0x08;
 constexpr std::uint64_t kSetupParamPath = 0x1;
 constexpr std::uint64_t kSetupParamMaxRequestId = 0x2;
@@ -913,14 +920,18 @@ std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
                                                  std::uint64_t subgroup_id,
                                                  bool end_of_group) {
     static_cast<void>(draft);
+    // Current callers always serve subgroup_id = 0 and the publisher default
+    // priority, which matches SubgroupIDMode=0 + DefaultPriority=1. That shape
+    // is on the wire what most interop partners (mojito, the Akamai test
+    // relay, etc.) expect. Packager work that assigns non-zero subgroup IDs
+    // or per-subgroup priorities can switch to SubgroupIDExplicit here.
+    static_cast<void>(subgroup_id);
     const std::uint64_t stream_type =
         kSubgroupHeaderType | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
     std::vector<std::uint8_t> bytes;
     append_varint(bytes, stream_type);
     append_varint(bytes, track_alias);
     append_varint(bytes, group_id);
-    append_varint(bytes, subgroup_id);
-    bytes.push_back(kPublisherPriority);
     return bytes;
 }
 
