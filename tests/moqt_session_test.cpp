@@ -550,6 +550,52 @@ PublishPlan make_multitrack_plan(DraftVersion draft) {
     };
 }
 
+PublishPlan make_multi_object_subgroup_plan() {
+    // A single video group (group_id = 0, subgroup_id = 0) carrying three
+    // sequential objects. Used to verify that multiple objects in the same
+    // subgroup are appended to a single QUIC stream per spec §2.2.
+    return {
+        .draft = openmoq::publisher::draft_profile(DraftVersion::kDraft14),
+        .tracks = {
+            TrackDescription{.track_id = 0, .handler_type = "meta", .codec = "catalog", .sample_entry_type = "catalog", .track_name = "catalog"},
+            TrackDescription{.track_id = 1, .handler_type = "vide", .codec = "avc1.64000C", .sample_entry_type = "avc1", .track_name = "vide_1"},
+        },
+        .objects = {
+            CmsfObject{
+                .kind = CmsfObjectKind::kInitialization,
+                .track_name = "catalog",
+                .group_id = 0,
+                .object_id = 0,
+                .owned_payload = {'I', 'N', 'I', 'T'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "vide_1",
+                .group_id = 0,
+                .object_id = 0,
+                .media_time_us = 0,
+                .owned_payload = {'V', '0'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "vide_1",
+                .group_id = 0,
+                .object_id = 1,
+                .media_time_us = 33333,
+                .owned_payload = {'V', '1'},
+            },
+            CmsfObject{
+                .kind = CmsfObjectKind::kMedia,
+                .track_name = "vide_1",
+                .group_id = 0,
+                .object_id = 2,
+                .media_time_us = 66666,
+                .owned_payload = {'V', '2'},
+            },
+        },
+    };
+}
+
 }  // namespace
 
 int main() {
@@ -1384,6 +1430,92 @@ int main() {
         ok &= expect(!openmoq::publisher::transport::decode_subscribe_message(
                          delivery_timeout_zero_subscribe, DraftVersion::kDraft16, delivery_timeout_zero_msg),
                      "expected DELIVERY_TIMEOUT=0 wire value to be rejected");
+    }
+
+    {
+        // Spec §2.2: objects from the same subgroup MUST NOT be sent on
+        // different streams. Serve a plan where vide_1 carries three objects
+        // in group 0, subgroup 0 and verify the publisher opens a single
+        // unidirectional stream and appends the objects onto it with
+        // delta-encoded Object IDs.
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_subscribe_message(1, kTestTrackNamespace, "vide_1", 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace));
+        status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected multi-object-subgroup session connect to succeed");
+        status = session.publish(make_multi_object_subgroup_plan());
+        ok &= expect(status.ok, "expected multi-object-subgroup publish to succeed");
+
+        // Extract the unidirectional-stream writes (stream_id >= 2 for client
+        // uni, and the writes are ordered in open-sequence). There should be
+        // exactly three writes on the same stream_id.
+        std::vector<std::size_t> vide_1_stream_writes;
+        std::uint64_t first_uni_stream_id = std::numeric_limits<std::uint64_t>::max();
+        for (std::size_t index = 0; index < transport.writes.size(); ++index) {
+            const auto& write = transport.writes[index];
+            if (write.stream_id == 0) {
+                continue;  // control stream
+            }
+            if (first_uni_stream_id == std::numeric_limits<std::uint64_t>::max()) {
+                first_uni_stream_id = write.stream_id;
+            }
+            if (write.stream_id == first_uni_stream_id) {
+                vide_1_stream_writes.push_back(index);
+            }
+        }
+
+        ok &= expect(vide_1_stream_writes.size() == 3,
+                     "expected three writes on the single vide_1 subgroup stream");
+
+        if (vide_1_stream_writes.size() == 3) {
+            ok &= expect(!transport.writes[vide_1_stream_writes[0]].fin,
+                         "expected first write to not FIN the subgroup stream");
+            ok &= expect(!transport.writes[vide_1_stream_writes[1]].fin,
+                         "expected second write to not FIN the subgroup stream");
+            ok &= expect(transport.writes[vide_1_stream_writes[2]].fin,
+                         "expected final write to FIN the subgroup stream");
+
+            // First write: SUBGROUP_HEADER (type=0x1c end-of-group set) + first object
+            // {Object ID Delta=0, payload_len=2, payload="V0"}.
+            const auto& w0 = transport.writes[vide_1_stream_writes[0]].bytes;
+            ok &= expect(!w0.empty() && w0.front() == 0x1c,
+                         "expected first write to begin with SUBGROUP_HEADER | END_OF_GROUP");
+
+            // Second and third writes: no header, just {Object ID Delta, payload_len, payload}.
+            // Delta for sequential object IDs 0 -> 1 -> 2 is 0 each time.
+            const auto& w1 = transport.writes[vide_1_stream_writes[1]].bytes;
+            ok &= expect(w1 == std::vector<std::uint8_t>{0x00, 0x02, 'V', '1'},
+                         "expected second write to be Object ID Delta=0, payload_len=2, 'V1'");
+            const auto& w2 = transport.writes[vide_1_stream_writes[2]].bytes;
+            ok &= expect(w2 == std::vector<std::uint8_t>{0x00, 0x02, 'V', '2'},
+                         "expected third write to be Object ID Delta=0, payload_len=2, 'V2'");
+        }
+
+        // PUBLISH_DONE stream_count should be 1 (one subgroup stream opened),
+        // not 3 (one per object). Per spec §9.14 the stream_count field counts
+        // data streams, not objects.
+        std::optional<std::vector<std::uint8_t>> publish_done_bytes;
+        for (const auto& write : transport.writes) {
+            if (!write.bytes.empty() && write.bytes.front() == 0x0b) {
+                publish_done_bytes = write.bytes;
+                break;
+            }
+        }
+        ok &= expect(publish_done_bytes.has_value(), "expected PUBLISH_DONE to be sent");
+        if (publish_done_bytes.has_value()) {
+            // PUBLISH_DONE payload: type(0x0b) + len(uint16 BE) +
+            // request_id(i) + status(i=0x02 Track_Ended) + stream_count(i) +
+            // reason_len(i=0). For request_id=1 and stream_count=1 the full
+            // bytes are [0x0b, 0x00, 0x04, 0x01, 0x02, 0x01, 0x00].
+            const std::vector<std::uint8_t> expected = {0x0b, 0x00, 0x04, 0x01, 0x02, 0x01, 0x00};
+            ok &= expect(*publish_done_bytes == expected,
+                         "expected PUBLISH_DONE.stream_count = 1 for a single-subgroup delivery");
+        }
     }
 
     return ok ? 0 : 1;

@@ -9,9 +9,12 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace openmoq::publisher::transport {
@@ -231,10 +234,12 @@ struct PublishedTrack {
     bool content_exists = false;
 };
 
+class SubgroupSenderState;
+
 struct ActiveSubscription {
     SubscribeMessage subscribe;
     PublishedTrack track;
-    std::uint64_t stream_count = 0;
+    std::shared_ptr<SubgroupSenderState> sender;
     std::size_t loop_cycle = 0;
     std::size_t next_object_index = 0;
     bool completed = false;
@@ -660,6 +665,113 @@ bool is_final_object_in_group(const openmoq::publisher::PublishPlan& plan, std::
     return true;
 }
 
+bool is_final_object_in_subgroup(const openmoq::publisher::PublishPlan& plan, std::size_t object_index) {
+    const auto& object = plan.objects.at(object_index);
+    for (std::size_t index = object_index + 1; index < plan.objects.size(); ++index) {
+        const auto& candidate = plan.objects[index];
+        if (candidate.track_name == object.track_name && candidate.group_id == object.group_id &&
+            candidate.subgroup_id == object.subgroup_id && candidate.object_id > object.object_id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool subgroup_contains_group_largest(const openmoq::publisher::PublishPlan& plan, std::size_t object_index) {
+    // The subgroup "contains the group's largest object" iff no later plan
+    // object in the same track+group has a larger object_id outside this
+    // subgroup. For the current baseline (every object is in subgroup 0) this
+    // is equivalent to is_final_object_in_group; the helper is defined
+    // explicitly so future multi-subgroup packagers don't mis-set the
+    // END_OF_GROUP bit.
+    const auto& object = plan.objects.at(object_index);
+    for (std::size_t index = 0; index < plan.objects.size(); ++index) {
+        const auto& candidate = plan.objects[index];
+        if (candidate.track_name != object.track_name || candidate.group_id != object.group_id) {
+            continue;
+        }
+        if (candidate.object_id > object.object_id && candidate.subgroup_id != object.subgroup_id) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Tracks per-subgroup open QUIC streams so that the same subgroup's objects
+// are appended onto a single data stream rather than splitting across streams
+// (draft-16 §2.2 / §10.4.2). Callers instantiate one of these per "sending
+// context" -- per-subscription for serve_subscriptions, per-track for the
+// publish paths -- and delegate the stream lifecycle to it.
+class SubgroupSenderState {
+public:
+    // Write one object. If no stream is currently open for this object's
+    // (group_id, subgroup_id), opens a uni stream, emits its SUBGROUP_HEADER
+    // (with END_OF_GROUP set when the subgroup owns the group's largest
+    // object), then appends the object. If is_final_in_subgroup is true, the
+    // write is FIN'd and the stream is released.
+    TransportStatus serve(PublisherTransport& transport,
+                          openmoq::publisher::DraftVersion draft,
+                          std::uint64_t track_alias,
+                          const openmoq::publisher::CmsfObject& object,
+                          bool subgroup_contains_group_largest,
+                          bool is_final_in_subgroup,
+                          std::span<const std::uint8_t> payload) {
+        const Key key{static_cast<std::uint64_t>(object.group_id), object.subgroup_id};
+        auto it = streams_.find(key);
+        std::optional<std::uint64_t> previous_object_id;
+        std::uint64_t stream_id = 0;
+
+        std::vector<std::uint8_t> wire_bytes;
+        if (it == streams_.end()) {
+            TransportStatus status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
+            if (!status.ok) {
+                return status;
+            }
+            wire_bytes = encode_subgroup_header(
+                draft, track_alias, static_cast<std::uint64_t>(object.group_id),
+                object.subgroup_id, subgroup_contains_group_largest);
+            ++stream_count_;
+            it = streams_.emplace(key, OpenStream{stream_id, 0}).first;
+        } else {
+            stream_id = it->second.stream_id;
+            previous_object_id = it->second.last_object_id;
+        }
+
+        std::vector<std::uint8_t> object_bytes =
+            encode_subgroup_object(previous_object_id, object.object_id, payload);
+        wire_bytes.insert(wire_bytes.end(), object_bytes.begin(), object_bytes.end());
+
+        const TransportStatus status = transport.write_stream(stream_id, wire_bytes, is_final_in_subgroup);
+        if (!status.ok) {
+            return status;
+        }
+
+        if (is_final_in_subgroup) {
+            streams_.erase(it);
+        } else {
+            it->second.last_object_id = object.object_id;
+        }
+        return TransportStatus::success();
+    }
+
+    std::uint64_t stream_count() const { return stream_count_; }
+
+private:
+    struct Key {
+        std::uint64_t group_id;
+        std::uint64_t subgroup_id;
+        friend bool operator<(const Key& a, const Key& b) {
+            return std::tie(a.group_id, a.subgroup_id) < std::tie(b.group_id, b.subgroup_id);
+        }
+    };
+    struct OpenStream {
+        std::uint64_t stream_id;
+        std::uint64_t last_object_id;
+    };
+    std::map<Key, OpenStream> streams_;
+    std::uint64_t stream_count_ = 0;
+};
+
 TransportStatus finalize_subscription(PublisherTransport& transport,
                                       std::uint64_t control_stream_id,
                                       std::uint64_t request_id,
@@ -781,7 +893,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                         ActiveSubscription active{
                             .subscribe = dormant_it->second.subscribe,
                             .track = dormant_it->second.track,
-                            .stream_count = 0,
+                            .sender = std::make_shared<SubgroupSenderState>(),
                             .loop_cycle = 0,
                             .next_object_index = 0,
                             .completed = false,
@@ -912,7 +1024,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             ActiveSubscription active{
                 .subscribe = subscribe,
                 .track = track_it->second,
-                .stream_count = 0,
+                .sender = std::make_shared<SubgroupSenderState>(),
                 .loop_cycle = 0,
                 .next_object_index = 0,
                 .completed = false,
@@ -986,22 +1098,20 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                         continue;
                     }
 
-                    std::uint64_t stream_id = 0;
-                    TransportStatus write_status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-                    if (!write_status.ok) {
-                        return write_status;
-                    }
-                    write_status = transport.write_stream(
-                        stream_id,
-                        encode_object_stream(draft, active.track.alias, object, is_final_object_in_group(plan, next_plan_index), payload),
-                        true);
+                    const TransportStatus write_status = active.sender->serve(
+                        transport,
+                        draft,
+                        active.track.alias,
+                        object,
+                        subgroup_contains_group_largest(plan, next_plan_index),
+                        is_final_object_in_subgroup(plan, next_plan_index),
+                        payload);
                     if (!write_status.ok) {
                         return write_status;
                     }
                     std::cerr << "[moqt-session] served object track=" << object.track_name
                               << " group=" << object.group_id << " object=" << object.object_id
                               << " bytes=" << object_payload_size(source_object) << '\n';
-                    ++active.stream_count;
 
                     std::size_t upcoming_object_index = 0;
                     if (find_next_matching_object_index(plan,
@@ -1035,7 +1145,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     finalize_subscription(transport,
                                           control_stream_id,
                                           request_id,
-                                          active_it->second.stream_count,
+                                          active_it->second.sender->stream_count(),
                                           completed_request_ids);
                 if (!finalize_status.ok) {
                     return finalize_status;
