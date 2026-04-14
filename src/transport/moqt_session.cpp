@@ -1252,7 +1252,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         return status;
     }
 
-    std::map<std::string, std::uint64_t> stream_count_by_track;
+    std::map<std::string, SubgroupSenderState> sender_by_track;
     std::map<std::string, PublishedTrack> downgraded_tracks_by_name;
     const auto pacing_start = std::chrono::steady_clock::now();
     std::uint64_t first_media_time_us = 0;
@@ -1290,18 +1290,14 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
             }
             pace_until(pacing_start, first_media_time_us, object, paced);
 
-            std::uint64_t stream_id = 0;
-            status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-            if (!status.ok) {
-                return status;
-            }
-            status = transport.write_stream(stream_id,
-                                            encode_object_stream(plan.draft.version,
-                                                                 track_it->second.alias,
-                                                                 object,
-                                                                 is_final_object_in_group(plan, object_index),
-                                                                 payload),
-                                            true);
+            status = sender_by_track[source_object.track_name].serve(
+                transport,
+                plan.draft.version,
+                track_it->second.alias,
+                object,
+                subgroup_contains_group_largest(plan, object_index),
+                is_final_object_in_subgroup(plan, object_index),
+                payload);
             if (!status.ok) {
                 return status;
             }
@@ -1310,7 +1306,6 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
                       << " kind="
                       << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
                       << '\n';
-            ++stream_count_by_track[source_object.track_name];
         }
 
         if (!loop_state.enabled) {
@@ -1344,7 +1339,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         }
         status = transport.write_stream(control_stream_id,
                                         encode_publish_done_message(request_id_by_track.at(track.name),
-                                                                    stream_count_by_track[track.name]),
+                                                                    sender_by_track[track.name].stream_count()),
                                         false);
         if (!status.ok) {
             return status;
@@ -1446,7 +1441,7 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
     const auto pacing_start = std::chrono::steady_clock::now();
     std::uint64_t first_media_time_us = 0;
     bool first_media_time_set = false;
-    std::map<std::string, std::uint64_t> stream_count_by_track;
+    std::map<std::string, SubgroupSenderState> sender_by_track;
 
     std::size_t loop_cycle = 0;
     std::size_t cycle_start_index = 0;
@@ -1502,18 +1497,14 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
             }
             pace_until(pacing_start, first_media_time_us, object, paced);
 
-            std::uint64_t stream_id = 0;
-            status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
-            if (!status.ok) {
-                return status;
-            }
-            status = transport.write_stream(stream_id,
-                                            encode_object_stream(plan.draft.version,
-                                                                 track_it->second.alias,
-                                                                 object,
-                                                                 is_final_object_in_group(plan, object_index),
-                                                                 payload),
-                                            true);
+            status = sender_by_track[source_object.track_name].serve(
+                transport,
+                plan.draft.version,
+                track_it->second.alias,
+                object,
+                subgroup_contains_group_largest(plan, object_index),
+                is_final_object_in_subgroup(plan, object_index),
+                payload);
             if (!status.ok) {
                 return status;
             }
@@ -1524,7 +1515,6 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
                       << " kind="
                       << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
                       << '\n';
-            ++stream_count_by_track[source_object.track_name];
         }
 
         if (!loop_state.enabled) {
@@ -1559,7 +1549,7 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
         }
         status = transport.write_stream(control_stream_id,
                                         encode_publish_done_message(request_id_by_track.at(track.name),
-                                                                    stream_count_by_track[track.name]),
+                                                                    sender_by_track[track.name].stream_count()),
                                         false);
         if (!status.ok) {
             return status;

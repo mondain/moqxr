@@ -939,19 +939,6 @@ std::vector<std::uint8_t> encode_subgroup_object(std::optional<std::uint64_t> pr
     return bytes;
 }
 
-std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
-                                               std::uint64_t track_alias,
-                                               const CmsfObject& object,
-                                               bool end_of_group,
-                                               std::span<const std::uint8_t> payload) {
-    std::vector<std::uint8_t> bytes =
-        encode_subgroup_header(draft, track_alias, object.group_id, object.subgroup_id, end_of_group);
-    const std::vector<std::uint8_t> object_bytes =
-        encode_subgroup_object(std::nullopt, object.object_id, payload);
-    bytes.insert(bytes.end(), object_bytes.begin(), object_bytes.end());
-    return bytes;
-}
-
 bool decode_publish_namespace_ok(std::span<const std::uint8_t> bytes, PublishNamespaceOk& message) {
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;

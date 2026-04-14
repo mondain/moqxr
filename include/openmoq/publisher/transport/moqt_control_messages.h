@@ -150,14 +150,6 @@ std::vector<std::uint8_t> encode_subgroup_object(std::optional<std::uint64_t> pr
                                                  std::uint64_t object_id,
                                                  std::span<const std::uint8_t> payload);
 
-// Convenience wrapper: encode a complete single-object subgroup stream
-// (header + one object). Retained only for call sites that have not yet
-// migrated to explicit subgroup-stream reuse; prefer the pair above.
-std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
-                                               std::uint64_t track_alias,
-                                               const CmsfObject& object,
-                                               bool end_of_group,
-                                               std::span<const std::uint8_t> payload);
 bool decode_publish_namespace_ok(std::span<const std::uint8_t> bytes, PublishNamespaceOk& message);
 bool decode_publish_namespace_error(std::span<const std::uint8_t> bytes, PublishNamespaceError& message);
 bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishOk& message);
