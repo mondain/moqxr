@@ -595,45 +595,14 @@ std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion dra
     return message_bytes;
 }
 
-bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMessage& message) {
-    std::size_t payload_offset = 0;
-    std::size_t payload_length = 0;
-    if (!parse_uint16_length_message(bytes, kSubscribeType, payload_offset, payload_length)) {
-        return false;
-    }
-
-    std::size_t offset = payload_offset;
-    const std::size_t payload_end = payload_offset + payload_length;
-    std::uint64_t track_name_length = 0;
-    std::uint64_t parameter_count = 0;
-    if (!decode_varint_impl(bytes, offset, message.request_id) ||
-        !decode_track_namespace(bytes.subspan(0, payload_end), offset, message.track_namespace) ||
-        !decode_varint_impl(bytes, offset, track_name_length) ||
-        offset + track_name_length > payload_end) {
-        return false;
-    }
-
-    message.track_name.assign(reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(track_name_length));
-    offset += static_cast<std::size_t>(track_name_length);
-
-    if (offset + 3 > payload_end) {
-        return false;
-    }
-    message.subscriber_priority = bytes[offset++];
-    message.group_order = bytes[offset++];
-    message.forward = bytes[offset++];
-    if (message.group_order > 2 || message.forward > 1) {
-        return false;
-    }
-
+bool decode_subscribe_filter(std::span<const std::uint8_t> bytes, std::size_t& offset, std::size_t end,
+                             SubscribeMessage& message) {
     if (!decode_varint_impl(bytes, offset, message.filter_type)) {
         return false;
     }
-
     if (message.filter_type < 0x01 || message.filter_type > 0x04) {
         return false;
     }
-
     if (message.filter_type == 0x03 || message.filter_type == 0x04) {
         std::uint64_t group_id = 0;
         std::uint64_t object_id = 0;
@@ -654,8 +623,152 @@ bool decode_subscribe_message(std::span<const std::uint8_t> bytes, SubscribeMess
         message.start_object_id = 0;
         message.end_group_id = 0;
     }
+    return offset == end;
+}
 
-    return decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
+bool decode_subscribe_message(std::span<const std::uint8_t> bytes, DraftVersion draft, SubscribeMessage& message) {
+    std::size_t payload_offset = 0;
+    std::size_t payload_length = 0;
+    if (!parse_uint16_length_message(bytes, kSubscribeType, payload_offset, payload_length)) {
+        return false;
+    }
+
+    std::size_t offset = payload_offset;
+    const std::size_t payload_end = payload_offset + payload_length;
+    std::uint64_t track_name_length = 0;
+    if (!decode_varint_impl(bytes, offset, message.request_id) ||
+        !decode_track_namespace(bytes.subspan(0, payload_end), offset, message.track_namespace) ||
+        !decode_varint_impl(bytes, offset, track_name_length) ||
+        offset + track_name_length > payload_end) {
+        return false;
+    }
+
+    message.track_name.assign(reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(track_name_length));
+    offset += static_cast<std::size_t>(track_name_length);
+
+    if (draft == DraftVersion::kDraft14) {
+        if (offset + 3 > payload_end) {
+            return false;
+        }
+        message.subscriber_priority = bytes[offset++];
+        message.group_order = bytes[offset++];
+        message.forward = bytes[offset++];
+        if (message.group_order > 2 || message.forward > 1) {
+            return false;
+        }
+
+        if (!decode_varint_impl(bytes, offset, message.filter_type)) {
+            return false;
+        }
+        if (message.filter_type < 0x01 || message.filter_type > 0x04) {
+            return false;
+        }
+        if (message.filter_type == 0x03 || message.filter_type == 0x04) {
+            std::uint64_t group_id = 0;
+            std::uint64_t object_id = 0;
+            if (!decode_varint_impl(bytes, offset, group_id) || !decode_varint_impl(bytes, offset, object_id)) {
+                return false;
+            }
+            message.start_group_id = static_cast<std::size_t>(group_id);
+            message.start_object_id = static_cast<std::size_t>(object_id);
+            if (message.filter_type == 0x04) {
+                std::uint64_t end_group_id = 0;
+                if (!decode_varint_impl(bytes, offset, end_group_id)) {
+                    return false;
+                }
+                message.end_group_id = static_cast<std::size_t>(end_group_id);
+            }
+        } else {
+            message.start_group_id = 0;
+            message.start_object_id = 0;
+            message.end_group_id = 0;
+        }
+
+        std::uint64_t parameter_count = 0;
+        return decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
+    }
+
+    // Draft-16: fields moved to delta-encoded KVP parameters.
+    // Defaults per spec: subscriber_priority=128, group_order=0, forward=1, no filter.
+    message.subscriber_priority = 128;
+    message.group_order = 0;
+    message.forward = 1;
+    message.filter_type = 0;
+    message.start_group_id = 0;
+    message.start_object_id = 0;
+    message.end_group_id = 0;
+
+    std::uint64_t parameter_count = 0;
+    if (!decode_varint_impl(bytes, offset, parameter_count)) {
+        return false;
+    }
+
+    std::uint64_t previous_parameter_type = 0;
+    for (std::uint64_t i = 0; i < parameter_count; ++i) {
+        std::uint64_t parameter_type = 0;
+        if (!decode_parameter_type(bytes, offset, previous_parameter_type, true, parameter_type)) {
+            return false;
+        }
+
+        if ((parameter_type & 0x1ULL) == 0) {
+            // Even type: varint value.
+            std::uint64_t value = 0;
+            if (!decode_varint_impl(bytes, offset, value)) {
+                return false;
+            }
+            switch (parameter_type) {
+                case 0x02:  // DELIVERY_TIMEOUT — spec §9.2.2.2: value 0 is illegal on the wire.
+                    if (value == 0) { return false; }
+                    break;
+                case 0x10:  // FORWARD
+                    if (value > 1) { return false; }
+                    message.forward = static_cast<std::uint8_t>(value);
+                    break;
+                case 0x20:  // SUBSCRIBER_PRIORITY
+                    if (value > 255) { return false; }
+                    message.subscriber_priority = static_cast<std::uint8_t>(value);
+                    break;
+                case 0x22:  // GROUP_ORDER — only Ascending (0x1) and Descending (0x2) are legal on the wire.
+                    if (value != 0x1 && value != 0x2) { return false; }
+                    message.group_order = static_cast<std::uint8_t>(value);
+                    break;
+                case 0x32:  // NEW_GROUP_REQUEST — ignored by publishers that don't support dynamic groups.
+                    break;
+                default:
+                    // Spec §9.2 requires an unknown Message Parameter to close the
+                    // session with PROTOCOL_VIOLATION. We surface the rejection to
+                    // the caller; session close semantics are the caller's domain.
+                    return false;
+            }
+            continue;
+        }
+
+        // Odd type: length-prefixed bytes.
+        std::uint64_t parameter_length = 0;
+        if (!decode_varint_impl(bytes, offset, parameter_length) || offset + parameter_length > payload_end) {
+            return false;
+        }
+        switch (parameter_type) {
+            case 0x03:  // AUTHORIZATION_TOKEN — defined in SUBSCRIBE, opaque to this publisher.
+                break;
+            case 0x21: {  // SUBSCRIPTION_FILTER
+                std::size_t filter_offset = offset;
+                const std::size_t filter_end = offset + static_cast<std::size_t>(parameter_length);
+                if (!decode_subscribe_filter(bytes, filter_offset, filter_end, message)) {
+                    return false;
+                }
+                break;
+            }
+            default:
+                // Spec §9.2 requires an unknown Message Parameter to close the
+                // session with PROTOCOL_VIOLATION. We surface the rejection to
+                // the caller; session close semantics are the caller's domain.
+                return false;
+        }
+        offset += static_cast<std::size_t>(parameter_length);
+    }
+
+    return offset == payload_end;
 }
 
 bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, SubscribeUpdateMessage& message) {
