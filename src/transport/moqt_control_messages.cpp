@@ -907,38 +907,49 @@ std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceM
     return message_bytes;
 }
 
+std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
+                                                 std::uint64_t track_alias,
+                                                 std::uint64_t group_id,
+                                                 std::uint64_t subgroup_id,
+                                                 bool end_of_group) {
+    static_cast<void>(draft);
+    const std::uint64_t stream_type =
+        kSubgroupHeaderType | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
+    std::vector<std::uint8_t> bytes;
+    append_varint(bytes, stream_type);
+    append_varint(bytes, track_alias);
+    append_varint(bytes, group_id);
+    append_varint(bytes, subgroup_id);
+    bytes.push_back(kPublisherPriority);
+    return bytes;
+}
+
+std::vector<std::uint8_t> encode_subgroup_object(std::optional<std::uint64_t> previous_object_id,
+                                                 std::uint64_t object_id,
+                                                 std::span<const std::uint8_t> payload) {
+    // Spec §10.4.2: the first Object on a Subgroup stream carries its
+    // absolute Object ID; subsequent Objects encode an Object ID Delta
+    // such that next.object_id = previous.object_id + delta + 1.
+    const std::uint64_t object_id_delta =
+        previous_object_id.has_value() ? (object_id - *previous_object_id - 1) : object_id;
+    std::vector<std::uint8_t> bytes;
+    append_varint(bytes, object_id_delta);
+    append_varint(bytes, payload.size());
+    bytes.insert(bytes.end(), payload.begin(), payload.end());
+    return bytes;
+}
+
 std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
                                                std::uint64_t track_alias,
                                                const CmsfObject& object,
                                                bool end_of_group,
                                                std::span<const std::uint8_t> payload) {
-    static_cast<void>(draft);
-    const std::uint64_t stream_type =
-        kSubgroupHeaderType | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
-
-    if (draft == DraftVersion::kDraft14) {
-        std::vector<std::uint8_t> stream_bytes;
-        append_varint(stream_bytes, stream_type);
-        append_varint(stream_bytes, track_alias);
-        append_varint(stream_bytes, object.group_id);
-        append_varint(stream_bytes, 0);
-        stream_bytes.push_back(kPublisherPriority);
-        append_varint(stream_bytes, object.object_id);
-        append_varint(stream_bytes, payload.size());
-        stream_bytes.insert(stream_bytes.end(), payload.begin(), payload.end());
-        return stream_bytes;
-    }
-
-    std::vector<std::uint8_t> stream_bytes;
-    append_varint(stream_bytes, stream_type);
-    append_varint(stream_bytes, track_alias);
-    append_varint(stream_bytes, object.group_id);
-    append_varint(stream_bytes, 0);
-    stream_bytes.push_back(kPublisherPriority);
-    append_varint(stream_bytes, object.object_id);
-    append_varint(stream_bytes, payload.size());
-    stream_bytes.insert(stream_bytes.end(), payload.begin(), payload.end());
-    return stream_bytes;
+    std::vector<std::uint8_t> bytes =
+        encode_subgroup_header(draft, track_alias, object.group_id, object.subgroup_id, end_of_group);
+    const std::vector<std::uint8_t> object_bytes =
+        encode_subgroup_object(std::nullopt, object.object_id, payload);
+    bytes.insert(bytes.end(), object_bytes.begin(), object_bytes.end());
+    return bytes;
 }
 
 bool decode_publish_namespace_ok(std::span<const std::uint8_t> bytes, PublishNamespaceOk& message) {
