@@ -162,7 +162,9 @@ int apply_pending_writes(WebTransportClient::Impl& impl) {
         impl.condition.notify_all();
     }
 
-    for (auto& write : writes) {
+    std::deque<WebTransportClient::Impl::PendingWrite> deferred_writes;
+    while (!writes.empty()) {
+        auto& write = writes.front();
         h3zero_stream_ctx_t* stream_ctx = find_local_stream_context(impl, write.stream_id);
         if (stream_ctx == nullptr) {
             std::lock_guard<std::mutex> lock(impl.mutex);
@@ -174,12 +176,31 @@ int apply_pending_writes(WebTransportClient::Impl& impl) {
 
         if (picoquic_add_to_stream_with_ctx(
                 impl.cnx, write.stream_id, write.bytes.data(), write.bytes.size(), write.fin ? 1 : 0, stream_ctx) != 0) {
-            std::lock_guard<std::mutex> lock(impl.mutex);
-            impl.failed = true;
-            impl.last_error = "failed to queue webtransport stream data";
-            impl.condition.notify_all();
-            return -1;
+            // picoquic's per-stream send buffer is full. This is transient
+            // back-pressure, not a fatal error: defer the remaining writes so
+            // they stay queued in order until picoquic has drained enough to
+            // accept them. The producer-side write_stream blocks once the
+            // pending queue grows too large, so the queue cannot grow without
+            // bound here.
+            deferred_writes.push_back(std::move(write));
+            writes.pop_front();
+            for (auto& pending : writes) {
+                deferred_writes.push_back(std::move(pending));
+            }
+            writes.clear();
+            break;
         }
+        writes.pop_front();
+    }
+
+    if (!deferred_writes.empty()) {
+        std::lock_guard<std::mutex> lock(impl.mutex);
+        // Re-insert deferred writes at the front of pending_writes to preserve
+        // ordering relative to later producer writes.
+        for (auto it = deferred_writes.rbegin(); it != deferred_writes.rend(); ++it) {
+            impl.pending_writes.push_front(std::move(*it));
+        }
+        impl.condition.notify_all();
     }
 
     if (close_requested && impl.control_stream_ctx != nullptr) {
@@ -589,8 +610,33 @@ TransportStatus WebTransportClient::write_stream(std::uint64_t stream_id,
     static_cast<void>(fin);
     return TransportStatus::failure("picoquic support is not enabled in this build");
 #else
+    // Back-pressure: when picoquic's send buffer fills up, apply_pending_writes
+    // defers rejected writes back onto pending_writes. If the producer keeps
+    // pushing, pending_writes would grow without bound. Cap the queue by total
+    // queued bytes and block here until the picoquic thread drains it.
+    constexpr std::size_t kMaxPendingBytes = 4ULL * 1024 * 1024;
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::unique_lock<std::mutex> lock(impl_->mutex);
+        const auto has_room = [&]() {
+            if (impl_->failed) {
+                return true;
+            }
+            std::size_t queued = 0;
+            for (const auto& write : impl_->pending_writes) {
+                queued += write.bytes.size();
+                if (queued >= kMaxPendingBytes) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!has_room()) {
+            impl_->condition.wait_for(lock, std::chrono::seconds(30), [&]() { return has_room(); });
+        }
+        if (impl_->failed) {
+            return TransportStatus::failure(impl_->last_error.empty() ? "webtransport connection failed"
+                                                                       : impl_->last_error);
+        }
         impl_->pending_writes.push_back({
             .stream_id = stream_id,
             .bytes = std::vector<std::uint8_t>(bytes.begin(), bytes.end()),

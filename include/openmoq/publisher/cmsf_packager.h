@@ -20,6 +20,7 @@ struct CmsfObject {
     CmsfObjectKind kind = CmsfObjectKind::kInitialization;
     std::string track_name;
     std::size_t group_id = 0;
+    std::uint64_t subgroup_id = 0;
     std::size_t object_id = 0;
     std::uint64_t media_time_us = 0;
     std::uint64_t media_duration_us = 0;

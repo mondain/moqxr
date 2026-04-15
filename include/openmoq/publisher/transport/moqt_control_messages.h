@@ -5,6 +5,7 @@
 #include "openmoq/publisher/transport/publisher_transport.h"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -132,11 +133,22 @@ std::vector<std::uint8_t> encode_subscribe_error_message(std::uint64_t request_i
 std::vector<std::uint8_t> encode_track_message(const TrackMessage& message);
 std::vector<std::uint8_t> encode_publish_done_message(std::uint64_t request_id, std::uint64_t stream_count);
 std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceMessage& message);
-std::vector<std::uint8_t> encode_object_stream(DraftVersion draft,
-                                               std::uint64_t track_alias,
-                                               const CmsfObject& object,
-                                               bool end_of_group,
-                                               std::span<const std::uint8_t> payload);
+// SUBGROUP_HEADER bytes only. A subgroup stream begins with exactly one
+// header, followed by one or more encode_subgroup_object payloads.
+std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
+                                                 std::uint64_t track_alias,
+                                                 std::uint64_t group_id,
+                                                 std::uint64_t subgroup_id,
+                                                 bool end_of_group);
+
+// Object fields to append to an already-open subgroup stream. Per spec
+// §10.4.2 the first object on the stream carries its absolute Object ID
+// (pass std::nullopt for previous_object_id); subsequent objects encode
+// Object ID Delta = object_id - previous_object_id - 1.
+std::vector<std::uint8_t> encode_subgroup_object(std::optional<std::uint64_t> previous_object_id,
+                                                 std::uint64_t object_id,
+                                                 std::span<const std::uint8_t> payload);
+
 bool decode_publish_namespace_ok(std::span<const std::uint8_t> bytes, PublishNamespaceOk& message);
 bool decode_publish_namespace_error(std::span<const std::uint8_t> bytes, PublishNamespaceError& message);
 bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishOk& message);

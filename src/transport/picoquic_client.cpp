@@ -102,18 +102,36 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
         close_requested = impl.close_requested;
     }
 
-    for (auto& write : writes) {
+    std::deque<PicoquicClient::Impl::PendingWrite> deferred_writes;
+    while (!writes.empty()) {
+        auto& write = writes.front();
         trace("stream " + std::to_string(write.stream_id) + " bytes=[" + hex_dump(write.bytes) + "]");
         const int ret = picoquic_add_to_stream(
             impl.cnx, write.stream_id, write.bytes.data(), write.bytes.size(), write.fin ? 1 : 0);
         if (ret != 0) {
-            trace("add_to_stream failed for stream " + std::to_string(write.stream_id));
-            std::lock_guard<std::mutex> lock(impl.mutex);
-            impl.failed = true;
-            impl.last_error = "picoquic_add_to_stream failed";
-            impl.condition.notify_all();
-            return ret;
+            // picoquic rejected the write, most commonly because its per-stream
+            // send buffer is full. This is transient back-pressure: defer the
+            // remaining writes in order so they stay queued until picoquic has
+            // drained enough to accept them. write_stream caps total queued
+            // bytes on the producer side, so this cannot grow without bound.
+            trace("add_to_stream deferred for stream " + std::to_string(write.stream_id));
+            deferred_writes.push_back(std::move(write));
+            writes.pop_front();
+            for (auto& pending : writes) {
+                deferred_writes.push_back(std::move(pending));
+            }
+            writes.clear();
+            break;
         }
+        writes.pop_front();
+    }
+
+    if (!deferred_writes.empty()) {
+        std::lock_guard<std::mutex> lock(impl.mutex);
+        for (auto it = deferred_writes.rbegin(); it != deferred_writes.rend(); ++it) {
+            impl.pending_writes.push_front(std::move(*it));
+        }
+        impl.condition.notify_all();
     }
 
     if (close_requested) {
@@ -472,8 +490,32 @@ TransportStatus PicoquicClient::write_stream(std::uint64_t stream_id,
     static_cast<void>(fin);
     return TransportStatus::failure("picoquic support is not enabled in this build");
 #else
+    // Back-pressure: apply_pending_operations re-queues writes that picoquic
+    // temporarily rejects, so pending_writes can accumulate during congestion.
+    // Cap total queued bytes and block the producer until the queue drains.
+    constexpr std::size_t kMaxPendingBytes = 4ULL * 1024 * 1024;
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::unique_lock<std::mutex> lock(impl_->mutex);
+        const auto has_room = [&]() {
+            if (impl_->failed) {
+                return true;
+            }
+            std::size_t queued = 0;
+            for (const auto& write : impl_->pending_writes) {
+                queued += write.bytes.size();
+                if (queued >= kMaxPendingBytes) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!has_room()) {
+            impl_->condition.wait_for(lock, std::chrono::seconds(30), [&]() { return has_room(); });
+        }
+        if (impl_->failed) {
+            return TransportStatus::failure(impl_->last_error.empty() ? "picoquic transport failed"
+                                                                       : impl_->last_error);
+        }
         trace("queue write stream=" + std::to_string(stream_id) + " bytes=" + std::to_string(bytes.size()) +
               " fin=" + std::to_string(fin ? 1 : 0));
         impl_->pending_writes.push_back({
