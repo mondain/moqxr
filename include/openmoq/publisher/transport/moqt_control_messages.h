@@ -123,7 +123,6 @@ bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, Subscr
 std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
                                                       std::uint64_t request_id,
                                                       std::uint64_t track_alias,
-                                                      std::uint8_t subscriber_priority,
                                                       std::size_t largest_group_id,
                                                       std::size_t largest_object_id,
                                                       bool content_exists);

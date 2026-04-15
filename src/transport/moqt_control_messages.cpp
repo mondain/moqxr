@@ -164,13 +164,6 @@ void append_track_namespace(std::vector<std::uint8_t>& out, std::string_view tra
     }
 }
 
-void append_track_namespace(std::vector<std::uint8_t>& out, const std::vector<std::string>& track_namespace) {
-    append_varint(out, track_namespace.size());
-    for (const auto& part : track_namespace) {
-        append_string(out, part);
-    }
-}
-
 void append_location(std::vector<std::uint8_t>& out, std::size_t group_id, std::size_t object_id) {
     append_varint(out, group_id);
     append_varint(out, object_id);
@@ -805,7 +798,6 @@ bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, Subscr
 std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
                                                       std::uint64_t request_id,
                                                       std::uint64_t track_alias,
-                                                      std::uint8_t subscriber_priority,
                                                       std::size_t largest_group_id,
                                                       std::size_t largest_object_id,
                                                       bool content_exists) {

@@ -92,12 +92,6 @@ void unregister_connection_impl(picoquic_cnx_t* cnx) {
     g_connection_impls.erase(cnx);
 }
 
-WebTransportClient::Impl* find_connection_impl(picoquic_cnx_t* cnx) {
-    std::lock_guard<std::mutex> lock(g_connection_impl_mutex);
-    const auto it = g_connection_impls.find(cnx);
-    return it != g_connection_impls.end() ? it->second : nullptr;
-}
-
 bool control_stream_connect_established(const WebTransportClient::Impl& impl) {
     const auto* stream_ctx = impl.control_stream_ctx;
     if (stream_ctx == nullptr) {
