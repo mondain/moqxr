@@ -54,8 +54,8 @@ These are Structured Fields strings on the CONNECT exchange.
 
 Current offers in this repo:
 
-- draft 14 preference: `"moq-00", "moqt-16"`
-- draft 16 preference: `"moqt-16", "moq-00"`
+- draft 14: offer no WebTransport subprotocol
+- draft 16: offer `"moqt-16"` only
 
 ### 4. MoQ SETUP parameters over WebTransport
 
@@ -117,7 +117,8 @@ Areas that should be treated as suspect until proven:
 
 Before changing wire behavior, verify each of these:
 
-1. CONNECT succeeded and the selected `WT-Protocol` matches the intended MoQ draft token.
+1. CONNECT succeeded and the WebTransport protocol negotiation matches the intended draft:
+   draft-14 offers no `WT-Protocol`, while draft-16 offers `moqt-16`.
 2. The first client MoQ bytes are sent only on a WT application stream, not the CONNECT stream.
 3. The WT application stream gets exactly one WT preamble.
 4. Incoming CONNECT-stream bytes are logged as WT control/capsule traffic, not parsed as MoQ.
