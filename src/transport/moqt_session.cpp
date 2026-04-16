@@ -125,6 +125,38 @@ std::string hex_dump(std::span<const std::uint8_t> bytes) {
     return out.str();
 }
 
+template <typename MapLike>
+std::string format_request_id_keys(const MapLike& values) {
+    std::ostringstream out;
+    out << '[';
+    bool first = true;
+    for (const auto& [request_id, ignored] : values) {
+        static_cast<void>(ignored);
+        if (!first) {
+            out << ',';
+        }
+        out << request_id;
+        first = false;
+    }
+    out << ']';
+    return out.str();
+}
+
+std::string format_request_id_keys(const std::set<std::uint64_t>& values) {
+    std::ostringstream out;
+    out << '[';
+    bool first = true;
+    for (const auto request_id : values) {
+        if (!first) {
+            out << ',';
+        }
+        out << request_id;
+        first = false;
+    }
+    out << ']';
+    return out.str();
+}
+
 void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq::publisher::DraftVersion draft) {
     if (!trace_enabled()) {
         return;
@@ -267,6 +299,56 @@ struct DormantPublishedTrack {
     SubscribeMessage subscribe;
     PublishedTrack track;
 };
+
+std::string format_alias_mapping(const std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias) {
+    if (request_id_by_track_alias == nullptr || request_id_by_track_alias->empty()) {
+        return "[]";
+    }
+
+    std::ostringstream out;
+    out << '[';
+    bool first = true;
+    for (const auto& [alias, request_id] : *request_id_by_track_alias) {
+        if (!first) {
+            out << ',';
+        }
+        out << alias << "->" << request_id;
+        first = false;
+    }
+    out << ']';
+    return out.str();
+}
+
+void trace_subscribe_update_state(std::string_view reason,
+                                  const SubscribeUpdateMessage& subscribe_update,
+                                  std::uint64_t original_request_id,
+                                  std::uint64_t remapped_request_id,
+                                  const std::map<std::uint64_t, SubscribeMessage>& pending_subscriptions,
+                                  const std::map<std::uint64_t, ActiveSubscription>& active_subscriptions,
+                                  const std::map<std::uint64_t, DormantPublishedTrack>* dormant_published_tracks,
+                                  const std::set<std::uint64_t>& completed_request_ids,
+                                  const std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias) {
+    if (!trace_enabled()) {
+        return;
+    }
+
+    std::cerr << "[moqt-session] SUBSCRIBE_UPDATE reject reason=" << reason
+              << " request_id=" << subscribe_update.request_id
+              << " subscription_request_id=" << original_request_id
+              << " remapped_request_id=" << remapped_request_id
+              << " start_group=" << subscribe_update.start_group_id
+              << " start_object=" << subscribe_update.start_object_id
+              << " end_group_plus_one=" << subscribe_update.end_group_plus_one
+              << " forward=" << static_cast<unsigned int>(subscribe_update.forward)
+              << " subscriber_priority=" << static_cast<unsigned int>(subscribe_update.subscriber_priority)
+              << " pending=" << format_request_id_keys(pending_subscriptions)
+              << " active=" << format_request_id_keys(active_subscriptions)
+              << " dormant="
+              << (dormant_published_tracks != nullptr ? format_request_id_keys(*dormant_published_tracks) : "[]")
+              << " completed=" << format_request_id_keys(completed_request_ids)
+              << " alias_map=" << format_alias_mapping(request_id_by_track_alias)
+              << std::endl;
+}
 
 LoopState build_loop_state(const openmoq::publisher::PublishPlan& plan, bool loop_enabled) {
     LoopState state;
@@ -875,6 +957,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                                                             subscribe_update)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE");
                 }
+                const auto original_request_id = subscribe_update.subscription_request_id;
                 auto remapped_request_id = subscribe_update.subscription_request_id;
                 if (request_id_by_track_alias != nullptr && !pending_subscriptions.contains(remapped_request_id) &&
                     !active_subscriptions.contains(remapped_request_id) &&
@@ -886,12 +969,30 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     }
                 }
                 if (completed_request_ids.contains(remapped_request_id)) {
+                    trace_subscribe_update_state("request already completed",
+                                                 subscribe_update,
+                                                 original_request_id,
+                                                 remapped_request_id,
+                                                 pending_subscriptions,
+                                                 active_subscriptions,
+                                                 dormant_published_tracks,
+                                                 completed_request_ids,
+                                                 request_id_by_track_alias);
                     return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
                 }
 
                 auto pending_it = pending_subscriptions.find(remapped_request_id);
                 if (pending_it != pending_subscriptions.end()) {
                     if (!apply_subscribe_update(pending_it->second, subscribe_update)) {
+                        trace_subscribe_update_state("pending update not monotonic",
+                                                     subscribe_update,
+                                                     original_request_id,
+                                                     remapped_request_id,
+                                                     pending_subscriptions,
+                                                     active_subscriptions,
+                                                     dormant_published_tracks,
+                                                     completed_request_ids,
+                                                     request_id_by_track_alias);
                         return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
                     }
                     buffer.erase(buffer.begin(), buffer.begin() + message_size);
@@ -901,6 +1002,15 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 auto active_it = active_subscriptions.find(remapped_request_id);
                 if (active_it != active_subscriptions.end()) {
                     if (!apply_subscribe_update(active_it->second.subscribe, subscribe_update)) {
+                        trace_subscribe_update_state("active update not monotonic",
+                                                     subscribe_update,
+                                                     original_request_id,
+                                                     remapped_request_id,
+                                                     pending_subscriptions,
+                                                     active_subscriptions,
+                                                     dormant_published_tracks,
+                                                     completed_request_ids,
+                                                     request_id_by_track_alias);
                         return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
                     }
 
@@ -932,6 +1042,15 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                             .completed = false,
                         };
                         if (!apply_subscribe_update(active.subscribe, subscribe_update)) {
+                            trace_subscribe_update_state("dormant update not monotonic",
+                                                         subscribe_update,
+                                                         original_request_id,
+                                                         remapped_request_id,
+                                                         pending_subscriptions,
+                                                         active_subscriptions,
+                                                         dormant_published_tracks,
+                                                         completed_request_ids,
+                                                         request_id_by_track_alias);
                             return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
                         }
 
@@ -957,6 +1076,15 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     }
                 }
 
+                trace_subscribe_update_state("unknown subscription_request_id",
+                                             subscribe_update,
+                                             original_request_id,
+                                             remapped_request_id,
+                                             pending_subscriptions,
+                                             active_subscriptions,
+                                             dormant_published_tracks,
+                                             completed_request_ids,
+                                             request_id_by_track_alias);
                 return TransportStatus::failure("received invalid SUBSCRIBE_UPDATE state transition");
             }
 
