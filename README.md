@@ -24,7 +24,7 @@ For already fragmented input:
 
 - `ftyp` + `moov` are reused as the initialization segment
 - by default, each fragmented input is split into lower-latency MOQT media objects within the same group when per-sample boundaries can be derived
-- `--coalesce-cmaf-chunks` keeps the older one-object-per-fragment behavior
+- `--coalesce-cmaf-chunks` keeps the older one-media-object-per-group behavior
 - the pipeline preserves source-byte spans until optional file emission
 
 ### Progressive MP4 remux path
