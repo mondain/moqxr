@@ -6,10 +6,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -24,6 +26,73 @@ namespace {
 bool trace_enabled() {
     static const bool enabled = std::getenv("OPENMOQ_PICOQUIC_TRACE") != nullptr;
     return enabled;
+}
+
+const char* trace_csv_path() {
+    static const char* path = std::getenv("OPENMOQ_PICOQUIC_TRACE_CSV");
+    return path;
+}
+
+bool trace_csv_enabled() {
+    const char* path = trace_csv_path();
+    return trace_enabled() && path != nullptr && path[0] != '\0';
+}
+
+std::chrono::steady_clock::time_point trace_epoch() {
+    static const auto epoch = std::chrono::steady_clock::now();
+    return epoch;
+}
+
+long long trace_elapsed_ms(std::chrono::steady_clock::time_point time_point) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(time_point - trace_epoch()).count();
+}
+
+std::uint64_t next_send_seq() {
+    static std::uint64_t counter = 0;
+    return ++counter;
+}
+
+struct TraceCsvSink {
+    std::mutex mutex;
+    std::ofstream stream;
+    bool header_written = false;
+};
+
+TraceCsvSink& trace_csv_sink() {
+    static TraceCsvSink sink;
+    return sink;
+}
+
+void trace_csv_write_row(std::initializer_list<std::string_view> fields) {
+    if (!trace_csv_enabled()) {
+        return;
+    }
+
+    TraceCsvSink& sink = trace_csv_sink();
+    std::lock_guard<std::mutex> lock(sink.mutex);
+    if (!sink.stream.is_open()) {
+        sink.stream.open(trace_csv_path(), std::ios::out | std::ios::app);
+        if (!sink.stream.is_open()) {
+            return;
+        }
+    }
+    if (!sink.header_written) {
+        sink.stream
+            << "event,send_seq,now_ms,target_ms,delta_ms,track,group_id,subgroup_id,object_id,media_time_us,"
+               "stream_id,opened,payload_bytes,wire_bytes,fin\n";
+        sink.header_written = true;
+    }
+
+    bool first = true;
+    for (const auto field : fields) {
+        if (!first) {
+            sink.stream << ',';
+        }
+        first = false;
+        sink.stream << field;
+    }
+    sink.stream << '\n';
+    sink.stream.flush();
 }
 
 bool is_idle_subscribe_exit(std::string_view message) {
@@ -165,12 +234,15 @@ void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq:
     std::size_t offset = 0;
     std::uint64_t message_type = 0;
     if (!decode_varint(message_bytes, offset, message_type)) {
-        std::cerr << "[moqt-session] control message parse error bytes=[" << hex_dump(message_bytes) << "]"
-                  << std::endl;
+        std::cerr << "[moqt-session] control message parse error now_ms="
+                  << trace_elapsed_ms(std::chrono::steady_clock::now())
+                  << " bytes=[" << hex_dump(message_bytes) << "]" << std::endl;
         return;
     }
 
-    std::cerr << "[moqt-session] control message type=0x" << std::hex << message_type << std::dec << " "
+    std::cerr << "[moqt-session] control message now_ms="
+              << trace_elapsed_ms(std::chrono::steady_clock::now())
+              << " type=0x" << std::hex << message_type << std::dec << " "
               << control_message_type_name(message_type);
 
     if (message_type == 0x07) {
@@ -251,6 +323,93 @@ std::size_t object_payload_size(const openmoq::publisher::CmsfObject& object) {
     return object.payload.size;
 }
 
+void trace_csv_write_media_timing(std::string_view event,
+                                  std::uint64_t send_seq,
+                                  long long now_ms,
+                                  long long target_ms,
+                                  long long delta_ms,
+                                  const openmoq::publisher::CmsfObject& object) {
+    if (!trace_csv_enabled() || object.kind != openmoq::publisher::CmsfObjectKind::kMedia) {
+        return;
+    }
+
+    trace_csv_write_row({
+        std::string(event),
+        std::to_string(send_seq),
+        std::to_string(now_ms),
+        std::to_string(target_ms),
+        std::to_string(delta_ms),
+        object.track_name,
+        std::to_string(object.group_id),
+        std::to_string(object.subgroup_id),
+        std::to_string(object.object_id),
+        std::to_string(object.media_time_us),
+        "",
+        "",
+        std::to_string(object_payload_size(object)),
+        "",
+        "",
+    });
+}
+
+void trace_csv_write_enqueue(std::uint64_t send_seq,
+                             long long now_ms,
+                             const openmoq::publisher::CmsfObject& object,
+                             std::uint64_t stream_id,
+                             bool opened_stream,
+                             std::size_t payload_bytes,
+                             std::size_t wire_bytes,
+                             bool fin) {
+    if (!trace_csv_enabled() || object.kind != openmoq::publisher::CmsfObjectKind::kMedia) {
+        return;
+    }
+
+    trace_csv_write_row({
+        "enqueue",
+        std::to_string(send_seq),
+        std::to_string(now_ms),
+        "",
+        "",
+        object.track_name,
+        std::to_string(object.group_id),
+        std::to_string(object.subgroup_id),
+        std::to_string(object.object_id),
+        std::to_string(object.media_time_us),
+        std::to_string(stream_id),
+        opened_stream ? "1" : "0",
+        std::to_string(payload_bytes),
+        std::to_string(wire_bytes),
+        fin ? "1" : "0",
+    });
+}
+
+void trace_csv_write_served(std::string_view event,
+                            std::uint64_t send_seq,
+                            long long now_ms,
+                            const openmoq::publisher::CmsfObject& object) {
+    if (!trace_csv_enabled() || object.kind != openmoq::publisher::CmsfObjectKind::kMedia) {
+        return;
+    }
+
+    trace_csv_write_row({
+        std::string(event),
+        std::to_string(send_seq),
+        std::to_string(now_ms),
+        "",
+        "",
+        object.track_name,
+        std::to_string(object.group_id),
+        std::to_string(object.subgroup_id),
+        std::to_string(object.object_id),
+        std::to_string(object.media_time_us),
+        "",
+        "",
+        std::to_string(object_payload_size(object)),
+        "",
+        "",
+    });
+}
+
 void pace_until(std::chrono::steady_clock::time_point start_time,
                 std::uint64_t first_media_time_us,
                 const openmoq::publisher::CmsfObject& object,
@@ -262,6 +421,43 @@ void pace_until(std::chrono::steady_clock::time_point start_time,
         return;
     }
     std::this_thread::sleep_until(start_time + std::chrono::microseconds(object.media_time_us - first_media_time_us));
+}
+
+void trace_pacing_decision(std::string_view phase,
+                           std::uint64_t send_seq,
+                           std::chrono::steady_clock::time_point pacing_start,
+                           std::uint64_t first_media_time_us,
+                           const openmoq::publisher::CmsfObject& object,
+                           bool paced) {
+    if (!trace_enabled() || object.kind != openmoq::publisher::CmsfObjectKind::kMedia) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const std::uint64_t target_offset_us =
+        object.media_time_us < first_media_time_us ? 0 : (object.media_time_us - first_media_time_us);
+    const auto target_time = pacing_start + std::chrono::microseconds(target_offset_us);
+    const auto now_ms = trace_elapsed_ms(now);
+    const auto target_ms = trace_elapsed_ms(target_time);
+    const auto delta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - target_time).count();
+
+    std::cerr << "[moqt-session] pacing " << phase
+              << " send_seq=" << send_seq
+              << " now_ms=" << now_ms
+              << " target_ms=" << target_ms
+              << " delta_ms=" << delta_ms
+              << " paced=" << (paced ? 1 : 0)
+              << " track=" << object.track_name
+              << " group=" << object.group_id
+              << " object=" << object.object_id
+              << " media_time_us=" << object.media_time_us
+              << std::endl;
+    trace_csv_write_media_timing(phase == "before" ? "pacing_before" : "pacing_after",
+                                 send_seq,
+                                 now_ms,
+                                 target_ms,
+                                 delta_ms,
+                                 object);
 }
 
 struct TrackLoopInfo {
@@ -812,6 +1008,7 @@ public:
     TransportStatus serve(PublisherTransport& transport,
                           openmoq::publisher::DraftVersion draft,
                           std::uint64_t track_alias,
+                          std::uint64_t send_seq,
                           const openmoq::publisher::CmsfObject& object,
                           bool subgroup_contains_group_largest,
                           bool is_final_in_subgroup,
@@ -822,6 +1019,7 @@ public:
         std::uint64_t stream_id = 0;
 
         std::vector<std::uint8_t> wire_bytes;
+        const bool opened_stream = it == streams_.end();
         if (it == streams_.end()) {
             TransportStatus status = transport.open_stream(StreamDirection::kUnidirectional, stream_id);
             if (!status.ok) {
@@ -840,6 +1038,30 @@ public:
         std::vector<std::uint8_t> object_bytes =
             encode_subgroup_object(previous_object_id, object.object_id, payload);
         wire_bytes.insert(wire_bytes.end(), object_bytes.begin(), object_bytes.end());
+
+        if (trace_enabled()) {
+            const auto now_ms = trace_elapsed_ms(std::chrono::steady_clock::now());
+            std::cerr << "[moqt-session] enqueue object stream=" << stream_id
+                      << " send_seq=" << send_seq
+                      << " now_ms=" << now_ms
+                      << " opened=" << (opened_stream ? 1 : 0)
+                      << " track=" << object.track_name
+                      << " group=" << object.group_id
+                      << " subgroup=" << object.subgroup_id
+                      << " object=" << object.object_id
+                      << " payload_bytes=" << payload.size()
+                      << " wire_bytes=" << wire_bytes.size()
+                      << " fin=" << (is_final_in_subgroup ? 1 : 0)
+                      << std::endl;
+            trace_csv_write_enqueue(send_seq,
+                                    now_ms,
+                                    object,
+                                    stream_id,
+                                    opened_stream,
+                                    payload.size(),
+                                    wire_bytes.size(),
+                                    is_final_in_subgroup);
+        }
 
         const TransportStatus status = transport.write_stream(stream_id, wire_bytes, is_final_in_subgroup);
         if (!status.ok) {
@@ -1129,7 +1351,9 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 transport.read_stream(control_stream_id, chunk, immediate_fin, std::chrono::milliseconds(0));
             if (read_status.ok) {
                 if (trace_enabled()) {
-                    std::cerr << "[moqt-session] control chunk fin=" << (immediate_fin ? 1 : 0) << " bytes=["
+                    std::cerr << "[moqt-session] control chunk now_ms="
+                              << trace_elapsed_ms(std::chrono::steady_clock::now())
+                              << " fin=" << (immediate_fin ? 1 : 0) << " bytes=["
                               << hex_dump(chunk) << "]" << std::endl;
                 }
                 buffer.insert(buffer.end(), chunk.begin(), chunk.end());
@@ -1210,7 +1434,9 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 transport.read_stream(control_stream_id, chunk, immediate_fin, std::chrono::milliseconds(0));
             if (read_status.ok) {
                 if (trace_enabled()) {
-                    std::cerr << "[moqt-session] control chunk fin=" << (immediate_fin ? 1 : 0) << " bytes=["
+                    std::cerr << "[moqt-session] control chunk now_ms="
+                              << trace_elapsed_ms(std::chrono::steady_clock::now())
+                              << " fin=" << (immediate_fin ? 1 : 0) << " bytes=["
                               << hex_dump(chunk) << "]" << std::endl;
                 }
                 buffer.insert(buffer.end(), chunk.begin(), chunk.end());
@@ -1268,7 +1494,10 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     first_media_time_us = object.media_time_us;
                     first_media_time_set = true;
                 }
+                const std::uint64_t send_seq = object.kind == openmoq::publisher::CmsfObjectKind::kMedia ? next_send_seq() : 0;
+                trace_pacing_decision("before", send_seq, pacing_start, first_media_time_us, object, paced);
                 pace_until(pacing_start, first_media_time_us, object, paced);
+                trace_pacing_decision("after", send_seq, pacing_start, first_media_time_us, object, paced);
 
                 for (auto& [request_id, active] : active_subscriptions) {
                     if (active.loop_cycle != next_loop_cycle || active.next_object_index != next_plan_index) {
@@ -1279,6 +1508,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                         transport,
                         draft,
                         active.track.alias,
+                        send_seq,
                         object,
                         subgroup_contains_group_largest(plan, next_plan_index),
                         is_final_object_in_subgroup(plan, next_plan_index),
@@ -1286,9 +1516,15 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     if (!write_status.ok) {
                         return write_status;
                     }
-                    std::cerr << "[moqt-session] served object track=" << object.track_name
+                    std::cerr << "[moqt-session] served object send_seq=" << send_seq
+                              << " now_ms=" << trace_elapsed_ms(std::chrono::steady_clock::now())
+                              << " track=" << object.track_name
                               << " group=" << object.group_id << " object=" << object.object_id
                               << " bytes=" << object_payload_size(source_object) << '\n';
+                    trace_csv_write_served("served",
+                                           send_seq,
+                                           trace_elapsed_ms(std::chrono::steady_clock::now()),
+                                           object);
 
                     std::size_t upcoming_object_index = 0;
                     if (find_next_matching_object_index(plan,
@@ -1353,7 +1589,9 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
         }
 
         if (trace_enabled()) {
-            std::cerr << "[moqt-session] control chunk fin=" << (fin ? 1 : 0) << " bytes=[" << hex_dump(chunk)
+            std::cerr << "[moqt-session] control chunk now_ms="
+                      << trace_elapsed_ms(std::chrono::steady_clock::now())
+                      << " fin=" << (fin ? 1 : 0) << " bytes=[" << hex_dump(chunk)
                       << "]" << std::endl;
         }
         buffer.insert(buffer.end(), chunk.begin(), chunk.end());
@@ -1465,12 +1703,16 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
                 first_media_time_us = object.media_time_us;
                 first_media_time_set = true;
             }
+            const std::uint64_t send_seq = object.kind == openmoq::publisher::CmsfObjectKind::kMedia ? next_send_seq() : 0;
+            trace_pacing_decision("before", send_seq, pacing_start, first_media_time_us, object, paced);
             pace_until(pacing_start, first_media_time_us, object, paced);
+            trace_pacing_decision("after", send_seq, pacing_start, first_media_time_us, object, paced);
 
             status = sender_by_track[source_object.track_name].serve(
                 transport,
                 plan.draft.version,
                 track_it->second.alias,
+                send_seq,
                 object,
                 subgroup_contains_group_largest(plan, object_index),
                 is_final_object_in_subgroup(plan, object_index),
@@ -1478,11 +1720,14 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
             if (!status.ok) {
                 return status;
             }
-            std::cerr << "[moqt-session] sent object track=" << object.track_name << " group=" << object.group_id
+            std::cerr << "[moqt-session] sent object send_seq=" << send_seq
+                      << " now_ms=" << trace_elapsed_ms(std::chrono::steady_clock::now())
+                      << " track=" << object.track_name << " group=" << object.group_id
                       << " object=" << object.object_id << " bytes=" << object_payload_size(source_object)
                       << " kind="
                       << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
                       << '\n';
+            trace_csv_write_served("sent", send_seq, trace_elapsed_ms(std::chrono::steady_clock::now()), object);
         }
 
         if (!loop_state.enabled) {
@@ -1672,12 +1917,16 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
                 first_media_time_us = object.media_time_us;
                 first_media_time_set = true;
             }
+            const std::uint64_t send_seq = object.kind == openmoq::publisher::CmsfObjectKind::kMedia ? next_send_seq() : 0;
+            trace_pacing_decision("before", send_seq, pacing_start, first_media_time_us, object, paced);
             pace_until(pacing_start, first_media_time_us, object, paced);
+            trace_pacing_decision("after", send_seq, pacing_start, first_media_time_us, object, paced);
 
             status = sender_by_track[source_object.track_name].serve(
                 transport,
                 plan.draft.version,
                 track_it->second.alias,
+                send_seq,
                 object,
                 subgroup_contains_group_largest(plan, object_index),
                 is_final_object_in_subgroup(plan, object_index),
@@ -1685,13 +1934,19 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
             if (!status.ok) {
                 return status;
             }
-            std::cerr << "[moqt-session] sent selected object track=" << object.track_name
+            std::cerr << "[moqt-session] sent selected object send_seq=" << send_seq
+                      << " now_ms=" << trace_elapsed_ms(std::chrono::steady_clock::now())
+                      << " track=" << object.track_name
                       << " group=" << object.group_id
                       << " object=" << object.object_id
                       << " bytes=" << object_payload_size(source_object)
                       << " kind="
                       << (object.kind == openmoq::publisher::CmsfObjectKind::kInitialization ? "catalog" : "media")
                       << '\n';
+            trace_csv_write_served("sent_selected",
+                                   send_seq,
+                                   trace_elapsed_ms(std::chrono::steady_clock::now()),
+                                   object);
         }
 
         if (!loop_state.enabled) {
@@ -2016,7 +2271,9 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
                 return status;
             }
             if (trace_enabled()) {
-                std::cerr << "[moqt-session] setup read stream=" << control_stream_id_
+                std::cerr << "[moqt-session] setup read now_ms="
+                          << trace_elapsed_ms(std::chrono::steady_clock::now())
+                          << " stream=" << control_stream_id_
                           << " bytes=" << chunk.size()
                           << " fin=" << (fin ? 1 : 0)
                           << " buffered=" << response.size() + chunk.size() << std::endl;

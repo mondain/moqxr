@@ -23,3 +23,6 @@ compile_commands.json
 # Local test artifacts
 /tmp-*.mp4
 moqxr.code-workspace
+run.log
+run-trace*.log
+openmoq-publisher-trace.csv

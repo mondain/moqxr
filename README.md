@@ -320,6 +320,21 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --insecure
 ```
 
+If you want a per-object CSV trace for pacing and enqueue correlation, set `OPENMOQ_PICOQUIC_TRACE_CSV` alongside `OPENMOQ_PICOQUIC_TRACE`:
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 \
+OPENMOQ_PICOQUIC_TRACE_CSV=/tmp/openmoq-publisher-trace.csv \
+./build/openmoq-publisher \
+  --input sample.mp4 \
+  --endpoint moqt://relay.example.com:443/moq \
+  --namespace interop \
+  --forward 0 \
+  --timeout 10 \
+  --paced \
+  --insecure
+```
+
 Behavior notes:
 
 - `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
@@ -333,6 +348,7 @@ Behavior notes:
 - `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 3 seconds
 - `--sni <value>` overrides the TLS SNI sent to the relay, which is useful when `--endpoint` uses a raw IP address
 - `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
+- `OPENMOQ_PICOQUIC_TRACE_CSV=/path/file.csv` is optional and only writes CSV output when `OPENMOQ_PICOQUIC_TRACE` is also set; rows include `pacing_before`, `pacing_after`, `enqueue`, and `served`/`sent` events for media objects
 
 ### Optional picoquic smoke test
 

@@ -29,6 +29,8 @@ struct PicoquicClient::Impl {
         std::uint64_t stream_id = 0;
         std::vector<std::uint8_t> bytes;
         bool fin = false;
+        std::chrono::steady_clock::time_point enqueued_at{};
+        std::size_t defer_count = 0;
     };
 
     struct ReceivedStreamData {
@@ -36,9 +38,19 @@ struct PicoquicClient::Impl {
         bool fin = false;
     };
 
+    struct AcceptedWrite {
+        std::uint64_t stream_id = 0;
+        std::size_t bytes = 0;
+        bool fin = false;
+        std::size_t defer_count = 0;
+        std::chrono::steady_clock::time_point accepted_at{};
+        long long queue_age_ms = 0;
+    };
+
     std::mutex mutex;
     std::condition_variable condition;
     std::deque<PendingWrite> pending_writes;
+    std::deque<AcceptedWrite> accepted_writes_waiting_for_send;
     std::map<std::uint64_t, ReceivedStreamData> received_streams;
     bool connected = false;
     bool failed = false;
@@ -70,6 +82,15 @@ bool trace_enabled() {
     return enabled;
 }
 
+std::chrono::steady_clock::time_point trace_epoch() {
+    static const auto epoch = std::chrono::steady_clock::now();
+    return epoch;
+}
+
+long long trace_elapsed_ms(std::chrono::steady_clock::time_point time_point) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(time_point - trace_epoch()).count();
+}
+
 void trace(const std::string& message) {
     if (trace_enabled()) {
         std::cerr << "[picoquic-client] " << message << std::endl;
@@ -94,18 +115,42 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
     }
 
     std::deque<PicoquicClient::Impl::PendingWrite> writes;
+    std::size_t queued_count = 0;
+    std::size_t queued_bytes = 0;
     bool close_requested = false;
 
     {
         std::lock_guard<std::mutex> lock(impl.mutex);
         writes.swap(impl.pending_writes);
+        queued_count = writes.size();
+        for (const auto& write : writes) {
+            queued_bytes += write.bytes.size();
+        }
         close_requested = impl.close_requested;
     }
 
+    if (trace_enabled() && (queued_count != 0 || close_requested)) {
+        trace("flush start queued_count=" + std::to_string(queued_count) +
+              " queued_bytes=" + std::to_string(queued_bytes) +
+              " close_requested=" + std::to_string(close_requested ? 1 : 0) +
+              " now_ms=" + std::to_string(trace_elapsed_ms(std::chrono::steady_clock::now())));
+    }
+
     std::deque<PicoquicClient::Impl::PendingWrite> deferred_writes;
+    std::deque<PicoquicClient::Impl::AcceptedWrite> accepted_writes;
+    std::size_t accepted_count = 0;
+    std::size_t accepted_bytes = 0;
+    std::size_t deferred_count = 0;
+    std::size_t deferred_bytes = 0;
     while (!writes.empty()) {
         auto& write = writes.front();
-        trace("stream " + std::to_string(write.stream_id) + " bytes=[" + hex_dump(write.bytes) + "]");
+        const auto now = std::chrono::steady_clock::now();
+        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - write.enqueued_at).count();
+        trace("stream " + std::to_string(write.stream_id) +
+              " bytes=[" + hex_dump(write.bytes) + "]" +
+              " queue_age_ms=" + std::to_string(age_ms) +
+              " defer_count=" + std::to_string(write.defer_count) +
+              " now_ms=" + std::to_string(trace_elapsed_ms(now)));
         const int ret = picoquic_add_to_stream(
             impl.cnx, write.stream_id, write.bytes.data(), write.bytes.size(), write.fin ? 1 : 0);
         if (ret != 0) {
@@ -114,24 +159,58 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
             // remaining writes in order so they stay queued until picoquic has
             // drained enough to accept them. write_stream caps total queued
             // bytes on the producer side, so this cannot grow without bound.
-            trace("add_to_stream deferred for stream " + std::to_string(write.stream_id));
+            write.defer_count += 1;
+            deferred_count += 1;
+            deferred_bytes += write.bytes.size();
+            trace("add_to_stream deferred for stream " + std::to_string(write.stream_id) +
+                  " queue_age_ms=" + std::to_string(age_ms) +
+                  " defer_count=" + std::to_string(write.defer_count));
             deferred_writes.push_back(std::move(write));
             writes.pop_front();
             for (auto& pending : writes) {
+                deferred_count += 1;
+                deferred_bytes += pending.bytes.size();
                 deferred_writes.push_back(std::move(pending));
             }
             writes.clear();
             break;
         }
+        accepted_count += 1;
+        accepted_bytes += write.bytes.size();
+        accepted_writes.push_back(PicoquicClient::Impl::AcceptedWrite{
+            .stream_id = write.stream_id,
+            .bytes = write.bytes.size(),
+            .fin = write.fin,
+            .defer_count = write.defer_count,
+            .accepted_at = now,
+            .queue_age_ms = age_ms,
+        });
+        if (write.defer_count != 0) {
+            trace("add_to_stream accepted after defer stream=" + std::to_string(write.stream_id) +
+                  " queue_age_ms=" + std::to_string(age_ms) +
+                  " defer_count=" + std::to_string(write.defer_count));
+        }
         writes.pop_front();
     }
 
-    if (!deferred_writes.empty()) {
+    {
         std::lock_guard<std::mutex> lock(impl.mutex);
+        for (auto& accepted : accepted_writes) {
+            impl.accepted_writes_waiting_for_send.push_back(std::move(accepted));
+        }
         for (auto it = deferred_writes.rbegin(); it != deferred_writes.rend(); ++it) {
             impl.pending_writes.push_front(std::move(*it));
         }
         impl.condition.notify_all();
+    }
+
+    if (trace_enabled() && (queued_count != 0 || accepted_count != 0 || deferred_count != 0 || close_requested)) {
+        trace("flush end accepted_count=" + std::to_string(accepted_count) +
+              " accepted_bytes=" + std::to_string(accepted_bytes) +
+              " deferred_count=" + std::to_string(deferred_count) +
+              " deferred_bytes=" + std::to_string(deferred_bytes) +
+              " pending_after=" + std::to_string(deferred_writes.size()) +
+              " now_ms=" + std::to_string(trace_elapsed_ms(std::chrono::steady_clock::now())));
     }
 
     if (close_requested) {
@@ -298,6 +377,23 @@ int loop_callback(picoquic_quic_t* quic,
                               " total_sent=" + std::to_string(impl->total_bytes_sent) +
                               " total_received=" + std::to_string(impl->total_bytes_received));
                     }
+                    if (count != 0 && !impl->accepted_writes_waiting_for_send.empty()) {
+                        const auto now = std::chrono::steady_clock::now();
+                        while (!impl->accepted_writes_waiting_for_send.empty()) {
+                            const auto& accepted = impl->accepted_writes_waiting_for_send.front();
+                            const auto accepted_to_send_ms =
+                                std::chrono::duration_cast<std::chrono::milliseconds>(now - accepted.accepted_at)
+                                    .count();
+                            trace("accepted_to_after_send stream=" + std::to_string(accepted.stream_id) +
+                                  " accepted_to_send_ms=" + std::to_string(accepted_to_send_ms) +
+                                  " queue_age_ms=" + std::to_string(accepted.queue_age_ms) +
+                                  " bytes=" + std::to_string(accepted.bytes) +
+                                  " fin=" + std::to_string(accepted.fin ? 1 : 0) +
+                                  " defer_count=" + std::to_string(accepted.defer_count) +
+                                  " now_ms=" + std::to_string(trace_elapsed_ms(now)));
+                            impl->accepted_writes_waiting_for_send.pop_front();
+                        }
+                    }
                 }
             } else {
                 trace("packet loop after send");
@@ -342,6 +438,7 @@ TransportStatus PicoquicClient::configure(const EndpointConfig& endpoint, const 
         impl_->loop_exited = false;
         impl_->last_error.clear();
         impl_->pending_writes.clear();
+        impl_->accepted_writes_waiting_for_send.clear();
     }
 
     return TransportStatus::success();
@@ -522,6 +619,8 @@ TransportStatus PicoquicClient::write_stream(std::uint64_t stream_id,
             .stream_id = stream_id,
             .bytes = std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
             .fin = fin,
+            .enqueued_at = std::chrono::steady_clock::now(),
+            .defer_count = 0,
         });
     }
 
