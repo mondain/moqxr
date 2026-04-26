@@ -159,19 +159,29 @@ std::vector<std::uint8_t> encode_publish_namespace_ok_message(DraftVersion draft
     return message;
 }
 
-std::vector<std::uint8_t> encode_subscribe_namespace_message(std::uint64_t request_id, std::string_view track_namespace) {
+std::vector<std::uint8_t> encode_subscribe_namespace_message(DraftVersion draft,
+                                                             std::uint64_t request_id,
+                                                             std::string_view track_namespace) {
     std::vector<std::uint8_t> payload = encode_varint(request_id);
     const std::vector<std::uint8_t> tuple_len = encode_varint(1);
     const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
     payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
     payload.insert(payload.end(), component_len.begin(), component_len.end());
     payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
+    if (draft == DraftVersion::kDraft16) {
+        const std::vector<std::uint8_t> subscribe_options = encode_varint(0x02);
+        payload.insert(payload.end(), subscribe_options.begin(), subscribe_options.end());
+    }
     const std::vector<std::uint8_t> parameter_count = encode_varint(0);
     payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
 
     std::vector<std::uint8_t> message = encode_varint(0x11);
-    const std::vector<std::uint8_t> length = encode_varint(payload.size());
-    message.insert(message.end(), length.begin(), length.end());
+    if (draft == DraftVersion::kDraft16) {
+        append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    } else {
+        const std::vector<std::uint8_t> length = encode_varint(payload.size());
+        message.insert(message.end(), length.begin(), length.end());
+    }
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
 }
@@ -291,8 +301,14 @@ std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft,
         payload.insert(payload.end(), filter_type.begin(), filter_type.end());
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
     } else {
-        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        const std::vector<std::uint8_t> parameter_count = encode_varint(forward == 1 ? 0 : 1);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+        if (forward != 1) {
+            const std::vector<std::uint8_t> forward_type_delta = encode_varint(0x10);
+            const std::vector<std::uint8_t> forward_value = encode_varint(forward);
+            payload.insert(payload.end(), forward_type_delta.begin(), forward_type_delta.end());
+            payload.insert(payload.end(), forward_value.begin(), forward_value.end());
+        }
     }
 
     std::vector<std::uint8_t> message = encode_varint(0x1e);
@@ -309,7 +325,7 @@ void queue_subscribe_requests(MockTransport& transport,
                               std::uint8_t forward = 0) {
     transport.reads[0].push_back(encode_publish_namespace_ok_message(draft, 0));
     if (include_subscribe_namespace) {
-        transport.reads[0].push_back(encode_subscribe_namespace_message(1, track_namespace));
+        transport.reads[0].push_back(encode_subscribe_namespace_message(draft, 1, track_namespace));
     }
     for (const auto& [request_id, track_name] : requests) {
         transport.reads[0].push_back(encode_subscribe_message(request_id, track_namespace, track_name, forward, draft));
@@ -1188,6 +1204,52 @@ int main() {
                  "expected draft-16 PUBLISH_NAMESPACE_DONE");
     ok &= expect(draft16_transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x01, 0x00}),
                  "expected draft-16 PUBLISH_NAMESPACE_DONE to contain only the request ID");
+
+    {
+        const auto subscribe_namespace = encode_subscribe_namespace_message(DraftVersion::kDraft16, 7, kTestTrackNamespace);
+        std::size_t message_size = 0;
+        ok &= expect(openmoq::publisher::transport::next_control_message(
+                         subscribe_namespace, DraftVersion::kDraft16, message_size),
+                     "expected draft-16 SUBSCRIBE_NAMESPACE to frame with uint16 length");
+        ok &= expect(message_size == subscribe_namespace.size(),
+                     "expected draft-16 SUBSCRIBE_NAMESPACE frame size to match bytes");
+
+        SubscribeNamespaceMessage decoded;
+        ok &= expect(openmoq::publisher::transport::decode_subscribe_namespace_message(
+                         subscribe_namespace, DraftVersion::kDraft16, decoded),
+                     "expected draft-16 SUBSCRIBE_NAMESPACE with Subscribe Options to decode");
+        ok &= expect(decoded.request_id == 7, "expected draft-16 SUBSCRIBE_NAMESPACE request_id");
+        ok &= expect(decoded.track_namespace_prefix.size() == 1 &&
+                         decoded.track_namespace_prefix.front() == kTestTrackNamespace,
+                     "expected draft-16 SUBSCRIBE_NAMESPACE prefix");
+    }
+
+    {
+        openmoq::publisher::transport::PublishOk empty_publish_ok;
+        ok &= expect(openmoq::publisher::transport::decode_publish_ok(
+                         encode_publish_ok_message(DraftVersion::kDraft16, 9), DraftVersion::kDraft16, empty_publish_ok),
+                     "expected empty draft-16 PUBLISH_OK parameters to decode");
+        ok &= expect(empty_publish_ok.request_id == 9, "expected draft-16 PUBLISH_OK request_id");
+        ok &= expect(empty_publish_ok.forward == 1, "expected draft-16 PUBLISH_OK default FORWARD=1");
+        ok &= expect(empty_publish_ok.subscriber_priority == 128,
+                     "expected draft-16 PUBLISH_OK default SUBSCRIBER_PRIORITY=128");
+
+        openmoq::publisher::transport::PublishOk forward_zero_publish_ok;
+        ok &= expect(openmoq::publisher::transport::decode_publish_ok(
+                         encode_publish_ok_message(DraftVersion::kDraft16, 11, 0),
+                         DraftVersion::kDraft16,
+                         forward_zero_publish_ok),
+                     "expected draft-16 PUBLISH_OK FORWARD parameter to decode");
+        ok &= expect(forward_zero_publish_ok.forward == 0, "expected draft-16 PUBLISH_OK FORWARD=0");
+
+        const std::vector<std::uint8_t> invalid_forward_publish_ok = {
+            0x1e, 0x00, 0x04, 0x0b, 0x01, 0x10, 0x02,
+        };
+        openmoq::publisher::transport::PublishOk invalid_forward;
+        ok &= expect(!openmoq::publisher::transport::decode_publish_ok(
+                         invalid_forward_publish_ok, DraftVersion::kDraft16, invalid_forward),
+                     "expected invalid draft-16 PUBLISH_OK FORWARD value to be rejected");
+    }
 
     const std::vector<std::uint8_t> split_server_setup = encode_server_setup_message({
         .draft = DraftVersion::kDraft14,

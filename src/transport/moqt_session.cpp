@@ -274,7 +274,7 @@ void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq:
         }
     } else if (message_type == 0x11) {
         SubscribeNamespaceMessage message;
-        if (decode_subscribe_namespace_message(message_bytes, message)) {
+        if (decode_subscribe_namespace_message(message_bytes, draft, message)) {
             std::cerr << " request_id=" << message.request_id;
             if (!message.track_namespace_prefix.empty()) {
                 std::cerr << " prefix=" << message.track_namespace_prefix.front();
@@ -646,7 +646,7 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
     while (namespace_responses < expected_namespace_responses || publish_responses < expected_publish_responses) {
         std::size_t consumed = 0;
         std::size_t message_size = 0;
-        while (next_control_message(std::span<const std::uint8_t>(buffer).subspan(consumed), message_size)) {
+        while (next_control_message(std::span<const std::uint8_t>(buffer).subspan(consumed), draft, message_size)) {
             const std::vector<std::uint8_t> message_bytes(buffer.begin() + static_cast<std::ptrdiff_t>(consumed),
                                                           buffer.begin() + static_cast<std::ptrdiff_t>(consumed + message_size));
             std::size_t offset = 0;
@@ -1140,7 +1140,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
     while (true) {
         std::size_t message_size = 0;
-        while (next_control_message(buffer, message_size)) {
+        while (next_control_message(buffer, draft, message_size)) {
             const std::vector<std::uint8_t> message_bytes(buffer.begin(), buffer.begin() + message_size);
             std::size_t offset = 0;
             std::uint64_t message_type = 0;
@@ -1312,7 +1312,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
             if (message_type == 0x11) {
                 SubscribeNamespaceMessage subscribe_namespace;
-                if (!decode_subscribe_namespace_message(message_bytes, subscribe_namespace)) {
+                if (!decode_subscribe_namespace_message(message_bytes, draft, subscribe_namespace)) {
                     return TransportStatus::failure("received invalid SUBSCRIBE_NAMESPACE");
                 }
                 if (!namespace_prefix_matches(subscribe_namespace.track_namespace_prefix, track_namespace)) {
@@ -2229,7 +2229,7 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
 
     while (true) {
         std::size_t message_size = 0;
-        if (!next_control_message(std::span<const std::uint8_t>(response).subspan(consumed), message_size)) {
+        if (!next_control_message(std::span<const std::uint8_t>(response).subspan(consumed), draft, message_size)) {
             if (fin) {
                 break;
             }

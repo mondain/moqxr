@@ -289,7 +289,7 @@ bool decode_varint(std::span<const std::uint8_t> bytes, std::size_t& offset, std
     return decode_varint_impl(bytes, offset, value);
 }
 
-bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& message_size) {
+bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draft, std::size_t& message_size) {
     std::size_t offset = 0;
     std::uint64_t type = 0;
     if (!decode_varint_impl(bytes, offset, type)) {
@@ -330,12 +330,27 @@ bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& mess
             return bytes.size() >= message_size;
         }
         // varint payload length: type varint + varint length + payload
-        // SUBSCRIBE_NAMESPACE family — same framing as 0x11 and 0x12.
-        case kSubscribeNamespaceType:        // 0x11
         case kSubscribeNamespaceOkType:      // 0x12
         case 0x13:  // SUBSCRIBE_NAMESPACE_ERROR (draft-14)
         case 0x1b:  // UNSUBSCRIBE_NAMESPACE  (draft-14)
         {
+            std::uint64_t payload_length = 0;
+            if (!decode_varint_impl(bytes, offset, payload_length)) {
+                return false;
+            }
+            message_size = offset + static_cast<std::size_t>(payload_length);
+            return bytes.size() >= message_size;
+        }
+        case kSubscribeNamespaceType: {  // 0x11
+            if (draft == DraftVersion::kDraft16) {
+                if (offset + 2 > bytes.size()) {
+                    return false;
+                }
+                const std::size_t payload_length =
+                    (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
+                message_size = offset + 2 + payload_length;
+                return bytes.size() >= message_size;
+            }
             std::uint64_t payload_length = 0;
             if (!decode_varint_impl(bytes, offset, payload_length)) {
                 return false;
@@ -563,18 +578,63 @@ bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draf
            decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
 }
 
-bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, SubscribeNamespaceMessage& message) {
+bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
+                                        DraftVersion draft,
+                                        SubscribeNamespaceMessage& message) {
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;
-    if (!parse_varint_length_message(bytes, kSubscribeNamespaceType, payload_offset, payload_length)) {
+    const bool framed =
+        draft == DraftVersion::kDraft16
+            ? parse_uint16_length_message(bytes, kSubscribeNamespaceType, payload_offset, payload_length)
+            : parse_varint_length_message(bytes, kSubscribeNamespaceType, payload_offset, payload_length);
+    if (!framed) {
         return false;
     }
     std::size_t offset = payload_offset;
     const std::size_t payload_end = payload_offset + payload_length;
+    std::uint64_t subscribe_options = 0;
     std::uint64_t parameters = 0;
-    return decode_varint_impl(bytes, offset, message.request_id) &&
-           decode_track_namespace(bytes.subspan(0, payload_end), offset, message.track_namespace_prefix) &&
-           decode_varint_impl(bytes, offset, parameters) && parameters == 0 && offset == payload_end;
+    if (!decode_varint_impl(bytes, offset, message.request_id) ||
+        !decode_track_namespace(bytes.subspan(0, payload_end), offset, message.track_namespace_prefix)) {
+        return false;
+    }
+    if (draft == DraftVersion::kDraft16 &&
+        (!decode_varint_impl(bytes, offset, subscribe_options) || subscribe_options > 2)) {
+        return false;
+    }
+    if (!decode_varint_impl(bytes, offset, parameters)) {
+        return false;
+    }
+
+    std::uint64_t previous_parameter_type = 0;
+    for (std::uint64_t index = 0; index < parameters; ++index) {
+        std::uint64_t parameter_type = 0;
+        if (!decode_parameter_type(bytes, offset, previous_parameter_type, draft == DraftVersion::kDraft16, parameter_type)) {
+            return false;
+        }
+        if ((parameter_type & 0x1ULL) == 0) {
+            std::uint64_t value = 0;
+            if (!decode_varint_impl(bytes, offset, value)) {
+                return false;
+            }
+            if (draft == DraftVersion::kDraft16 && parameter_type == 0x10 && value > 1) {
+                return false;
+            }
+            if (draft == DraftVersion::kDraft16 && parameter_type != 0x10) {
+                return false;
+            }
+            continue;
+        }
+        std::uint64_t parameter_length = 0;
+        if (!decode_varint_impl(bytes, offset, parameter_length) || offset + parameter_length > payload_end) {
+            return false;
+        }
+        if (draft == DraftVersion::kDraft16 && parameter_type != 0x03) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(parameter_length);
+    }
+    return offset == payload_end;
 }
 
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
@@ -1022,13 +1082,65 @@ bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
     if (!decode_varint_impl(bytes, offset, parameter_count)) {
         return false;
     }
+    message.forward = 1;
+    message.subscriber_priority = 128;
+    message.group_order = 0;
+    message.filter_type = 0;
+
+    std::uint64_t previous_parameter_type = 0;
     for (std::uint64_t index = 0; index < parameter_count; ++index) {
         std::uint64_t parameter_type = 0;
-        std::uint64_t parameter_length = 0;
-        if (!decode_varint_impl(bytes, offset, parameter_type) ||
-            !decode_varint_impl(bytes, offset, parameter_length) ||
-            offset + parameter_length > payload_end) {
+        if (!decode_parameter_type(bytes, offset, previous_parameter_type, true, parameter_type)) {
             return false;
+        }
+        if ((parameter_type & 0x1ULL) == 0) {
+            std::uint64_t value = 0;
+            if (!decode_varint_impl(bytes, offset, value)) {
+                return false;
+            }
+            switch (parameter_type) {
+                case 0x02:  // DELIVERY_TIMEOUT
+                    if (value == 0) { return false; }
+                    break;
+                case 0x08:  // EXPIRES
+                    break;
+                case 0x10:  // FORWARD
+                    if (value > 1) { return false; }
+                    message.forward = static_cast<std::uint8_t>(value);
+                    break;
+                case 0x20:  // SUBSCRIBER_PRIORITY
+                    if (value > 255) { return false; }
+                    message.subscriber_priority = static_cast<std::uint8_t>(value);
+                    break;
+                case 0x22:  // GROUP_ORDER
+                    if (value != 0x1 && value != 0x2) { return false; }
+                    message.group_order = static_cast<std::uint8_t>(value);
+                    break;
+                case 0x32:  // NEW_GROUP_REQUEST
+                    break;
+                default:
+                    return false;
+            }
+            continue;
+        }
+
+        std::uint64_t parameter_length = 0;
+        if (!decode_varint_impl(bytes, offset, parameter_length) || offset + parameter_length > payload_end) {
+            return false;
+        }
+        switch (parameter_type) {
+            case 0x21: {  // SUBSCRIPTION_FILTER
+                SubscribeMessage filter_message;
+                std::size_t filter_offset = offset;
+                const std::size_t filter_end = offset + static_cast<std::size_t>(parameter_length);
+                if (!decode_subscribe_filter(bytes, filter_offset, filter_end, filter_message)) {
+                    return false;
+                }
+                message.filter_type = filter_message.filter_type;
+                break;
+            }
+            default:
+                return false;
         }
         offset += static_cast<std::size_t>(parameter_length);
     }

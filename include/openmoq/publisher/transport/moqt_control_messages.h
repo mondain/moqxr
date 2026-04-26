@@ -112,12 +112,14 @@ std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message);
 bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetupMessage& message);
 std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& message);
 bool decode_max_request_id_message(std::span<const std::uint8_t> bytes, MaxRequestIdMessage& message);
-bool next_control_message(std::span<const std::uint8_t> bytes, std::size_t& message_size);
+bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draft, std::size_t& message_size);
 std::vector<std::uint8_t> encode_namespace_message(const NamespaceMessage& message);
 std::vector<std::uint8_t> encode_request_ok_message(std::uint64_t request_id);
 bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishNamespaceOk& message);
 bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draft, RequestError& message);
-bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes, SubscribeNamespaceMessage& message);
+bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
+                                        DraftVersion draft,
+                                        SubscribeNamespaceMessage& message);
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id);
 bool decode_subscribe_message(std::span<const std::uint8_t> bytes, DraftVersion draft, SubscribeMessage& message);
 bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, SubscribeUpdateMessage& message);
