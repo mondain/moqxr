@@ -12,7 +12,9 @@ This project keeps `draft-ietf-moq-transport-14` as the primary publisher profil
 ## Draft-16 secondary assumptions
 
 - Some request/response handling moved to the generic `REQUEST_OK` and `REQUEST_ERROR` flow.
-- `SUBSCRIBE_NAMESPACE` carries `Subscribe Options`, which affects whether namespace advertisements, publish advertisements, or both are requested.
+- `SUBSCRIBE_NAMESPACE` uses a `u16` outer `Length` field and carries `Subscribe Options` before its message parameters. `Subscribe Options` affects whether namespace advertisements, publish advertisements, or both are requested.
+- Message parameters in `SUBSCRIBE`, `PUBLISH_OK`, and related draft-16 messages are delta-encoded key-value pairs. Even parameter types carry a varint value directly; odd parameter types carry a varint length followed by bytes.
+- `PUBLISH_OK` applies the draft-16 defaults when parameters are omitted: `FORWARD=1`, `SUBSCRIBER_PRIORITY=128`, no explicit `GROUP_ORDER`, and no subscription filter.
 - Namespace overlap handling is expressed through the generic request error path rather than the older dedicated response message family.
 
 ## CMAF packaging assumptions

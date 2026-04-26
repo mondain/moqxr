@@ -182,14 +182,17 @@ Does not own:
 - Subscriber-driven serving is implemented for `--forward 0`, including multitrack publication in publish-plan/media-time order rather than draining one subscribed track completely before the next.
 - Incremental downstream `SUBSCRIBE` handling lets later-arriving tracks join future object servicing without restarting the session or losing interleaving for remaining media objects.
 - WebTransport mode is implemented on picoquic `h3zero` helpers and uses callback-driven WT app-stream writes instead of direct stream pushes.
-- Current live interoperability results are split:
-  - `draft-14.cloudflare.mediaoverquic.com` and `us-ord-1.moqx.akaleapi.net` reach `SERVER_SETUP` and `PUBLISH_NAMESPACE_OK`
-  - `fb.mvfst.net:9448` still rejects the tested resource path with HTTP `404` during CONNECT
+- Current live interoperability results:
+  - `<moqx-la-relay-host>:4433/moq-relay` and `<moqx-ord-relay-host>:4433/moq-relay` complete verified-TLS draft-16 WebTransport setup and reach `PUBLISH_NAMESPACE_OK`
+  - `moq-relay.red5.net:4433/moq` completes verified-TLS draft-16 WebTransport setup, reaches `PUBLISH_NAMESPACE_OK`, accepts a downstream `SUBSCRIBE` for `catalog`, and serves the catalog object
+  - `moq-relay.red5.net:4433/moq-relay` rejects WebTransport CONNECT with HTTP `404`; use `/moq` for that relay
+  - historical endpoints such as `draft-14.cloudflare.mediaoverquic.com` and `fb.mvfst.net:9448` are retained as reference points, but are not the primary draft-16 validation targets
 - After `PUBLISH_NAMESPACE_OK`, an idle `--forward 0` publisher now exits cleanly after the subscriber timeout, emits `PUBLISH_NAMESPACE_DONE`, and does not treat the absence of downstream `SUBSCRIBE` as a publish failure.
 
 ## Key risks
 
 - draft-14 vs draft-16 control differences leaking into transport code
+- draft-16 message parameter rules drifting from the spec; `SUBSCRIBE_NAMESPACE` and `PUBLISH_OK` have dedicated regression coverage now
 - coupling raw QUIC or WebTransport callback state too tightly to publish scheduling
 - incomplete backpressure behavior once object volume or pacing pressure increases
 - treating H3 ALPN and MOQT draft signaling as the same layer in WebTransport mode

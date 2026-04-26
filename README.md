@@ -289,8 +289,7 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --namespace interop \
   --forward 0 \
   --timeout 10 \
-  --paced \
-  --insecure
+  --paced
 ```
 
 Publish the same stream with SAP timeline tracks included:
@@ -303,8 +302,7 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --forward 0 \
   --timeout 10 \
   --paced \
-  --sap \
-  --insecure
+  --sap
 ```
 
 If you need to connect to a relay by IP while still presenting the relay hostname in TLS SNI:
@@ -316,9 +314,55 @@ OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --sni relay.example.com \
   --namespace interop \
   --forward 0 \
-  --timeout 10 \
-  --insecure
+  --timeout 10
 ```
+
+Use `--insecure` only when intentionally testing a relay with an untrusted or
+self-signed certificate. Public relays should be exercised with normal TLS
+verification so certificate and SNI regressions are visible.
+
+Known verified-TLS WebTransport relay examples:
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
+  --input tmp-relay-test.mp4 \
+  --transport webtransport \
+  --endpoint https://<moqx-relay-host>:4433/moq-relay \
+  --namespace live/paul1 \
+  --forward 0 \
+  --timeout 10 \
+  --paced \
+  --draft 16
+```
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
+  --input tmp-relay-test.mp4 \
+  --transport webtransport \
+  --endpoint https://<moqx-relay-host>:4433/moq-relay \
+  --namespace live/paul1 \
+  --forward 0 \
+  --timeout 10 \
+  --paced \
+  --draft 16
+```
+
+```bash
+OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
+  --input tmp-relay-test.mp4 \
+  --transport webtransport \
+  --endpoint https://moq-relay.red5.net:4433/moq \
+  --namespace live/paul1 \
+  --forward 0 \
+  --timeout 10 \
+  --paced \
+  --draft 16
+```
+
+`moq-relay.red5.net:4433` currently accepts WebTransport on `/moq`; `/moq-relay`
+returns HTTP `404` during CONNECT. The moqx relay examples use a placeholder
+hostname because those relay hostnames are not public yet; moqx uses
+`/moq-relay`.
 
 If you want a per-object CSV trace for pacing and enqueue correlation, set `OPENMOQ_PICOQUIC_TRACE_CSV` alongside `OPENMOQ_PICOQUIC_TRACE`:
 
@@ -331,8 +375,7 @@ OPENMOQ_PICOQUIC_TRACE_CSV=/tmp/openmoq-publisher-trace.csv \
   --namespace interop \
   --forward 0 \
   --timeout 10 \
-  --paced \
-  --insecure
+  --paced
 ```
 
 Behavior notes:
@@ -346,7 +389,7 @@ Behavior notes:
 - when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
 - `--forward 1` proactively publishes tracks and objects after namespace setup completes
 - `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 3 seconds
-- `--sni <value>` overrides the TLS SNI sent to the relay, which is useful when `--endpoint` uses a raw IP address
+- `--sni <value>` overrides the TLS SNI sent to the relay, which is useful when `--endpoint` uses a raw IP address; WebTransport still sends HTTP authority from the configured endpoint host
 - `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
 - `OPENMOQ_PICOQUIC_TRACE_CSV=/path/file.csv` is optional and only writes CSV output when `OPENMOQ_PICOQUIC_TRACE` is also set; rows include `pacing_before`, `pacing_after`, `enqueue`, and `served`/`sent` events for media objects
 

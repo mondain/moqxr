@@ -125,32 +125,42 @@ Before changing wire behavior, verify each of these:
 5. Incoming application-stream bytes are delivered without the WT preamble before MoQ parsing.
 6. Draft-14 and draft-16 are tested separately.
 
-## Current leading hypothesis
+## Current risk focus
 
-The remaining interoperability issue is most likely below the MoQ `CLIENT_SETUP` payload itself.
+The current WebTransport path is interoperating with the tested moqx and Red5
+draft-16 relays. Remaining risk is now concentrated in broader coverage rather
+than initial session establishment:
 
-The strongest remaining risk area is WebTransport stream handling in our client:
-
-- stream context ownership
-- receive path separation between CONNECT-stream traffic and WT app-stream traffic
-- possible double-management of local stream context around writes
-
-The current evidence does not support parsing CONNECT-stream bytes as `SERVER_SETUP`.
+- higher object volume and backpressure behavior
+- live subscriber timing across multiple tracks
+- relay-specific resource paths
+- draft-specific control message drift as the MOQT drafts continue to change
 
 ## Current interoperability state
 
-Observed behavior as of April 6, 2026:
+Observed behavior as of April 26, 2026:
 
-- `draft-14.cloudflare.mediaoverquic.com:443/moq`
+- `<moqx-la-relay-host>:4433/moq-relay`
+  - draft-16 CONNECT succeeds with verified TLS
+  - `PUBLISH_NAMESPACE_OK` arrives on the WT control stream as expected
+  - with `--forward 0`, the relay may remain idle afterward until a downstream subscriber appears
+- `<moqx-ord-relay-host>:4433/moq-relay`
+  - draft-16 CONNECT succeeds with verified TLS
+  - `PUBLISH_NAMESPACE_OK` arrives on the WT control stream as expected
+  - with `--forward 0`, the relay may remain idle afterward until a downstream subscriber appears
+- `moq-relay.red5.net:4433/moq`
+  - draft-16 CONNECT succeeds with verified TLS
+  - `PUBLISH_NAMESPACE_OK` arrives on the WT control stream as expected
+  - a live `SUBSCRIBE` for `catalog` was observed and served successfully
+- `moq-relay.red5.net:4433/moq-relay`
+  - WebTransport CONNECT is rejected with HTTP `404`
+  - use `/moq` for the Red5 relay on port 4433
+- Historical: `draft-14.cloudflare.mediaoverquic.com:443/moq`
   - CONNECT succeeds
   - `SERVER_SETUP` arrives on the first WT bidi application stream
   - `PUBLISH_NAMESPACE_OK` arrives
   - the relay may remain idle afterward until a downstream subscriber appears
-- `us-ord-1.moqx.akaleapi.net:4433/moq-relay`
-  - draft 16 CONNECT succeeds
-  - `SERVER_SETUP` and `PUBLISH_NAMESPACE_OK` arrive on the WT control stream as expected
-  - the relay may remain idle afterward until a downstream subscriber appears
-- `fb.mvfst.net:9448`
+- Historical: `fb.mvfst.net:9448`
   - the tested resource paths still return HTTP `404` during CONNECT
   - that is currently treated as a server resource-path issue, not a post-CONNECT MoQ framing issue
 
