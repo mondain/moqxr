@@ -678,8 +678,8 @@ int main() {
         ok &= expect(message_type(transport.writes[2].bytes) == 0x04, "expected first SUBSCRIBE_OK");
         ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected second SUBSCRIBE_OK");
         ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x38,
-                     "expected first object stream to use a subgroup header with end-of-group");
+        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x18,
+                     "expected first draft-14 object stream to use draft-14 subgroup header with end-of-group");
         std::uint64_t stream_type = 0;
         std::uint64_t track_alias = 0;
         std::uint64_t group_id = 0;
@@ -694,7 +694,7 @@ int main() {
                                                  payload_length,
                                                  payload),
                      "expected first object stream to decode");
-        ok &= expect(stream_type == 0x38, "expected subgroup stream type with end-of-group");
+        ok &= expect(stream_type == 0x18, "expected draft-14 subgroup stream type with end-of-group");
         ok &= expect(group_id == 0, "expected catalog group id");
         ok &= expect(object_id_delta == 0, "expected catalog object id delta before payload length");
         ok &= expect(payload_length == 4, "expected catalog payload length to be encoded after object id delta");
@@ -702,8 +702,8 @@ int main() {
                      "expected catalog payload bytes after subgroup object fields");
         ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
         ok &= expect(transport.writes[5].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x38,
-                     "expected second object stream to use a subgroup header with end-of-group");
+        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x18,
+                     "expected second draft-14 object stream to use draft-14 subgroup header with end-of-group");
         payload.clear();
         ok &= expect(decode_object_stream_fields(transport.writes[5].bytes,
                                                  stream_type,
@@ -1251,6 +1251,20 @@ int main() {
                      "expected invalid draft-16 PUBLISH_OK FORWARD value to be rejected");
     }
 
+    {
+        const auto request_error =
+            openmoq::publisher::transport::encode_request_error_message(
+                DraftVersion::kDraft16, 7, 2, 25, "track does not exist");
+        openmoq::publisher::transport::RequestError decoded{};
+        ok &= expect(openmoq::publisher::transport::decode_request_error(
+                         request_error, DraftVersion::kDraft16, decoded),
+                     "expected draft-16 REQUEST_ERROR with retry_interval to decode");
+        ok &= expect(decoded.request_id == 7, "expected draft-16 REQUEST_ERROR request_id");
+        ok &= expect(decoded.error_code == 2, "expected draft-16 REQUEST_ERROR error_code");
+        ok &= expect(decoded.retry_interval == 25, "expected draft-16 REQUEST_ERROR retry_interval");
+        ok &= expect(decoded.reason == "track does not exist", "expected draft-16 REQUEST_ERROR reason");
+    }
+
     const std::vector<std::uint8_t> split_server_setup = encode_server_setup_message({
         .draft = DraftVersion::kDraft14,
         .max_request_id = 23,
@@ -1523,11 +1537,11 @@ int main() {
             ok &= expect(transport.writes[vide_1_stream_writes[2]].fin,
                          "expected final write to FIN the subgroup stream");
 
-            // First write: SUBGROUP_HEADER (type=0x38 end-of-group set, mode=0, default priority) +
+            // First write: draft-14 subgroup header (type=0x18 end-of-group set, mode=0) +
             // first object {Object ID Delta=0, payload_len=2, payload="V0"}.
             const auto& w0 = transport.writes[vide_1_stream_writes[0]].bytes;
-            ok &= expect(!w0.empty() && w0.front() == 0x38,
-                         "expected first write to begin with SUBGROUP_HEADER | END_OF_GROUP");
+            ok &= expect(!w0.empty() && w0.front() == 0x18,
+                         "expected first write to begin with draft-14 subgroup header | END_OF_GROUP");
 
             // Second and third writes: no header, just {Object ID Delta, payload_len, payload}.
             // Delta for sequential object IDs 0 -> 1 -> 2 is 0 each time.

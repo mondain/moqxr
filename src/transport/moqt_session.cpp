@@ -1380,7 +1380,8 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             if (track_it == tracks_by_name.end()) {
                 const TransportStatus write_status =
                     transport.write_stream(control_stream_id,
-                                           encode_subscribe_error_message(subscribe.request_id, 0x2, "track does not exist"),
+                                           encode_request_error_message(
+                                               draft, subscribe.request_id, 0x2, 0, "track does not exist"),
                                            false);
                 if (!write_status.ok) {
                     return write_status;

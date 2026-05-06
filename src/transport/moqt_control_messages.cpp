@@ -38,6 +38,7 @@ constexpr std::uint64_t kPublishErrorType = 0x1f;
 // Base byte = 0x10 | 0x20 = 0x30. End-of-group variant = 0x38.
 constexpr std::uint64_t kSubgroupHeaderType = 0x30;
 constexpr std::uint64_t kSubgroupHeaderEndOfGroupBit = 0x08;
+constexpr std::uint64_t kObjectDatagramTypeDraft14 = 0x10;
 constexpr std::uint64_t kSetupParamPath = 0x1;
 constexpr std::uint64_t kSetupParamMaxRequestId = 0x2;
 constexpr std::uint64_t kSetupParamAuthority = 0x5;
@@ -560,6 +561,7 @@ bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draf
         }
         message.request_id = namespace_error.request_id;
         message.error_code = namespace_error.error_code;
+        message.retry_interval = 0;
         message.reason = std::move(namespace_error.reason);
         return true;
     }
@@ -574,6 +576,7 @@ bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draf
     std::uint64_t parameter_count = 0;
     return decode_varint_impl(bytes, offset, message.request_id) &&
            decode_varint_impl(bytes, offset, message.error_code) &&
+           decode_varint_impl(bytes, offset, message.retry_interval) &&
            decode_reason_phrase(bytes.subspan(0, payload_end), offset, message.reason) &&
            decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
 }
@@ -906,6 +909,29 @@ std::vector<std::uint8_t> encode_subscribe_error_message(std::uint64_t request_i
     return message_bytes;
 }
 
+std::vector<std::uint8_t> encode_request_error_message(DraftVersion draft,
+                                                       std::uint64_t request_id,
+                                                       std::uint64_t error_code,
+                                                       std::uint64_t retry_interval,
+                                                       std::string_view reason) {
+    if (draft == DraftVersion::kDraft14) {
+        return encode_subscribe_error_message(request_id, error_code, reason);
+    }
+
+    std::vector<std::uint8_t> payload;
+    append_varint(payload, request_id);
+    append_varint(payload, error_code);
+    append_varint(payload, retry_interval);
+    append_string(payload, reason);
+    append_varint(payload, 0);
+
+    std::vector<std::uint8_t> message_bytes;
+    append_varint(message_bytes, kRequestErrorType);
+    append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
+    message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
+    return message_bytes;
+}
+
 std::vector<std::uint8_t> encode_track_message(const TrackMessage& message) {
     std::vector<std::uint8_t> payload;
     append_varint(payload, message.request_id);
@@ -968,15 +994,15 @@ std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
                                                  std::uint64_t group_id,
                                                  std::uint64_t subgroup_id,
                                                  bool end_of_group) {
-    static_cast<void>(draft);
     // Current callers always serve subgroup_id = 0 and the publisher default
     // priority, which matches SubgroupIDMode=0 + DefaultPriority=1. That shape
     // is on the wire what most interop partners (mojito, the Akamai test
     // relay, etc.) expect. Packager work that assigns non-zero subgroup IDs
     // or per-subgroup priorities can switch to SubgroupIDExplicit here.
     static_cast<void>(subgroup_id);
-    const std::uint64_t stream_type =
-        kSubgroupHeaderType | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
+    const std::uint64_t base_type =
+        draft == DraftVersion::kDraft16 ? kSubgroupHeaderType : kObjectDatagramTypeDraft14;
+    const std::uint64_t stream_type = base_type | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
     std::vector<std::uint8_t> bytes;
     append_varint(bytes, stream_type);
     append_varint(bytes, track_alias);

@@ -523,7 +523,7 @@ ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
   -sn -dn \
   -c:v libx264 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
   -c:a aac -b:a 160k -ar 48000 -ac 2 \
-  -movflags +frag_keyframe+empty_moov+default_base_moof \
+  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
   -f mp4 sunflower-frag.mp4
 
 ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
@@ -532,7 +532,7 @@ ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
   -sn -dn \
   -c:v libx265 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
   -c:a aac -b:a 160k -ar 48000 -ac 2 \
-  -movflags +frag_keyframe+empty_moov+default_base_moof \
+  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
   -f mp4 sunflower265-frag.mp4
 ```
 
@@ -545,6 +545,7 @@ Practical notes:
 - `+frag_keyframe` starts a new fragment on keyframes
 - `+empty_moov` writes initialization metadata up front
 - `+default_base_moof` and `+separate_moof` produce a layout that is easier for fragmented-MP4 pipelines to consume
+- omit `+separate_moof` only if you are sure downstream tooling can parse interleaved multi-track fragments; when audio appears in the catalog but no audio media objects are sent, regenerate with `+separate_moof`
 - for HEVC, prefer streams that are already `hvc1`-compatible; if a source is tagged `hev1` but keeps VPS/SPS/PPS only in the init segment, the publisher will normalize the advertised codec and emitted init segment to `hvc1`
 - if HEVC samples include in-band parameter sets, the publisher preserves `hev1` because rewriting those samples would be incorrect
 - if you start from a progressive MP4, this project can remux it internally, but pre-fragmented input is still the simpler and more efficient path
