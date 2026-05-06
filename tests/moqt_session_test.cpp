@@ -1206,6 +1206,27 @@ int main() {
                  "expected draft-16 PUBLISH_NAMESPACE_DONE to contain only the request ID");
 
     {
+        MockTransport draft16_publish_reject_transport;
+        draft16_publish_reject_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
+            .max_request_id = 8,
+        }));
+        draft16_publish_reject_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+        draft16_publish_reject_transport.reads[0].push_back(
+            openmoq::publisher::transport::encode_request_error_message(
+                DraftVersion::kDraft16, 2, 0x2, 0, "publish rejected"));
+        MoqtSession draft16_publish_reject_session(
+            draft16_publish_reject_transport, std::string(kTestTrackNamespace), true);
+        status = draft16_publish_reject_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-16 publish-reject session connect to succeed");
+        status = draft16_publish_reject_session.publish(draft16_materialized);
+        ok &= expect(!status.ok, "expected draft-16 publish to fail on REQUEST_ERROR publish rejection");
+        ok &= expect(status.message != "timed out waiting for publish acknowledgements",
+                     "expected draft-16 publish REQUEST_ERROR to fail directly, not via ack timeout");
+    }
+
+    {
         const auto subscribe_namespace = encode_subscribe_namespace_message(DraftVersion::kDraft16, 7, kTestTrackNamespace);
         std::size_t message_size = 0;
         ok &= expect(openmoq::publisher::transport::next_control_message(

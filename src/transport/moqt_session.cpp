@@ -123,7 +123,8 @@ TransportStatus try_read_wt_session_stream(PublisherTransport& transport,
     return TransportStatus::success();
 }
 
-const char* control_message_type_name(std::uint64_t message_type) {
+const char* control_message_type_name(std::uint64_t message_type,
+                                      openmoq::publisher::DraftVersion draft) {
     switch (message_type) {
         case 0x02:
             return "SUBSCRIBE_UPDATE";
@@ -132,7 +133,7 @@ const char* control_message_type_name(std::uint64_t message_type) {
         case 0x04:
             return "SUBSCRIBE_OK";
         case 0x05:
-            return "SUBSCRIBE_ERROR";
+            return draft == openmoq::publisher::DraftVersion::kDraft16 ? "REQUEST_ERROR" : "SUBSCRIBE_ERROR";
         case 0x06:
             return "PUBLISH_NAMESPACE";
         case 0x07:
@@ -243,7 +244,7 @@ void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq:
     std::cerr << "[moqt-session] control message now_ms="
               << trace_elapsed_ms(std::chrono::steady_clock::now())
               << " type=0x" << std::hex << message_type << std::dec << " "
-              << control_message_type_name(message_type);
+              << control_message_type_name(message_type, draft);
 
     if (message_type == 0x07) {
         PublishNamespaceOk message;
@@ -667,15 +668,25 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
                 ++namespace_responses;
                 handled = true;
             } else if (namespace_responses < expected_namespace_responses &&
-                       ((draft == openmoq::publisher::DraftVersion::kDraft14 && message_type == 0x08) ||
-                        (draft == openmoq::publisher::DraftVersion::kDraft16 && message_type == 0x05))) {
+                       draft == openmoq::publisher::DraftVersion::kDraft14 &&
+                       message_type == 0x08) {
                 RequestError message;
                 if (!decode_request_error(message_bytes, draft, message)) {
-                    return TransportStatus::failure(draft == openmoq::publisher::DraftVersion::kDraft16
-                                                        ? "received invalid REQUEST_ERROR"
-                                                        : "received invalid PUBLISH_NAMESPACE_ERROR");
+                    return TransportStatus::failure("received invalid PUBLISH_NAMESPACE_ERROR");
                 }
                 return TransportStatus::failure("peer rejected namespace publish: " + message.reason);
+            } else if (draft == openmoq::publisher::DraftVersion::kDraft16 &&
+                       message_type == 0x05) {
+                RequestError message;
+                if (!decode_request_error(message_bytes, draft, message)) {
+                    return TransportStatus::failure("received invalid REQUEST_ERROR");
+                }
+                if (message.request_id == 0 && namespace_responses < expected_namespace_responses) {
+                    return TransportStatus::failure("peer rejected namespace publish: " + message.reason);
+                }
+                if (message.request_id != 0 && publish_responses < expected_publish_responses) {
+                    return TransportStatus::failure("peer rejected track publish: " + message.reason);
+                }
             } else if (message_type == 0x1e && publish_responses < expected_publish_responses) {
                 PublishOk message;
                 if (!decode_publish_ok(message_bytes, draft, message)) {
@@ -1162,7 +1173,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 if (trace_enabled()) {
                     std::cerr << "[moqt-session] skipping unhandled control message type=0x"
                               << std::hex << message_type << std::dec
-                              << " (" << control_message_type_name(message_type) << ")"
+                              << " (" << control_message_type_name(message_type, draft) << ")"
                               << " size=" << message_size << '\n';
                 }
                 buffer.erase(buffer.begin(), buffer.begin() + message_size);
