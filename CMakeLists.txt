@@ -51,6 +51,12 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         set(BUILD_PQBENCH OFF CACHE BOOL "" FORCE)
         set(BUILD_LOGLIB ON CACHE BOOL "" FORCE)
         set(BUILD_LOGREADER OFF CACHE BOOL "" FORCE)
+        if(WIN32 AND EXISTS "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls")
+            # picotls.h includes "wincompat.h" on Windows but picotls's own CMakeLists.txt
+            # does not add picotlsvs/picotls to its include path. Inject it globally so
+            # the file is found when picotls compiles under FetchContent inside picoquic.
+            include_directories(BEFORE "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls")
+        endif()
         if(APPLE)
             # picotls appends literal "(" and ")" list items when Brotli is
             # discovered via pkg-config. On macOS, CMake rejects the resulting
@@ -73,6 +79,35 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         # directories list when Brotli is discovered via pkg-config. CMake on
         # macOS rejects those malformed source-prefixed paths during generate.
         openmoq_sanitize_target_link_directories(picotls-core)
+        if(WIN32)
+            # picotls's cli, bench, and test executables use POSIX headers not available
+            # on Windows. Exclude them from the default build; the libraries we need
+            # (picotls-core, picotls-openssl, picotls-fusion) are unaffected.
+            foreach(_picotls_exe IN ITEMS
+                    cli
+                    test-openssl.t
+                    test-minicrypto.t
+                    test-fusion.t
+                    test-mbedtls.t
+                    ptlsbench
+                    fuzz-asn1
+                    fuzz-server-hello
+                    fuzz-client-hello)
+                if(TARGET "${_picotls_exe}")
+                    set_target_properties("${_picotls_exe}" PROPERTIES EXCLUDE_FROM_ALL ON)
+                endif()
+            endforeach()
+            # picotls-core calls wintimeofday() which is only compiled inside the VS
+            # project files; add it explicitly for CMake Windows builds.
+            if(TARGET picotls-core AND EXISTS "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls/wintimeofday.c")
+                target_sources(picotls-core PRIVATE
+                    "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls/wintimeofday.c")
+            endif()
+            # picotls-minicrypto uses the Windows BCrypt API for random bytes.
+            if(TARGET picotls-minicrypto)
+                target_link_libraries(picotls-minicrypto bcrypt)
+            endif()
+        endif()
         set(OPENMOQ_HAS_PICOQUIC ON)
     else()
         message(STATUS "picoquic checkout found, but picotls source was not found; building without picoquic integration")
