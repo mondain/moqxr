@@ -98,13 +98,13 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-**Windows additional requirement — OpenSSL**
+**Windows additional requirements — pkg-config and OpenSSL**
 
-picotls requires OpenSSL headers and libraries. On Windows you need to provide them separately and tell CMake where they are:
+picotls requires both `pkg-config` (to probe for optional brotli) and OpenSSL headers and libraries. On Windows you need to install both and tell CMake where OpenSSL is:
 
 ```powershell
-# One-time: install OpenSSL (skip if already present)
-choco install openssl
+# One-time: install pkg-config shim and OpenSSL (skip if already present)
+choco install pkgconfiglite openssl
 
 cmake -S . -B build `
   -DOPENMOQ_PICOQUIC_SOURCE_DIR=C:\path\to\picoquic `

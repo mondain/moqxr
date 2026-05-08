@@ -45,10 +45,14 @@ jobs:
           if command -v c++ >/dev/null 2>&1; then c++ --version; fi
           if command -v cl >/dev/null 2>&1; then cl; fi
 
-      - name: Locate OpenSSL (Windows)
+      - name: Set up Windows dependencies
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # picotls requires pkg-config at configure time (even on Windows where
+          # brotli is absent); install the lightweight pkgconfiglite shim.
+          choco install pkgconfiglite --no-progress -y
+
           foreach ($candidate in @(
             "C:\Program Files\OpenSSL",
             "C:\Program Files\OpenSSL-Win64",
