@@ -115,7 +115,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The GitHub Actions release workflow locates OpenSSL automatically from the runner's pre-installed copy, so no manual step is needed in CI.
+On Windows, GitHub Actions workflows (including CI and release) set `OPENSSL_ROOT_DIR` automatically from the runner's pre-installed OpenSSL, so no manual step is needed there.
 
 Useful CMake options:
 
