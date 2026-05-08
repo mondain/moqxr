@@ -105,7 +105,7 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
             endif()
             # picotls-minicrypto uses the Windows BCrypt API for random bytes.
             if(TARGET picotls-minicrypto)
-                target_link_libraries(picotls-minicrypto bcrypt)
+                target_link_libraries(picotls-minicrypto PRIVATE bcrypt)
             endif()
         endif()
         set(OPENMOQ_HAS_PICOQUIC ON)
