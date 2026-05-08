@@ -1,6 +1,6 @@
 # OpenMOQ Publisher
 
-`moqxr` is a C++20 OpenMOQ publisher contribution project for Linux and macOS.
+`moqxr` is a C++20 OpenMOQ publisher contribution project for Linux, macOS, and Windows.
 
 It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-specific framing for drafts 14 and 16, and can either inspect the generated publish plan locally or publish it over a picoquic-backed transport when local `picoquic` and `picotls` checkouts are available.
 
@@ -42,7 +42,7 @@ This keeps the project aligned with CMAF-style publication while reusing the sam
 
 - `draft-ietf-moq-transport-14` is the primary target
 - `draft-ietf-moq-transport-16` is represented as a secondary compatibility profile
-- draft-specific assumptions are documented in [docs/protocol-mapping.md](/media/mondain/terrorbyte/workspace/github/moqxr/docs/protocol-mapping.md)
+- draft-specific assumptions are documented in [docs/protocol-mapping.md](docs/protocol-mapping.md)
 
 ## Repository layout
 
@@ -51,62 +51,85 @@ This keeps the project aligned with CMAF-style publication while reusing the sam
 - `tests`: CTest-based unit coverage
 - `docs`: protocol notes and design references
 - `docs/transport-plan.md`: picoquic integration plan and implementation checklist
-- `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux and macOS
-- `.github/workflows/release.yml`: GitHub Actions release-build workflow that uploads Linux and macOS archives
+- `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux, macOS, and Windows
+- `.github/workflows/release.yml`: GitHub Actions release-build workflow that uploads Linux, macOS, and Windows archives
 
 ## Release builds
 
-For users who just want a prebuilt binary, GitHub Actions publishes release archives for Linux and macOS:
+For users who just want a prebuilt binary, GitHub Actions publishes release archives for Linux, macOS, and Windows:
 
 - pushing a `v*` tag builds release artifacts and attaches them to the matching GitHub Release
 - running the `Release Builds` workflow manually uploads the same archives as workflow artifacts
 - manual runs can also publish a GitHub Release when you provide a `release_tag` such as `v0.1.0`
 - both CI and release workflows check out `private-octopus/picoquic` plus `private-octopus/picotls`, so published binaries include the picoquic transport path instead of falling back to a local-inspection-only build
+- Linux and macOS archives are `.tar.gz`; Windows archives are `.zip` and contain `openmoq-publisher.exe`
 
 ## Build
 
 ### Baseline build
 
-This is the default path for local development:
+This is the default path for local development. It works on Linux, macOS, and Windows:
 
 ```bash
 cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+On Windows with the Visual Studio generator, the binary lands in `build\Release\` or `build\Debug\` depending on the config passed to `--build`.
 
 ### Build with local picoquic and picotls
 
-If you have local checkouts at:
-
-- `/media/mondain/terrorbyte/workspace/github/picoquic`
-- `/media/mondain/terrorbyte/workspace/github/picotls`
-
-then the project will automatically compile against them.
-
-Required picotls setup:
+Clone picoquic and picotls to any convenient location and initialise the picotls submodules:
 
 ```bash
-git -C /media/mondain/terrorbyte/workspace/github/picotls submodule update --init --recursive
+git clone https://github.com/private-octopus/picoquic.git /path/to/picoquic
+git clone --recurse-submodules https://github.com/private-octopus/picotls.git /path/to/picotls
 ```
 
-Then configure and build normally:
+Then point CMake at them:
 
 ```bash
-cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+cmake -S . -B build \
+  -DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic \
+  -DOPENMOQ_PICOTLS_SOURCE_DIR=/path/to/picotls \
+  -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+**Windows additional requirements — pkg-config and OpenSSL**
+
+picotls requires both `pkg-config` (to probe for optional brotli) and OpenSSL headers and libraries. On Windows you need to install both and tell CMake where OpenSSL is:
+
+```powershell
+# One-time: install pkg-config shim and OpenSSL (skip if already present)
+choco install pkgconfiglite openssl
+
+cmake -S . -B build `
+  -DOPENMOQ_PICOQUIC_SOURCE_DIR=C:\path\to\picoquic `
+  -DOPENMOQ_PICOTLS_SOURCE_DIR=C:\path\to\picotls `
+  -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64" `
+  -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+On Windows, GitHub Actions workflows (including CI and release) set `OPENSSL_ROOT_DIR` automatically from the runner's pre-installed OpenSSL, so no manual step is needed there.
 
 Useful CMake options:
 
 - `-DOPENMOQ_ENABLE_PICOQUIC=ON|OFF`
 - `-DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic`
+- `-DOPENMOQ_PICOTLS_SOURCE_DIR=/path/to/picotls`
+- `-DOPENSSL_ROOT_DIR=/path/to/openssl` (Windows only, when OpenSSL is not on the system path)
 - `-DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON|OFF`
 
 ## Quick Start
 
-If you already have a sample MP4 and just want to see what the publisher does, these are the most useful first commands:
+If you already have a sample MP4 and just want to see what the publisher does, these are the most useful first commands.
+
+> **Windows note**: replace `./build/openmoq-publisher` with `build\Release\openmoq-publisher.exe` in the examples below. For trace-enabled examples, use `set OPENMOQ_PICOQUIC_TRACE=1` in `cmd.exe` or `$env:OPENMOQ_PICOQUIC_TRACE=1` in PowerShell instead of the shell prefix form.
 
 Inspect the publish plan with the default settings:
 
@@ -556,8 +579,9 @@ GitHub Actions is configured to build and test the project on:
 
 - `ubuntu-latest`
 - `macos-latest`
+- `windows-latest`
 
-The workflow runs the same CMake configure, build, and CTest steps on both platforms.
+The workflow runs the same CMake configure, build, and CTest steps on all three platforms. On Windows, OpenSSL is located automatically from the runner's pre-installed copy and passed to CMake via `OPENSSL_ROOT_DIR`.
 
 ## Transport Notes
 

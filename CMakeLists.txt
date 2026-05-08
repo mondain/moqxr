@@ -13,7 +13,7 @@ option(OPENMOQ_BUILD_TESTS "Build OpenMOQ publisher tests" ON)
 option(OPENMOQ_ENABLE_PICOQUIC "Enable picoquic transport integration when picoquic is available" ON)
 option(OPENMOQ_RUN_PICOQUIC_SMOKE_TESTS "Build and run picoquic loopback smoke tests" OFF)
 
-set(OPENMOQ_PICOQUIC_SOURCE_DIR "/media/mondain/terrorbyte/workspace/github/picoquic" CACHE PATH
+set(OPENMOQ_PICOQUIC_SOURCE_DIR "" CACHE PATH
     "Path to a picoquic source checkout")
 
 set(OPENMOQ_HAS_PICOQUIC OFF)
@@ -73,6 +73,41 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
         # directories list when Brotli is discovered via pkg-config. CMake on
         # macOS rejects those malformed source-prefixed paths during generate.
         openmoq_sanitize_target_link_directories(picotls-core)
+        if(WIN32)
+            # picotls's cli, bench, and test executables use POSIX headers not available
+            # on Windows. Exclude them from the default build; the libraries we need
+            # (picotls-core, picotls-openssl, picotls-fusion) are unaffected.
+            foreach(_picotls_exe IN ITEMS
+                    cli
+                    test-openssl.t
+                    test-minicrypto.t
+                    test-fusion.t
+                    test-mbedtls.t
+                    ptlsbench
+                    fuzz-asn1
+                    fuzz-server-hello
+                    fuzz-client-hello)
+                if(TARGET "${_picotls_exe}")
+                    set_target_properties("${_picotls_exe}" PROPERTIES EXCLUDE_FROM_ALL ON)
+                endif()
+            endforeach()
+            # picotls.h includes "wincompat.h" on Windows but picotls's own CMakeLists.txt
+            # does not add picotlsvs/picotls to picotls-core's include path.
+            if(TARGET picotls-core AND EXISTS "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls")
+                target_include_directories(picotls-core PRIVATE
+                    "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls")
+            endif()
+            # picotls-core calls wintimeofday() which is only compiled inside the VS
+            # project files; add it explicitly for CMake Windows builds.
+            if(TARGET picotls-core AND EXISTS "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls/wintimeofday.c")
+                target_sources(picotls-core PRIVATE
+                    "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls/wintimeofday.c")
+            endif()
+            # picotls-minicrypto uses the Windows BCrypt API for random bytes.
+            if(TARGET picotls-minicrypto)
+                target_link_libraries(picotls-minicrypto bcrypt)
+            endif()
+        endif()
         set(OPENMOQ_HAS_PICOQUIC ON)
     else()
         message(STATUS "picoquic checkout found, but picotls source was not found; building without picoquic integration")
@@ -101,20 +136,26 @@ target_compile_features(openmoq_publisher_lib PUBLIC cxx_std_20)
 
 if(OPENMOQ_HAS_PICOQUIC)
     target_compile_definitions(openmoq_publisher_lib PRIVATE OPENMOQ_HAS_PICOQUIC=1)
-    if(TARGET picohttp-core AND TARGET picoquic-log AND NOT APPLE AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+    if(TARGET picohttp-core AND TARGET picoquic-log AND NOT APPLE AND NOT WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+        # Linux with modern CMake: RESCAN resolves circular deps between picohttp/picoquic via --start-group/--end-group.
         target_link_libraries(openmoq_publisher_lib PRIVATE "$<LINK_GROUP:RESCAN,picohttp-core,picoquic-log,picoquic-core>")
         target_include_directories(openmoq_publisher_lib PRIVATE "${OPENMOQ_PICOQUIC_SOURCE_DIR}/picohttp")
     else()
         target_link_libraries(openmoq_publisher_lib PRIVATE picoquic-core)
     endif()
-    if(TARGET picohttp-core AND (APPLE OR CMAKE_VERSION VERSION_LESS "3.24"))
+    if(TARGET picohttp-core AND (APPLE OR WIN32 OR CMAKE_VERSION VERSION_LESS "3.24"))
         target_link_libraries(openmoq_publisher_lib PRIVATE picohttp-core)
         target_include_directories(openmoq_publisher_lib PRIVATE "${OPENMOQ_PICOQUIC_SOURCE_DIR}/picohttp")
+    endif()
+    if(WIN32)
+        target_link_libraries(openmoq_publisher_lib PRIVATE ws2_32 iphlpapi)
     endif()
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(openmoq_publisher_lib PRIVATE -Wall -Wextra -Wpedantic)
+elseif(MSVC)
+    target_compile_options(openmoq_publisher_lib PRIVATE /W4 /WX- /utf-8)
 endif()
 
 add_executable(openmoq-publisher src/main.cpp)
