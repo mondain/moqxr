@@ -609,4 +609,104 @@ void emit_plan_objects(const PublishPlan& plan,
     manifest << render_publish_plan(plan);
 }
 
+LiveCatalog build_live_catalog(const std::vector<TrackDescription>& tracks,
+                               std::span<const std::uint8_t> init_segment,
+                               bool is_live) {
+    // Local base64 encoder
+    auto local_base64_encode = [](std::span<const std::uint8_t> bytes) -> std::string {
+        static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string result;
+        result.reserve(((bytes.size() + 2) / 3) * 4);
+        for (std::size_t i = 0; i < bytes.size(); i += 3) {
+            const std::uint32_t b0 = bytes[i];
+            const std::uint32_t b1 = i + 1 < bytes.size() ? bytes[i + 1] : 0;
+            const std::uint32_t b2 = i + 2 < bytes.size() ? bytes[i + 2] : 0;
+            result.push_back(kAlphabet[b0 >> 2]);
+            result.push_back(kAlphabet[((b0 & 0x3) << 4) | (b1 >> 4)]);
+            result.push_back(i + 1 < bytes.size() ? kAlphabet[((b1 & 0xf) << 2) | (b2 >> 6)] : '=');
+            result.push_back(i + 2 < bytes.size() ? kAlphabet[b2 & 0x3f] : '=');
+        }
+        return result;
+    };
+
+    auto local_json_escape = [](std::string_view s) -> std::string {
+        std::string result;
+        result.reserve(s.size());
+        for (char c : s) {
+            switch (c) {
+                case '"': result += "\\\""; break;
+                case '\\': result += "\\\\"; break;
+                case '\n': result += "\\n"; break;
+                case '\r': result += "\\r"; break;
+                case '\t': result += "\\t"; break;
+                default: result += c; break;
+            }
+        }
+        return result;
+    };
+
+    auto local_track_role = [](std::string_view handler_type) -> std::string_view {
+        if (handler_type == "vide") return "video";
+        if (handler_type == "soun") return "audio";
+        if (handler_type == "meta") return "data";
+        return "data";
+    };
+
+    LiveCatalog result;
+
+    // For live streaming, use full init segment for all tracks (simpler than building track-specific)
+    const std::string full_init_base64 = local_base64_encode(init_segment);
+    for (const auto& track : tracks) {
+        result.track_initializations.push_back({
+            .track_name = track.track_name,
+            .codec_payload = {},
+            .init_segment = std::vector<std::uint8_t>(init_segment.begin(), init_segment.end()),
+        });
+    }
+
+    // Build catalog JSON
+    std::ostringstream catalog;
+    catalog << "{";
+    catalog << "\"version\":1,";
+    catalog << "\"format\":\"cmsf\",";
+    catalog << "\"tracks\":[";
+    bool first_track = true;
+    for (const auto& track : tracks) {
+        if (!first_track) {
+            catalog << ',';
+        }
+        first_track = false;
+
+        catalog << '{'
+                << "\"name\":\"" << local_json_escape(track.track_name) << "\","
+                << "\"id\":" << track.track_id << ','
+                << "\"role\":\"" << local_track_role(track.handler_type) << "\","
+                << "\"packaging\":\"" << local_json_escape(track.packaging) << "\","
+                << "\"renderGroup\":1,"
+                << "\"isLive\":" << (is_live ? "true" : "false");
+        if (!track.codec.empty()) {
+            catalog << ",\"codec\":\"" << local_json_escape(track.codec) << '"';
+        }
+        if (track.handler_type == "vide") {
+            catalog << ",\"width\":" << track.width
+                    << ",\"height\":" << track.height;
+            if (track.frame_rate > 0.0) {
+                catalog << std::fixed << std::setprecision(2) << ",\"frameRate\":" << track.frame_rate;
+            }
+        } else if (track.handler_type == "soun") {
+            catalog << ",\"sampleRate\":" << track.sample_rate
+                    << ",\"channelCount\":" << track.channel_count;
+        }
+        // Use full init segment for all tracks
+        catalog << ",\"initData\":\"" << full_init_base64 << '"';
+        catalog << '}';
+    }
+    catalog << "]}";
+
+    const std::string catalog_text = catalog.str();
+    result.catalog_payload = std::vector<std::uint8_t>(catalog_text.begin(), catalog_text.end());
+
+    return result;
+}
+
 }  // namespace openmoq::publisher

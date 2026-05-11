@@ -48,4 +48,13 @@ void emit_plan_objects(const PublishPlan& plan,
                        std::span<const std::uint8_t> bytes,
                        const std::filesystem::path& output_dir);
 
+// Build catalog JSON and track-specific init segments for live streaming
+struct LiveCatalog {
+    std::vector<std::uint8_t> catalog_payload;
+    std::vector<TrackInitialization> track_initializations;
+};
+LiveCatalog build_live_catalog(const std::vector<TrackDescription>& tracks,
+                               std::span<const std::uint8_t> init_segment,
+                               bool is_live = true);
+
 }  // namespace openmoq::publisher
