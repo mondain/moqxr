@@ -756,4 +756,80 @@ std::span<const std::uint8_t> slice_bytes(std::span<const std::uint8_t> bytes, c
     return bytes.subspan(span.offset, span.size);
 }
 
+// --- StreamingMp4Reader ---
+
+void StreamingMp4Reader::append(const std::uint8_t* data, std::size_t len) {
+    buffer_.insert(buffer_.end(), data, data + len);
+}
+
+std::size_t StreamingMp4Reader::read_from(std::istream& input, std::size_t chunk_size) {
+    const std::size_t old_size = buffer_.size();
+    buffer_.resize(old_size + chunk_size);
+    input.read(reinterpret_cast<char*>(buffer_.data() + old_size),
+               static_cast<std::streamsize>(chunk_size));
+    const auto bytes_read = static_cast<std::size_t>(input.gcount());
+    buffer_.resize(old_size + bytes_read);
+    return bytes_read;
+}
+
+std::optional<StreamingBoxResult> StreamingMp4Reader::next_box() {
+    const std::size_t avail = buffer_.size() - consumed_;
+    if (avail < 8) {
+        return std::nullopt;
+    }
+
+    const std::uint8_t* p = buffer_.data() + consumed_;
+
+    const std::uint32_t small_size =
+        (static_cast<std::uint32_t>(p[0]) << 24U) |
+        (static_cast<std::uint32_t>(p[1]) << 16U) |
+        (static_cast<std::uint32_t>(p[2]) << 8U) |
+        static_cast<std::uint32_t>(p[3]);
+
+    std::string type(reinterpret_cast<const char*>(p + 4), 4);
+
+    std::uint64_t box_size = small_size;
+    if (small_size == 1) {
+        if (avail < 16) {
+            return std::nullopt;
+        }
+        box_size = 0;
+        for (int i = 0; i < 8; ++i) {
+            box_size = (box_size << 8U) | p[8 + i];
+        }
+        if (box_size < 16) {
+            throw std::runtime_error("impossible extended box size");
+        }
+    } else if (small_size == 0) {
+        // size==0 means "runs to EOF"; can't handle incrementally unless
+        // we have all remaining data. Return nullopt to wait for more data.
+        return std::nullopt;
+    } else if (small_size < 8) {
+        throw std::runtime_error("impossible MP4 box size");
+    }
+
+    if (avail < box_size) {
+        return std::nullopt;
+    }
+
+    StreamingBoxResult result;
+    result.type = std::move(type);
+    result.bytes.assign(p, p + static_cast<std::size_t>(box_size));
+    consumed_ += static_cast<std::size_t>(box_size);
+
+    if (consumed_ > 64 * 1024) {
+        compact();
+    }
+
+    return result;
+}
+
+void StreamingMp4Reader::compact() {
+    if (consumed_ == 0) {
+        return;
+    }
+    buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(consumed_));
+    consumed_ = 0;
+}
+
 }  // namespace openmoq::publisher

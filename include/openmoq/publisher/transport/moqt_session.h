@@ -3,6 +3,7 @@
 #include "openmoq/publisher/cmsf_packager.h"
 #include "openmoq/publisher/transport/publisher_transport.h"
 
+#include <iosfwd>
 #include <optional>
 #include <chrono>
 #include <span>
@@ -31,6 +32,9 @@ public:
 
     TransportStatus connect(const EndpointConfig& endpoint, const TlsConfig& tls);
     TransportStatus publish(const openmoq::publisher::PublishPlan& plan);
+    TransportStatus publish_live(std::istream& input,
+                                 openmoq::publisher::DraftVersion draft_version,
+                                 bool split_cmaf_chunks);
     TransportStatus close(std::uint64_t application_error_code = 0);
 
 private:

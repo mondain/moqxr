@@ -1005,4 +1005,149 @@ std::size_t payload_size(const PayloadBuffer& payload) {
     return payload.owned_bytes.empty() ? payload.span.size : payload.owned_bytes.size();
 }
 
+MediaFragment build_live_fragment(std::span<const std::uint8_t> moof_bytes,
+                                  std::span<const std::uint8_t> mdat_bytes,
+                                  const std::vector<TrackDescription>& tracks,
+                                  std::size_t group_id) {
+    // Extract timing data directly from the standalone moof bytes.
+    // For fragmented MP4 from ffmpeg, tfhd carries default_sample_flags so we
+    // do not need to look up trex defaults from the init segment.
+    const std::vector<Mp4Box> moof_boxes = parse_mp4_boxes(moof_bytes);
+    if (moof_boxes.empty() || moof_boxes.front().type != "moof") {
+        throw std::runtime_error("build_live_fragment: expected moof box");
+    }
+    const Mp4Box& moof = moof_boxes.front();
+
+    // Extract track name from moof -> traf -> tfhd -> track_id.
+    const std::string track_name = fragment_track_name(moof, tracks, moof_bytes);
+
+    // Extract timing information directly from moof bytes.
+    const TrackDescription* track_desc = fragment_track_description(moof, tracks, moof_bytes);
+    if (track_desc == nullptr || track_desc->timescale == 0) {
+        throw std::runtime_error("build_live_fragment: cannot find track for fragment");
+    }
+
+    const Mp4Box* traf = find_child_box(moof, "traf");
+    if (traf == nullptr) {
+        throw std::runtime_error("build_live_fragment: moof has no traf");
+    }
+
+    std::uint64_t base_decode_time = 0;
+    if (const Mp4Box* tfdt = find_child_box(*traf, "tfdt")) {
+        const std::uint8_t version = moof_bytes[tfdt->payload.offset];
+        const std::size_t time_offset = tfdt->payload.offset + 4;
+        if (version == 1 && time_offset + 8 <= moof_bytes.size()) {
+            std::uint64_t val = 0;
+            for (int i = 0; i < 8; ++i) {
+                val = (val << 8U) | moof_bytes[time_offset + i];
+            }
+            base_decode_time = val;
+        } else if (time_offset + 4 <= moof_bytes.size()) {
+            base_decode_time = read_be32(moof_bytes, time_offset);
+        }
+    }
+
+    std::uint32_t default_sample_duration = 0;
+    std::uint32_t default_sample_flags = 0x02000000U;
+    if (const Mp4Box* tfhd = find_child_box(*traf, "tfhd")) {
+        const std::uint32_t flags = read_full_box_flags(*tfhd, moof_bytes);
+        std::size_t cursor = tfhd->payload.offset + 8;
+        if ((flags & 0x000001U) != 0) cursor += 8;
+        if ((flags & 0x000002U) != 0) cursor += 4;
+        if ((flags & 0x000008U) != 0 && cursor + 4 <= moof_bytes.size()) {
+            default_sample_duration = read_be32(moof_bytes, cursor);
+            cursor += 4;
+        }
+        if ((flags & 0x000010U) != 0 && cursor + 4 <= moof_bytes.size()) {
+            cursor += 4;
+        }
+        if ((flags & 0x000020U) != 0 && cursor + 4 <= moof_bytes.size()) {
+            default_sample_flags = read_be32(moof_bytes, cursor);
+        }
+    }
+
+    std::uint64_t duration = 0;
+    std::uint64_t earliest_presentation_time = base_decode_time;
+    bool earliest_presentation_time_set = false;
+    std::uint32_t first_sample_flags = default_sample_flags;
+    if (const Mp4Box* trun = find_child_box(*traf, "trun")) {
+        const std::uint32_t flags = read_full_box_flags(*trun, moof_bytes);
+        std::size_t cursor = trun->payload.offset + 4;
+        if (cursor + 4 <= moof_bytes.size()) {
+            const std::uint32_t sample_count = read_be32(moof_bytes, cursor);
+            cursor += 4;
+            if ((flags & 0x000001U) != 0) cursor += 4;
+            bool first_sample_flags_present = false;
+            if ((flags & 0x000004U) != 0) {
+                first_sample_flags = read_be32_or_zero(moof_bytes, cursor);
+                first_sample_flags_present = true;
+                cursor += 4;
+            }
+            std::uint64_t sample_decode_time = base_decode_time;
+            for (std::uint32_t i = 0; i < sample_count && cursor <= moof_bytes.size(); ++i) {
+                std::uint32_t sample_duration = default_sample_duration;
+                if ((flags & 0x000100U) != 0 && cursor + 4 <= moof_bytes.size()) {
+                    sample_duration = read_be32(moof_bytes, cursor);
+                    cursor += 4;
+                }
+
+                if ((flags & 0x000200U) != 0) cursor += 4;  // skip sample_size
+                std::uint32_t sample_flags = first_sample_flags_present && i == 0
+                                                 ? first_sample_flags : default_sample_flags;
+                if ((flags & 0x000400U) != 0 && cursor + 4 <= moof_bytes.size()) {
+                    sample_flags = read_be32(moof_bytes, cursor);
+                    cursor += 4;
+                }
+                std::int32_t composition_offset = 0;
+                if ((flags & 0x000800U) != 0 && cursor + 4 <= moof_bytes.size()) {
+                    composition_offset = static_cast<std::int32_t>(read_be32(moof_bytes, cursor));
+                    cursor += 4;
+                }
+                const std::int64_t pt_signed =
+                    static_cast<std::int64_t>(sample_decode_time) + static_cast<std::int64_t>(composition_offset);
+                const std::uint64_t pt = pt_signed < 0 ? 0 : static_cast<std::uint64_t>(pt_signed);
+                if (!earliest_presentation_time_set || pt < earliest_presentation_time) {
+                    earliest_presentation_time = pt;
+                    earliest_presentation_time_set = true;
+                }
+                if (i == 0 && (flags & 0x000400U) != 0) {
+                    first_sample_flags = sample_flags;
+                }
+                duration += sample_duration;
+                sample_decode_time += sample_duration;
+            }
+        }
+    }
+
+    std::uint8_t sap_type = 0;
+    const bool first_sample_is_sync = (first_sample_flags & 0x00010000U) == 0;
+    const bool is_video = (track_desc->handler_type == "vide");
+    if (!is_video) {
+        sap_type = 1;
+    } else if (first_sample_is_sync) {
+        sap_type = 2;
+    }
+
+    // A video keyframe: video track with sync first sample
+    const bool is_video_keyframe = is_video && first_sample_is_sync;
+
+    // Combine moof+mdat into a single owned payload (CMSF compliance).
+    std::vector<std::uint8_t> payload;
+    payload.reserve(moof_bytes.size() + mdat_bytes.size());
+    payload.insert(payload.end(), moof_bytes.begin(), moof_bytes.end());
+    payload.insert(payload.end(), mdat_bytes.begin(), mdat_bytes.end());
+
+    return MediaFragment{
+        .group_id = group_id,
+        .object_id = 0,
+        .track_name = track_name,
+        .start_time_us = scale_to_us(base_decode_time, track_desc->timescale),
+        .duration_us = scale_to_us(duration, track_desc->timescale),
+        .earliest_presentation_time_us = scale_to_us(earliest_presentation_time, track_desc->timescale),
+        .sap_type = sap_type,
+        .is_video_keyframe = is_video_keyframe,
+        .payload = {.span = {}, .owned_bytes = std::move(payload)},
+    };
+}
+
 }  // namespace openmoq::publisher

@@ -1,5 +1,7 @@
 #include "openmoq/publisher/transport/moqt_session.h"
 #include "openmoq/publisher/transport/moqt_control_messages.h"
+#include "openmoq/publisher/cmaf_segmenter.h"
+#include "openmoq/publisher/mp4_box.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1089,6 +1091,18 @@ public:
 
     std::uint64_t stream_count() const { return stream_count_; }
 
+    // FIN all currently open streams (used when transitioning to a new group).
+    TransportStatus finish_group(PublisherTransport& transport) {
+        for (auto& [key, stream] : streams_) {
+            TransportStatus status = transport.write_stream(stream.stream_id, {}, true);
+            if (!status.ok) {
+                return status;
+            }
+        }
+        streams_.clear();
+        return TransportStatus::success();
+    }
+
 private:
     struct Key {
         std::uint64_t group_id;
@@ -2173,6 +2187,482 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
                                pending_control_bytes_);
 }
 
+TransportStatus MoqtSession::publish_live(std::istream& input,
+                                           openmoq::publisher::DraftVersion draft_version,
+                                           bool /*split_cmaf_chunks*/) {
+    if (transport_.state() != ConnectionState::kConnected) {
+        return TransportStatus::failure("transport is not connected");
+    }
+
+    TransportStatus status = ensure_setup(draft_version);
+    if (!status.ok) {
+        return status;
+    }
+    std::cout << "connection_id=" << transport_.connection_id() << '\n' << std::flush;
+
+    // Phase 1: Read stdin until we have ftyp + moov (track discovery).
+    openmoq::publisher::StreamingMp4Reader reader;
+    std::vector<std::uint8_t> ftyp_bytes;
+    std::vector<std::uint8_t> moov_bytes;
+    std::vector<openmoq::publisher::TrackDescription> tracks;
+    std::vector<openmoq::publisher::Mp4Box> init_top_level_boxes;
+
+    std::cerr << "[moqt-session] live: waiting for ftyp+moov from stdin...\n";
+
+    while (ftyp_bytes.empty() || moov_bytes.empty()) {
+        const std::size_t bytes_read = reader.read_from(input);
+        if (bytes_read == 0 && ftyp_bytes.empty()) {
+            return TransportStatus::failure("stdin EOF before ftyp box");
+        }
+        if (bytes_read == 0 && moov_bytes.empty()) {
+            return TransportStatus::failure("stdin EOF before moov box");
+        }
+
+        while (auto box = reader.next_box()) {
+            if (box->type == "ftyp") {
+                ftyp_bytes = std::move(box->bytes);
+            } else if (box->type == "moov") {
+                moov_bytes = std::move(box->bytes);
+                break;  // Stop consuming boxes; remaining data is for Phase 4.
+            }
+            // Skip other pre-moov boxes (e.g. free, styp)
+        }
+    }
+
+    // Build initialization segment (ftyp + moov)
+    std::vector<std::uint8_t> init_segment;
+    init_segment.reserve(ftyp_bytes.size() + moov_bytes.size());
+    init_segment.insert(init_segment.end(), ftyp_bytes.begin(), ftyp_bytes.end());
+    init_segment.insert(init_segment.end(), moov_bytes.begin(), moov_bytes.end());
+
+    init_top_level_boxes = openmoq::publisher::parse_mp4_boxes(init_segment);
+    tracks = openmoq::publisher::extract_tracks(init_top_level_boxes, init_segment);
+    if (tracks.empty()) {
+        return TransportStatus::failure("no tracks found in moov box");
+    }
+
+    std::cerr << "[moqt-session] live: discovered " << tracks.size() << " track(s): "
+              << openmoq::publisher::summarize_tracks(tracks) << '\n';
+
+    // Build catalog and init data
+    openmoq::publisher::LiveCatalog live_catalog =
+        openmoq::publisher::build_live_catalog(tracks, init_segment, true);
+
+    // Phase 2: Publish namespace + PUBLISH all tracks
+    NamespaceMessage namespace_message{
+        .draft = draft_version,
+        .track_namespace = track_namespace_,
+        .request_id = 0,
+    };
+    status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
+    if (!status.ok) {
+        return status;
+    }
+    status = collect_control_acknowledgements(
+        transport_, control_stream_id_, draft_version, 1, 0, pending_control_bytes_);
+    if (!status.ok) {
+        return status;
+    }
+
+    // Build track alias map (self-assigned, matching legacy serve_subscriptions behavior)
+    std::map<std::string, std::uint64_t> alias_by_track;
+    std::uint64_t next_alias = 0;
+    alias_by_track.emplace("catalog", next_alias++);
+    for (const auto& track : tracks) {
+        alias_by_track.emplace(track.track_name, next_alias++);
+    }
+
+    std::cerr << "[moqt-session] live: awaiting subscriptions, mode="
+              << (auto_forward_ ? "forward" : "await-subscribe") << '\n';
+
+    // Phase 3: Catalog will be sent when a SUBSCRIBE arrives for it.
+    // The relay forwards SUBSCRIBE to us; we respond with SUBSCRIBE_OK,
+    // send data, then PUBLISH_DONE -- matching the legacy serve_subscriptions flow.
+    bool catalog_sent = false;
+
+    auto send_catalog = [&](std::uint64_t track_alias) -> TransportStatus {
+        if (catalog_sent) {
+            return TransportStatus::success();
+        }
+        const openmoq::publisher::CmsfObject catalog_object{
+            .kind = openmoq::publisher::CmsfObjectKind::kInitialization,
+            .track_name = "catalog",
+            .group_id = 0,
+            .subgroup_id = 0,
+            .object_id = 0,
+            .media_time_us = 0,
+            .media_duration_us = 0,
+            .payload = {},
+            .owned_payload = live_catalog.catalog_payload,
+        };
+        SubgroupSenderState catalog_sender;
+        TransportStatus cat_status = catalog_sender.serve(
+            transport_, draft_version, track_alias, 0,
+            catalog_object, true, true,
+            std::span<const std::uint8_t>(live_catalog.catalog_payload));
+        if (!cat_status.ok) {
+            return cat_status;
+        }
+        catalog_sent = true;
+        std::cerr << "[moqt-session] live: catalog published (" << live_catalog.catalog_payload.size() << " bytes)\n";
+        return TransportStatus::success();
+    };
+
+    // Phase 4: Stream media from stdin.
+    // Use a reader thread so we can also handle control messages.
+    struct LiveMediaQueue {
+        std::mutex mutex;
+        std::deque<openmoq::publisher::MediaFragment> fragments;
+        bool eof = false;
+    };
+    auto queue = std::make_shared<LiveMediaQueue>();
+
+    std::thread stdin_thread([&reader, &input, &tracks, queue]() {
+        std::vector<std::uint8_t> pending_moof;
+        std::size_t shared_group_id = 0;
+        std::map<std::string, std::size_t> object_id_in_group;  // per track, resets on new group
+        bool first_keyframe_seen = false;
+
+        while (true) {
+            const std::size_t bytes_read = reader.read_from(input);
+
+            while (auto box = reader.next_box()) {
+                if (box->type == "moof") {
+                    pending_moof = std::move(box->bytes);
+                } else if (box->type == "mdat") {
+                    if (pending_moof.empty()) {
+                        std::cerr << "[moqt-session] live: mdat without preceding moof, skipping\n";
+                        continue;
+                    }
+                    try {
+                        // Build fragment (group_id=0 placeholder, we'll assign below)
+                        auto fragment = openmoq::publisher::build_live_fragment(
+                            pending_moof, box->bytes, tracks, 0);
+
+                        // Keyframe-based grouping:
+                        // When a video keyframe arrives, start a new group for ALL tracks.
+                        if (fragment.is_video_keyframe) {
+                            if (first_keyframe_seen) {
+                                ++shared_group_id;
+                            }
+                            first_keyframe_seen = true;
+                            // Reset object counters for all tracks on new group
+                            object_id_in_group.clear();
+                        }
+
+                        if (!first_keyframe_seen) {
+                            // Drop fragments before first keyframe (can't decode without IDR)
+                            pending_moof.clear();
+                            continue;
+                        }
+
+                        // Assign shared group_id and per-track object_id
+                        fragment.group_id = shared_group_id;
+                        fragment.object_id = object_id_in_group[fragment.track_name]++;
+
+                        {
+                            std::lock_guard<std::mutex> lock(queue->mutex);
+                            queue->fragments.push_back(std::move(fragment));
+                            // Trim queue: keep only fragments from the latest 2 groups.
+                            // This prevents unbounded backlog when ffmpeg encodes
+                            // faster than realtime, while keeping enough data for
+                            // A/V sync (audio from the previous group).
+                            if (!queue->fragments.empty()) {
+                                const std::size_t latest = queue->fragments.back().group_id;
+                                const std::size_t min_keep = latest > 1 ? latest - 1 : 0;
+                                while (!queue->fragments.empty() &&
+                                       queue->fragments.front().group_id < min_keep) {
+                                    queue->fragments.pop_front();
+                                }
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "[moqt-session] live: fragment parse error: " << e.what() << '\n';
+                    }
+                    pending_moof.clear();
+                }
+                // Skip other box types (styp, free, etc.)
+            }
+
+            if (bytes_read == 0) {
+                std::lock_guard<std::mutex> lock(queue->mutex);
+                queue->eof = true;
+                break;
+            }
+        }
+    });
+
+    // Main loop: drain queue and publish fragments
+    std::map<std::string, SubgroupSenderState> sender_by_track;
+    std::map<std::uint64_t, SubscribeMessage> active_subscriptions;
+    std::set<std::string> subscribed_tracks;
+
+    auto drain_queue = [&]() -> TransportStatus {
+        // Send all available fragments. The queue is bounded by stdin_thread's
+        // trim logic (keeps at most the latest 2 groups), so we never burst
+        // more than ~4 fragments (2 groups × 2 tracks) at a time.
+        // No pacing needed: trimming prevents backlog accumulation and
+        // ffmpeg's realtime encoding rate naturally limits throughput.
+        while (true) {
+            openmoq::publisher::MediaFragment fragment;
+            {
+                std::lock_guard<std::mutex> lock(queue->mutex);
+                if (queue->fragments.empty()) break;
+                fragment = std::move(queue->fragments.front());
+                queue->fragments.pop_front();
+            }
+
+            // Only send data for tracks that have an active subscription.
+            if (!subscribed_tracks.count(fragment.track_name)) {
+                continue;
+            }
+
+            const auto alias_it = alias_by_track.find(fragment.track_name);
+            if (alias_it == alias_by_track.end()) {
+                continue;
+            }
+
+            const openmoq::publisher::CmsfObject object{
+                .kind = openmoq::publisher::CmsfObjectKind::kMedia,
+                .track_name = fragment.track_name,
+                .group_id = fragment.group_id,
+                .subgroup_id = 0,
+                .object_id = fragment.object_id,
+                .media_time_us = fragment.start_time_us,
+                .media_duration_us = fragment.duration_us,
+                .payload = {},
+                .owned_payload = fragment.payload.owned_bytes,
+            };
+
+            const std::uint64_t send_seq = next_send_seq();
+            const std::span<const std::uint8_t> payload(fragment.payload.owned_bytes);
+
+            // Each fragment is a single object; FIN the stream immediately.
+            // With keyframe-based grouping each group typically has only 1 object
+            // per track (since GOP interval = fragment duration).
+            TransportStatus write_status = sender_by_track[fragment.track_name].serve(
+                transport_, draft_version, alias_it->second, send_seq,
+                object, true, true, payload);
+            if (!write_status.ok) {
+                return write_status;
+            }
+            std::cerr << "[moqt-session] live: sent track=" << fragment.track_name
+                      << " group=" << fragment.group_id
+                      << " obj=" << fragment.object_id
+                      << " time_us=" << fragment.start_time_us
+                      << " bytes=" << fragment.payload.owned_bytes.size()
+                      << " sap=" << static_cast<unsigned int>(fragment.sap_type) << '\n';
+        }
+        return TransportStatus::success();
+    };
+
+    // Helper: process pending SUBSCRIBE/SUBSCRIBE_NAMESPACE messages
+    // from the control stream. Returns the number of new subscriptions accepted.
+    auto process_control_messages = [&]() -> std::pair<TransportStatus, std::size_t> {
+        std::size_t new_subs = 0;
+        std::size_t message_size = 0;
+        while (next_control_message(pending_control_bytes_, draft_version, message_size)) {
+            const std::vector<std::uint8_t> message_bytes(
+                pending_control_bytes_.begin(),
+                pending_control_bytes_.begin() + static_cast<std::ptrdiff_t>(message_size));
+            std::size_t offset = 0;
+            std::uint64_t message_type = 0;
+            if (!decode_varint(message_bytes, offset, message_type)) {
+                return {TransportStatus::failure("failed to parse control request type"), 0};
+            }
+            trace_control_message(message_bytes, draft_version);
+
+            if (message_type == 0x03) {  // SUBSCRIBE
+                SubscribeMessage subscribe;
+                if (!decode_subscribe_message(message_bytes, draft_version, subscribe)) {
+                    return {TransportStatus::failure("received invalid SUBSCRIBE"), 0};
+                }
+
+                const auto track_it = alias_by_track.find(subscribe.track_name);
+                if (track_it == alias_by_track.end()) {
+                    auto ws = transport_.write_stream(control_stream_id_,
+                        encode_subscribe_error_message(subscribe.request_id, 0x2, "track does not exist"), false);
+                    if (!ws.ok) {
+                        return {ws, 0};
+                    }
+                } else {
+                    auto ws = transport_.write_stream(control_stream_id_,
+                        encode_subscribe_ok_message(draft_version, subscribe.request_id,
+                                                    track_it->second, 0, 0, false), false);
+                    if (!ws.ok) {
+                        return {ws, 0};
+                    }
+                    active_subscriptions.emplace(subscribe.request_id, subscribe);
+                    ++new_subs;
+                    std::cerr << "[moqt-session] live: accepted subscribe track=" << subscribe.track_name
+                              << " request_id=" << subscribe.request_id << '\n';
+
+                    // Catalog is a one-shot track: send data + PUBLISH_DONE immediately
+                    if (subscribe.track_name == "catalog") {
+                        ws = send_catalog(track_it->second);
+                        if (!ws.ok) {
+                            return {ws, 0};
+                        }
+                        ws = transport_.write_stream(control_stream_id_,
+                            encode_publish_done_message(subscribe.request_id, 1), false);
+                        if (!ws.ok) {
+                            return {ws, 0};
+                        }
+                    } else {
+                        // Only add media tracks to subscribed_tracks (not catalog).
+                        // This gates drain_queue until media is actually subscribed.
+                        subscribed_tracks.insert(subscribe.track_name);
+                    }
+                }
+            } else if (message_type == 0x11) {  // SUBSCRIBE_NAMESPACE
+                SubscribeNamespaceMessage subscribe_namespace;
+                if (decode_subscribe_namespace_message(message_bytes, draft_version, subscribe_namespace)) {
+                    auto ws = transport_.write_stream(control_stream_id_,
+                        encode_subscribe_namespace_ok_message(draft_version, subscribe_namespace.request_id), false);
+                    if (!ws.ok) {
+                        return {ws, 0};
+                    }
+                }
+            }
+            // Skip other message types
+
+            pending_control_bytes_.erase(
+                pending_control_bytes_.begin(),
+                pending_control_bytes_.begin() + static_cast<std::ptrdiff_t>(message_size));
+        }
+        return {TransportStatus::success(), new_subs};
+    };
+
+    if (auto_forward_) {
+        // Forward mode: wait for subscriptions, then stream objects as they arrive
+        while (true) {
+            // Only drain media after at least one non-catalog track is subscribed
+            if (!subscribed_tracks.empty()) {
+                status = drain_queue();
+                if (!status.ok) {
+                    stdin_thread.join();
+                    return status;
+                }
+            }
+
+            bool is_eof;
+            {
+                std::lock_guard<std::mutex> lock(queue->mutex);
+                is_eof = queue->eof && queue->fragments.empty();
+            }
+            if (is_eof && !subscribed_tracks.empty()) {
+                break;
+            }
+
+            // Brief sleep to avoid busy-waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            // Read and process control messages (SUBSCRIBE, SUBSCRIBE_NAMESPACE)
+            std::vector<std::uint8_t> chunk;
+            bool fin = false;
+            const TransportStatus read_status =
+                transport_.read_stream(control_stream_id_, chunk, fin, std::chrono::milliseconds(0));
+            if (read_status.ok && !chunk.empty()) {
+                pending_control_bytes_.insert(pending_control_bytes_.end(), chunk.begin(), chunk.end());
+            }
+            auto [ctrl_status, new_subs] = process_control_messages();
+            if (!ctrl_status.ok) {
+                stdin_thread.join();
+                return ctrl_status;
+            }
+        }
+    } else {
+        // Await-subscribe mode: wait for subscriptions, then stream
+        bool fin = false;
+
+        while (true) {
+            bool is_eof;
+            {
+                std::lock_guard<std::mutex> lock(queue->mutex);
+                is_eof = queue->eof && queue->fragments.empty();
+            }
+            if (is_eof && !active_subscriptions.empty()) {
+                // Drain remaining
+                status = drain_queue();
+                if (!status.ok) {
+                    stdin_thread.join();
+                    return status;
+                }
+                break;
+            }
+
+            // Read control messages
+            std::vector<std::uint8_t> chunk;
+            bool immediate_fin = false;
+            const auto read_timeout = active_subscriptions.empty()
+                                          ? subscriber_timeout_
+                                          : std::chrono::milliseconds(0);
+            const TransportStatus read_status =
+                transport_.read_stream(control_stream_id_, chunk, immediate_fin, read_timeout);
+
+            if (read_status.ok) {
+                pending_control_bytes_.insert(pending_control_bytes_.end(), chunk.begin(), chunk.end());
+                fin = immediate_fin;
+            } else if (read_status.message == "timed out waiting for stream data" ||
+                       read_status.message == "no queued read for stream") {
+                if (active_subscriptions.empty()) {
+                    std::cerr << "[moqt-session] live: no subscribers before timeout\n";
+                    break;
+                }
+            } else {
+                stdin_thread.join();
+                return read_status;
+            }
+
+            // Process control messages
+            auto [ctrl_status, new_subs] = process_control_messages();
+            if (!ctrl_status.ok) {
+                stdin_thread.join();
+                return ctrl_status;
+            }
+
+            if (fin) {
+                break;
+            }
+
+            // Drain any available media from the queue
+            if (!subscribed_tracks.empty()) {
+                status = drain_queue();
+                if (!status.ok) {
+                    stdin_thread.join();
+                    return status;
+                }
+            }
+
+            if (active_subscriptions.empty()) {
+                continue;
+            }
+
+            // Small sleep to prevent busy-waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    stdin_thread.join();
+
+    // Send PUBLISH_DONE for each subscribed media track (catalog already handled)
+    for (const auto& [request_id, subscribe] : active_subscriptions) {
+        if (subscribe.track_name == "catalog") {
+            continue;  // Already sent PUBLISH_DONE for catalog
+        }
+        status = transport_.write_stream(control_stream_id_,
+            encode_publish_done_message(request_id, sender_by_track[subscribe.track_name].stream_count()), false);
+        if (!status.ok) {
+            return status;
+        }
+    }
+
+    std::cerr << "[moqt-session] live: stdin EOF, publishing complete\n";
+
+    return transport_.write_stream(control_stream_id_,
+        encode_publish_namespace_done_message(namespace_message), false);
+}
+
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {
     control_stream_open_ = false;
     control_stream_id_ = 0;
@@ -2312,7 +2802,10 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
                 return TransportStatus::failure("received invalid SERVER_SETUP message");
             }
             saw_server_setup = true;
-            if (draft == openmoq::publisher::DraftVersion::kDraft14) {
+            // Accept max_request_id from SERVER_SETUP parameters for both
+            // draft-14 and draft-16. Some relays include it here rather than
+            // (or in addition to) sending a separate MAX_REQUEST_ID message.
+            if (server_setup.max_request_id != 0) {
                 peer_max_request_id_ = server_setup.max_request_id;
             }
         } else if (draft == openmoq::publisher::DraftVersion::kDraft16 && message_type == 0x15) {

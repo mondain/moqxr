@@ -51,26 +51,15 @@ int main(int argc, char** argv) {
 
     try {
         const CliOptions options = parse_cli_options(argc, argv);
-        const ParsedMp4 parsed_mp4 = options.input_source.kind == InputSourceKind::kStdin
-                                         ? parse_mp4_stream(std::cin, "stdin")
-                                         : parse_mp4_file(options.input_source.path.string());
-        const SegmentedMp4 segmented_mp4 = segment_for_cmaf(parsed_mp4,
-                                                            options.split_cmaf_chunks ? CmafObjectMode::kSplit
-                                                                                      : CmafObjectMode::kCoalesced);
-        const PublishPlan plan = build_publish_plan(segmented_mp4, options.draft_version, options.include_sap);
 
-        if (options.dump_plan || !options.emit_dir.has_value()) {
-            std::cout << render_publish_plan(plan);
-        }
+        // Live stdin mode: when reading from stdin with an endpoint, use
+        // incremental streaming instead of buffering everything to EOF.
+        const bool live_stdin = options.input_source.kind == InputSourceKind::kStdin
+                                && options.endpoint.has_value();
 
-        if (options.emit_dir.has_value()) {
-            emit_plan_objects(plan, parsed_mp4.bytes, *options.emit_dir);
-        }
-
-        if (options.endpoint.has_value()) {
+        if (live_stdin) {
             using namespace openmoq::publisher::transport;
 
-            const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
             EndpointConfig endpoint = *options.endpoint;
             endpoint.application_protocol = endpoint.transport == transport::TransportKind::kWebTransport
                                                ? webtransport_protocol_offer(options.draft_version)
@@ -100,9 +89,65 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("transport connect failed: " + status.message);
             }
 
-            status = session.publish(materialized_plan);
+            status = session.publish_live(std::cin, options.draft_version, options.split_cmaf_chunks);
             if (!status.ok) {
-                throw std::runtime_error("transport publish failed: " + status.message);
+                throw std::runtime_error("transport live publish failed: " + status.message);
+            }
+        } else {
+            // Original batch mode: read entire file/stdin, segment, plan, publish.
+            const ParsedMp4 parsed_mp4 = options.input_source.kind == InputSourceKind::kStdin
+                                             ? parse_mp4_stream(std::cin, "stdin")
+                                             : parse_mp4_file(options.input_source.path.string());
+            const SegmentedMp4 segmented_mp4 = segment_for_cmaf(parsed_mp4,
+                                                                options.split_cmaf_chunks ? CmafObjectMode::kSplit
+                                                                                          : CmafObjectMode::kCoalesced);
+            const PublishPlan plan = build_publish_plan(segmented_mp4, options.draft_version, options.include_sap);
+
+            if (options.dump_plan || !options.emit_dir.has_value()) {
+                std::cout << render_publish_plan(plan);
+            }
+
+            if (options.emit_dir.has_value()) {
+                emit_plan_objects(plan, parsed_mp4.bytes, *options.emit_dir);
+            }
+
+            if (options.endpoint.has_value()) {
+                using namespace openmoq::publisher::transport;
+
+                const PublishPlan materialized_plan = materialize_publish_plan(plan, parsed_mp4.bytes);
+                EndpointConfig endpoint = *options.endpoint;
+                endpoint.application_protocol = endpoint.transport == transport::TransportKind::kWebTransport
+                                                   ? webtransport_protocol_offer(options.draft_version)
+                                                   : default_alpn(options.draft_version);
+                if (!options.endpoint_alpn_overridden && endpoint.transport == transport::TransportKind::kRawQuic &&
+                    options.draft_version != DraftVersion::kDraft14) {
+                    endpoint.alpn = default_alpn(options.draft_version);
+                } else if (!options.endpoint_alpn_overridden &&
+                           endpoint.transport == transport::TransportKind::kWebTransport) {
+                    endpoint.alpn = "h3";
+                }
+                auto transport = create_transport(endpoint.transport);
+                if (!transport) {
+                    throw std::runtime_error("failed to create requested transport");
+                }
+                MoqtSession session(
+                    *transport,
+                    options.track_namespace,
+                    options.forward,
+                    options.publish_catalog,
+                    options.paced,
+                    options.loop,
+                    options.subscriber_timeout);
+
+                TransportStatus status = session.connect(endpoint, options.tls);
+                if (!status.ok) {
+                    throw std::runtime_error("transport connect failed: " + status.message);
+                }
+
+                status = session.publish(materialized_plan);
+                if (!status.ok) {
+                    throw std::runtime_error("transport publish failed: " + status.message);
+                }
             }
         }
     } catch (const std::exception& exception) {

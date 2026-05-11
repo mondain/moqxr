@@ -573,6 +573,30 @@ Practical notes:
 - if HEVC samples include in-band parameter sets, the publisher preserves `hev1` because rewriting those samples would be incorrect
 - if you start from a progressive MP4, this project can remux it internally, but pre-fragmented input is still the simpler and more efficient path
 
+### Live fragmented MP4 stdin publishing
+
+For live encoder pipelines, the publisher can consume fragmented MP4 directly from
+standard input.
+
+This live path expects ffmpeg to emit track-separated fragments, where each
+`moof` + `mdat` pair belongs to a single media track. Use `+separate_moof` when
+generating the stream. Without `+separate_moof`, audio and video may be carried
+inside the same `moof`, which is not the intended input layout for the current
+live parser.
+
+```bash
+ffmpeg -stream_loop -1 -re -i bbb_sunflower_1080p_30fps_normal.mp4 \
+  -map 0:v:0 -map 0:a:0 \
+  -c:v libx264 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
+  -c:a aac -b:a 160k -ar 48000 -ac 2 \
+  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
+  -f mp4 - | ./build/openmoq-publisher \
+    --input - \
+    --endpoint moqt://relay.example.com:443/moq \
+    --namespace live/demo \
+    --timeout 120
+```
+
 ## CI
 
 GitHub Actions is configured to build and test the project on:
