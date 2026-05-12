@@ -395,15 +395,15 @@ TransportStatus WebTransportClient::connect() {
         return TransportStatus::failure("webtransport transport is not configured");
     }
 
-#ifndef OPENMOQ_HAS_PICOQUIC
-    state_ = ConnectionState::kFailed;
-    return TransportStatus::failure("picoquic support is not enabled in this build");
-#else
     if (endpoint_->path.empty()) {
         state_ = ConnectionState::kFailed;
         return TransportStatus::failure("webtransport endpoint path must not be empty");
     }
 
+#ifndef OPENMOQ_HAS_PICOQUIC
+    state_ = ConnectionState::kFailed;
+    return TransportStatus::failure("picoquic support is not enabled in this build");
+#else
     state_ = ConnectionState::kConnecting;
 
     int is_name = 0;
