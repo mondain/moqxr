@@ -196,6 +196,12 @@ if(OPENMOQ_BUILD_TESTS)
     target_link_libraries(openmoq-publisher-api-tests PRIVATE openmoq_publisher_lib)
     add_test(NAME openmoq-publisher-api-tests COMMAND openmoq-publisher-api-tests)
 
+    add_executable(openmoq-publisher-control-message-tests
+        tests/moqt_control_messages_test.cpp
+    )
+    target_link_libraries(openmoq-publisher-control-message-tests PRIVATE openmoq_publisher_lib)
+    add_test(NAME openmoq-publisher-control-message-tests COMMAND openmoq-publisher-control-message-tests)
+
     if(OPENMOQ_HAS_PICOQUIC AND OPENMOQ_RUN_PICOQUIC_SMOKE_TESTS)
         add_executable(openmoq-publisher-picoquic-smoke-tests
             tests/picoquic_smoke_test.cpp

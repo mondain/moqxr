@@ -51,6 +51,7 @@ This keeps the project aligned with CMAF-style publication while reusing the sam
 - `tests`: CTest-based unit coverage
 - `docs`: protocol notes and design references
 - `docs/publisher-api.md`: step-by-step application integration guide for the C++ publisher API
+- `docs/draft18-implementation-plan.md`: implementation plan for draft-18 transport support
 - `docs/transport-plan.md`: picoquic integration plan and implementation checklist
 - `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux, macOS, and Windows
 - `.github/workflows/release.yml`: GitHub Actions release-build workflow that uploads Linux, macOS, and Windows archives

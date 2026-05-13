@@ -67,6 +67,13 @@ int main() {
     }
 
     {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--draft", "18"});
+        ok &= expect(options.draft_version == openmoq::publisher::DraftVersion::kDraft18,
+                     "expected --draft 18 to select draft-18 mode");
+    }
+
+    {
         const CliOptions options = parse(
             {"openmoq-publisher", "--input", "sample.mp4", "--endpoint", "203.0.113.10:443", "--sni", "moq-relay.red5.net"});
         ok &= expect(options.endpoint.has_value(), "expected endpoint to be present when parsing --sni");

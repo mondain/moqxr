@@ -21,8 +21,11 @@ DraftVersion parse_draft(std::string_view value) {
     if (value == "16") {
         return DraftVersion::kDraft16;
     }
+    if (value == "18") {
+        return DraftVersion::kDraft18;
+    }
 
-    throw std::runtime_error("unsupported draft value: expected 14 or 16");
+    throw std::runtime_error("unsupported draft value: expected 14, 16, or 18");
 }
 
 transport::TransportKind parse_transport_kind(std::string_view value) {
@@ -194,7 +197,7 @@ CliOptions parse_cli_options(int argc, char** argv) {
 
 std::string build_usage(const char* argv0) {
     return std::string("Usage: ") + argv0 +
-           " --input <mp4|-> [--transport raw|webtransport] [--draft 14|16] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
+           " --input <mp4|-> [--transport raw|webtransport] [--draft 14|16|18] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
            " [--publish-catalog] [--sap] [--coalesce-cmaf-chunks] [--paced] [--loop] [--dump-plan] [--emit-dir <dir>]"
            " [--endpoint host:port|moqt://host:port/path|https://host:port/path] [--alpn value] [--sni value]"
            " [--cert file] [--key file] [--ca file] [--insecure]";

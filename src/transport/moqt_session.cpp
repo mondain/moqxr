@@ -103,6 +103,10 @@ bool is_idle_subscribe_exit(std::string_view message) {
            message == "webtransport connection closed";
 }
 
+bool uses_peer_max_request_id(openmoq::publisher::DraftVersion draft) {
+    return draft != openmoq::publisher::DraftVersion::kDraft18;
+}
+
 std::string hex_dump(std::span<const std::uint8_t> bytes);
 
 TransportStatus try_read_wt_session_stream(PublisherTransport& transport,
@@ -644,6 +648,7 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
     pending_control_bytes.clear();
     std::size_t namespace_responses = 0;
     std::size_t publish_responses = 0;
+    std::set<std::uint64_t> seen_publish_response_ids;
     bool fin = false;
 
     while (namespace_responses < expected_namespace_responses || publish_responses < expected_publish_responses) {
@@ -687,6 +692,13 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
                     return TransportStatus::failure("peer rejected namespace publish: " + message.reason);
                 }
                 if (message.request_id != 0 && publish_responses < expected_publish_responses) {
+                    if (message.request_id % 2 != 0) {
+                        return TransportStatus::failure("received invalid publish request_id in REQUEST_ERROR");
+                    }
+                    if (seen_publish_response_ids.contains(message.request_id)) {
+                        return TransportStatus::failure("received duplicate publish response request_id");
+                    }
+                    seen_publish_response_ids.insert(message.request_id);
                     return TransportStatus::failure("peer rejected track publish: " + message.reason);
                 }
             } else if (message_type == 0x1e && publish_responses < expected_publish_responses) {
@@ -694,6 +706,14 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
                 if (!decode_publish_ok(message_bytes, draft, message)) {
                     return TransportStatus::failure("received invalid PUBLISH_OK");
                 }
+                if (message.request_id == 0 ||
+                    (draft != openmoq::publisher::DraftVersion::kDraft14 && message.request_id % 2 != 0)) {
+                    return TransportStatus::failure("received invalid request_id in PUBLISH_OK");
+                }
+                if (seen_publish_response_ids.contains(message.request_id)) {
+                    return TransportStatus::failure("received duplicate publish response request_id");
+                }
+                seen_publish_response_ids.insert(message.request_id);
                 if (publish_ok_by_request_id != nullptr) {
                     publish_ok_by_request_id->insert_or_assign(message.request_id, message);
                 }
@@ -704,6 +724,14 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
                 if (!decode_publish_error(message_bytes, draft, message)) {
                     return TransportStatus::failure("received invalid PUBLISH_ERROR");
                 }
+                if (message.request_id == 0 ||
+                    (draft != openmoq::publisher::DraftVersion::kDraft14 && message.request_id % 2 != 0)) {
+                    return TransportStatus::failure("received invalid request_id in PUBLISH_ERROR");
+                }
+                if (seen_publish_response_ids.contains(message.request_id)) {
+                    return TransportStatus::failure("received duplicate publish response request_id");
+                }
+                seen_publish_response_ids.insert(message.request_id);
                 return TransportStatus::failure("peer rejected track publish: " + message.reason);
             }
             if (!handled) {
@@ -748,6 +776,147 @@ TransportStatus collect_control_acknowledgements(PublisherTransport& transport,
     deferred_messages.insert(deferred_messages.end(), buffer.begin(), buffer.end());
     pending_control_bytes = std::move(deferred_messages);
     return TransportStatus::success();
+}
+
+TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
+                                             openmoq::publisher::DraftVersion draft,
+                                             std::span<const std::uint8_t> request_bytes,
+                                             bool expect_publish_ack,
+                                             PublishOk* publish_ok = nullptr) {
+    std::size_t request_offset = 0;
+    std::uint64_t request_type = 0;
+    if (!decode_varint(request_bytes, request_offset, request_type)) {
+        return TransportStatus::failure("failed to parse request type for request stream");
+    }
+    std::uint64_t request_stream_id = 0;
+    TransportStatus status = transport.open_stream(StreamDirection::kBidirectional, request_stream_id);
+    if (!status.ok) {
+        return status;
+    }
+    status = transport.write_stream(request_stream_id, request_bytes, false);
+    if (!status.ok) {
+        return status;
+    }
+
+    std::vector<std::uint8_t> buffered;
+    bool fin = false;
+    while (true) {
+        std::vector<std::uint8_t> chunk;
+        status = transport.read_stream(request_stream_id, chunk, fin, std::chrono::seconds(2));
+        if (!status.ok) {
+            return status;
+        }
+        buffered.insert(buffered.end(), chunk.begin(), chunk.end());
+
+        std::size_t consumed = 0;
+        while (consumed < buffered.size()) {
+            std::size_t message_size = 0;
+            if (!next_control_message(std::span<const std::uint8_t>(buffered).subspan(consumed), draft, message_size)) {
+                break;
+            }
+            const std::vector<std::uint8_t> message_bytes(
+                buffered.begin() + static_cast<std::ptrdiff_t>(consumed),
+                buffered.begin() + static_cast<std::ptrdiff_t>(consumed + message_size));
+            consumed += message_size;
+
+            std::size_t response_offset = 0;
+            std::uint64_t response_type = 0;
+            if (!decode_varint(message_bytes, response_offset, response_type)) {
+                return TransportStatus::failure("failed to parse response type on request stream");
+            }
+
+            const bool is_request_error = response_type == 0x05;
+            const bool is_request_ok = response_type == 0x07;
+            const bool is_publish_ok = response_type == 0x1e;
+            const bool is_goaway = response_type == 0x10;
+
+            if (is_goaway) {
+                return TransportStatus::failure("request stream received GOAWAY");
+            }
+
+            bool response_type_allowed = false;
+            if (request_type == 0x06) {  // PUBLISH_NAMESPACE
+                response_type_allowed = is_request_error || is_request_ok;
+            } else if (request_type == 0x1d) {  // PUBLISH
+                response_type_allowed = is_request_error || is_request_ok || is_publish_ok;
+            } else {
+                response_type_allowed = is_request_error || is_request_ok;
+            }
+            if (!response_type_allowed) {
+                return TransportStatus::failure("unexpected response type for request stream");
+            }
+
+            RequestError request_error;
+            if (decode_request_error(message_bytes, draft, request_error)) {
+                return TransportStatus::failure("request failed: " + request_error.reason);
+            }
+
+            if (expect_publish_ack) {
+                PublishOk decoded_publish_ok;
+                if (decode_publish_ok(message_bytes, draft, decoded_publish_ok)) {
+                    if (publish_ok != nullptr) {
+                        *publish_ok = decoded_publish_ok;
+                    }
+                    return TransportStatus::success();
+                }
+            }
+
+            PublishNamespaceOk request_ok;
+            if (decode_request_ok(message_bytes, draft, request_ok)) {
+                if (expect_publish_ack && publish_ok != nullptr) {
+                    publish_ok->forward = 1;
+                    publish_ok->subscriber_priority = 128;
+                    publish_ok->group_order = 0;
+                    publish_ok->filter_type = 0;
+                }
+                if (consumed > 0) {
+                    buffered.erase(buffered.begin(), buffered.begin() + static_cast<std::ptrdiff_t>(consumed));
+                    consumed = 0;
+                }
+                // Request streams are single request/single terminal response.
+                // Reject additional response messages on the same stream.
+                while (true) {
+                    std::vector<std::uint8_t> extra_chunk;
+                    bool extra_fin = false;
+                    const TransportStatus extra_status = transport.read_stream(
+                        request_stream_id, extra_chunk, extra_fin, std::chrono::milliseconds(0));
+                    if (!extra_status.ok) {
+                        if (extra_status.message == "timed out waiting for stream data" ||
+                            extra_status.message == "no queued read for stream") {
+                            return TransportStatus::success();
+                        }
+                        return extra_status;
+                    }
+                    buffered.insert(buffered.end(), extra_chunk.begin(), extra_chunk.end());
+                    std::size_t extra_consumed = 0;
+                    std::size_t extra_message_size = 0;
+                    if (next_control_message(
+                            std::span<const std::uint8_t>(buffered).subspan(extra_consumed), draft, extra_message_size)) {
+                        return TransportStatus::failure("multiple responses on request stream");
+                    }
+                    if (extra_fin && !buffered.empty()) {
+                        return TransportStatus::failure("trailing bytes after request response");
+                    }
+                    if (extra_fin) {
+                        return TransportStatus::success();
+                    }
+                }
+            }
+
+            // Draft-18 request streams are strictly request/response. Any
+            // non-response control message on the same request stream is a
+            // protocol mismatch for the current request.
+            return TransportStatus::failure("unexpected response message on request stream");
+        }
+
+        if (consumed > 0) {
+            buffered.erase(buffered.begin(), buffered.begin() + static_cast<std::ptrdiff_t>(consumed));
+        }
+
+        if (fin) {
+            return TransportStatus::failure("request stream closed before acknowledgement");
+        }
+    }
 }
 
 bool namespace_matches(std::span<const std::string> track_namespace, std::string_view expected) {
@@ -1651,10 +1820,11 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
                                          std::vector<std::uint8_t>& pending_control_bytes) {
     std::map<std::string, std::uint64_t> request_id_by_track;
     std::map<std::string, PublishedTrack> tracks_by_name;
+    std::map<std::uint64_t, PublishOk> publish_ok_by_request_id;
     std::uint64_t next_request_id = 2;
 
     for (const auto& track : tracks) {
-        if (next_request_id > peer_max_request_id) {
+        if (uses_peer_max_request_id(plan.draft.version) && next_request_id > peer_max_request_id) {
             return TransportStatus::failure("peer max_request_id is too small for publish requests");
         }
 
@@ -1671,8 +1841,18 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
             .largest_object_id = track.largest_object_id,
             .content_exists = track.content_exists,
         };
-        const TransportStatus status =
-            transport.write_stream(control_stream_id, encode_track_message(track_message), false);
+        TransportStatus status = TransportStatus::success();
+        if (plan.draft.version == openmoq::publisher::DraftVersion::kDraft18) {
+            PublishOk publish_ok;
+            status = send_request_stream_and_wait(
+                transport, plan.draft.version, encode_track_message(track_message), true, &publish_ok);
+            if (status.ok) {
+                publish_ok.request_id = next_request_id;
+                publish_ok_by_request_id.insert_or_assign(next_request_id, publish_ok);
+            }
+        } else {
+            status = transport.write_stream(control_stream_id, encode_track_message(track_message), false);
+        }
         if (!status.ok) {
             return status;
         }
@@ -1681,16 +1861,18 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         next_request_id += 2;
     }
 
-    std::map<std::uint64_t, PublishOk> publish_ok_by_request_id;
-    TransportStatus status = collect_control_acknowledgements(transport,
-                                                              control_stream_id,
-                                                              plan.draft.version,
-                                                              0,
-                                                              tracks.size(),
-                                                              pending_control_bytes,
-                                                              &publish_ok_by_request_id);
-    if (!status.ok) {
-        return status;
+    TransportStatus status = TransportStatus::success();
+    if (plan.draft.version != openmoq::publisher::DraftVersion::kDraft18) {
+        status = collect_control_acknowledgements(transport,
+                                                  control_stream_id,
+                                                  plan.draft.version,
+                                                  0,
+                                                  tracks.size(),
+                                                  pending_control_bytes,
+                                                  &publish_ok_by_request_id);
+        if (!status.ok) {
+            return status;
+        }
     }
 
     std::map<std::string, SubgroupSenderState> sender_by_track;
@@ -1843,28 +2025,38 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
 
     std::map<std::string, std::uint64_t> request_id_by_track;
     std::map<std::string, PublishedTrack> tracks_by_name;
+    std::map<std::uint64_t, PublishOk> publish_ok_by_request_id;
     std::uint64_t next_request_id = 2;
 
     for (const auto& track : tracks) {
-        if (next_request_id > peer_max_request_id) {
+        if (uses_peer_max_request_id(plan.draft.version) && next_request_id > peer_max_request_id) {
             return TransportStatus::failure("peer max_request_id is too small for publish requests");
         }
 
         request_id_by_track.emplace(track.name, next_request_id);
         tracks_by_name.emplace(track.name, track);
-        const TransportStatus status =
-            transport.write_stream(control_stream_id,
-                                   encode_track_message({
-                                       .draft = plan.draft.version,
-                                       .track_name = track.name,
-                                       .track_namespace = std::string(track_namespace),
-                                       .request_id = next_request_id,
-                                       .track_alias = track.alias,
-                                       .largest_group_id = track.largest_group_id,
-                                       .largest_object_id = track.largest_object_id,
-                                       .content_exists = track.content_exists,
-                                   }),
-                                   false);
+        const TrackMessage track_message{
+            .draft = plan.draft.version,
+            .track_name = track.name,
+            .track_namespace = std::string(track_namespace),
+            .request_id = next_request_id,
+            .track_alias = track.alias,
+            .largest_group_id = track.largest_group_id,
+            .largest_object_id = track.largest_object_id,
+            .content_exists = track.content_exists,
+        };
+        TransportStatus status = TransportStatus::success();
+        if (plan.draft.version == openmoq::publisher::DraftVersion::kDraft18) {
+            PublishOk publish_ok;
+            status = send_request_stream_and_wait(
+                transport, plan.draft.version, encode_track_message(track_message), true, &publish_ok);
+            if (status.ok) {
+                publish_ok.request_id = next_request_id;
+                publish_ok_by_request_id.insert_or_assign(next_request_id, publish_ok);
+            }
+        } else {
+            status = transport.write_stream(control_stream_id, encode_track_message(track_message), false);
+        }
         if (!status.ok) {
             return status;
         }
@@ -1874,16 +2066,18 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
         next_request_id += 2;
     }
 
-    std::map<std::uint64_t, PublishOk> publish_ok_by_request_id;
-    TransportStatus status = collect_control_acknowledgements(transport,
-                                                              control_stream_id,
-                                                              plan.draft.version,
-                                                              0,
-                                                              tracks.size(),
-                                                              pending_control_bytes,
-                                                              &publish_ok_by_request_id);
-    if (!status.ok) {
-        return status;
+    TransportStatus status = TransportStatus::success();
+    if (plan.draft.version != openmoq::publisher::DraftVersion::kDraft18) {
+        status = collect_control_acknowledgements(transport,
+                                                  control_stream_id,
+                                                  plan.draft.version,
+                                                  0,
+                                                  tracks.size(),
+                                                  pending_control_bytes,
+                                                  &publish_ok_by_request_id);
+        if (!status.ok) {
+            return status;
+        }
     }
 
     const auto pacing_start = std::chrono::steady_clock::now();
@@ -2096,13 +2290,16 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
         .track_namespace = track_namespace_,
         .request_id = 0,
     };
-    status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
-    if (!status.ok) {
-        return status;
+    if (plan.draft.version == openmoq::publisher::DraftVersion::kDraft18) {
+        status = send_request_stream_and_wait(
+            transport_, plan.draft.version, encode_namespace_message(namespace_message), false, nullptr);
+    } else {
+        status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
+        if (status.ok) {
+            status = collect_control_acknowledgements(
+                transport_, control_stream_id_, plan.draft.version, 1, 0, pending_control_bytes_);
+        }
     }
-
-    status = collect_control_acknowledgements(
-        transport_, control_stream_id_, plan.draft.version, 1, 0, pending_control_bytes_);
     if (!status.ok) {
         return status;
     }
@@ -2254,12 +2451,16 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
         .track_namespace = track_namespace_,
         .request_id = 0,
     };
-    status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
-    if (!status.ok) {
-        return status;
+    if (draft_version == openmoq::publisher::DraftVersion::kDraft18) {
+        status = send_request_stream_and_wait(
+            transport_, draft_version, encode_namespace_message(namespace_message), false, nullptr);
+    } else {
+        status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
+        if (status.ok) {
+            status = collect_control_acknowledgements(
+                transport_, control_stream_id_, draft_version, 1, 0, pending_control_bytes_);
+        }
     }
-    status = collect_control_acknowledgements(
-        transport_, control_stream_id_, draft_version, 1, 0, pending_control_bytes_);
     if (!status.ok) {
         return status;
     }
@@ -2820,7 +3021,8 @@ TransportStatus MoqtSession::ensure_setup(openmoq::publisher::DraftVersion draft
 
         consumed += message_size;
         if (saw_server_setup &&
-            (draft == openmoq::publisher::DraftVersion::kDraft14 || !auto_forward_ || peer_max_request_id_ != 0)) {
+            (draft == openmoq::publisher::DraftVersion::kDraft14 || draft == openmoq::publisher::DraftVersion::kDraft18 ||
+             !auto_forward_ || peer_max_request_id_ != 0)) {
             break;
         }
     }

@@ -12,6 +12,7 @@ namespace {
 
 constexpr std::uint64_t kClientSetupType = 0x20;
 constexpr std::uint64_t kServerSetupType = 0x21;
+constexpr std::uint64_t kSetupType = 0x2f00;
 constexpr std::uint64_t kSubscribeUpdateType = 0x02;
 constexpr std::uint64_t kSubscribeType = 0x03;
 constexpr std::uint64_t kSubscribeOkType = 0x04;
@@ -44,6 +45,7 @@ constexpr std::uint64_t kSetupParamMaxRequestId = 0x2;
 constexpr std::uint64_t kSetupParamAuthority = 0x5;
 constexpr std::uint64_t kDraft14Version = 0xff00000eULL;
 constexpr std::uint64_t kDraft16Version = 0xff000010ULL;
+constexpr std::uint64_t kDraft18Version = 0xff000012ULL;
 constexpr std::uint64_t kMaxVarintValue = 4611686018427387903ULL;
 constexpr std::uint64_t kPublishStatusTrackEnded = 0x2;
 constexpr std::uint64_t kSubscribeErrorTrackDoesNotExist = 0x2;
@@ -228,6 +230,14 @@ void append_parameter(std::vector<std::uint8_t>& out,
     }
 }
 
+void append_setup_option(std::vector<std::uint8_t>& out,
+                         std::uint64_t type,
+                         std::span<const std::uint8_t> value) {
+    append_varint(out, type);
+    append_varint(out, value.size());
+    out.insert(out.end(), value.begin(), value.end());
+}
+
 void append_parameter_delta(std::vector<std::uint8_t>& out,
                             std::uint64_t& previous_type,
                             std::uint64_t type,
@@ -271,9 +281,11 @@ std::uint64_t draft_version_number(DraftVersion draft) {
             return kDraft14Version;
         case DraftVersion::kDraft16:
             return kDraft16Version;
+        case DraftVersion::kDraft18:
+            return kDraft18Version;
     }
 
-    return kDraft16Version;
+    return kDraft18Version;
 }
 
 }  // namespace
@@ -301,6 +313,7 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         // uint16 payload length: type varint + uint16 length + payload
         case kClientSetupType:
         case kServerSetupType:
+        case kSetupType:
         case kSubscribeUpdateType:
         case kSubscribeType:
         case kSubscribeOkType:
@@ -365,6 +378,22 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
 }
 
 std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message) {
+    if (message.draft == DraftVersion::kDraft18) {
+        std::vector<std::uint8_t> payload;
+        if (message.transport == TransportKind::kRawQuic) {
+            const std::vector<std::uint8_t> path = to_bytes(message.path);
+            const std::vector<std::uint8_t> authority = to_bytes(message.authority);
+            append_setup_option(payload, kSetupParamPath, path);
+            append_setup_option(payload, kSetupParamAuthority, authority);
+        }
+
+        std::vector<std::uint8_t> message_bytes;
+        append_varint(message_bytes, kSetupType);
+        append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
+        message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
+        return message_bytes;
+    }
+
     std::vector<std::uint8_t> payload;
 
     if (message.draft == DraftVersion::kDraft14) {
@@ -407,7 +436,8 @@ std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message) {
 bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetupMessage& message) {
     std::size_t offset = 0;
     std::uint64_t message_type = 0;
-    if (!decode_varint_impl(bytes, offset, message_type) || message_type != kServerSetupType) {
+    if (!decode_varint_impl(bytes, offset, message_type) ||
+        (message_type != kServerSetupType && message_type != kSetupType)) {
         return false;
     }
 
@@ -423,8 +453,23 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
 
     const std::size_t payload_end = offset + payload_length;
     const auto payload_bytes = bytes.subspan(0, payload_end);
-    if (payload_end == offset) {
+    if (payload_end == offset && message_type != kSetupType) {
         return false;
+    }
+
+    if (message_type == kSetupType) {
+        message.draft = DraftVersion::kDraft18;
+        while (offset < payload_end) {
+            std::uint64_t option_type = 0;
+            std::uint64_t option_length = 0;
+            if (!decode_varint_impl(payload_bytes, offset, option_type) ||
+                !decode_varint_impl(payload_bytes, offset, option_length) ||
+                offset + option_length > payload_end) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(option_length);
+        }
+        return offset == payload_end;
     }
 
     const std::uint8_t first_payload_byte = bytes[offset];
@@ -479,6 +524,13 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
 }
 
 std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& message) {
+    if (message.draft == DraftVersion::kDraft18) {
+        std::vector<std::uint8_t> message_bytes;
+        append_varint(message_bytes, kSetupType);
+        append_uint16(message_bytes, 0);
+        return message_bytes;
+    }
+
     std::vector<std::uint8_t> payload;
     if (message.draft == DraftVersion::kDraft14) {
         append_varint(payload, draft_version_number(message.draft));
@@ -524,9 +576,11 @@ std::vector<std::uint8_t> encode_namespace_message(const NamespaceMessage& messa
     return message_bytes;
 }
 
-std::vector<std::uint8_t> encode_request_ok_message(std::uint64_t request_id) {
+std::vector<std::uint8_t> encode_request_ok_message(DraftVersion draft, std::uint64_t request_id) {
     std::vector<std::uint8_t> payload;
-    append_varint(payload, request_id);
+    if (draft != DraftVersion::kDraft18) {
+        append_varint(payload, request_id);
+    }
     append_varint(payload, 0);
 
     std::vector<std::uint8_t> message_bytes;
@@ -547,10 +601,39 @@ bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
         return false;
     }
     std::size_t offset = payload_offset;
+    const std::size_t payload_end = payload_offset + payload_length;
     std::uint64_t parameter_count = 0;
-    return decode_varint_impl(bytes, offset, message.request_id) &&
-           decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 &&
-           offset == payload_offset + payload_length;
+    message.request_id = 0;
+
+    if (draft != DraftVersion::kDraft18 && !decode_varint_impl(bytes, offset, message.request_id)) {
+        return false;
+    }
+    if (!decode_varint_impl(bytes, offset, parameter_count)) {
+        return false;
+    }
+    std::uint64_t previous_parameter_type = 0;
+    for (std::uint64_t parameter_index = 0; parameter_index < parameter_count; ++parameter_index) {
+        std::uint64_t parameter_type = 0;
+        if (!decode_parameter_type(bytes, offset, previous_parameter_type, false, parameter_type)) {
+            return false;
+        }
+        if ((parameter_type & 0x1ULL) == 0) {
+            std::uint64_t ignored_value = 0;
+            if (!decode_varint_impl(bytes, offset, ignored_value)) {
+                return false;
+            }
+        } else {
+            std::uint64_t parameter_length = 0;
+            if (!decode_varint_impl(bytes, offset, parameter_length) || offset + parameter_length > payload_end) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(parameter_length);
+        }
+    }
+
+    // Track properties, if any, occupy the remaining payload and are not
+    // consumed by this minimal request-ok parser.
+    return offset <= payload_end;
 }
 
 bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draft, RequestError& message) {
@@ -573,12 +656,45 @@ bool decode_request_error(std::span<const std::uint8_t> bytes, DraftVersion draf
     }
     std::size_t offset = payload_offset;
     const std::size_t payload_end = payload_offset + payload_length;
-    std::uint64_t parameter_count = 0;
-    return decode_varint_impl(bytes, offset, message.request_id) &&
-           decode_varint_impl(bytes, offset, message.error_code) &&
-           decode_varint_impl(bytes, offset, message.retry_interval) &&
-           decode_reason_phrase(bytes.subspan(0, payload_end), offset, message.reason) &&
-           decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
+    if (draft == DraftVersion::kDraft16) {
+        std::uint64_t parameter_count = 0;
+        return decode_varint_impl(bytes, offset, message.request_id) &&
+               decode_varint_impl(bytes, offset, message.error_code) &&
+               decode_varint_impl(bytes, offset, message.retry_interval) &&
+               decode_reason_phrase(bytes.subspan(0, payload_end), offset, message.reason) &&
+               decode_varint_impl(bytes, offset, parameter_count) && parameter_count == 0 && offset == payload_end;
+    }
+
+    if (draft != DraftVersion::kDraft18 && !decode_varint_impl(bytes, offset, message.request_id)) {
+        return false;
+    }
+    if (draft == DraftVersion::kDraft18) {
+        message.request_id = 0;
+    }
+    if (!decode_varint_impl(bytes, offset, message.error_code) ||
+        !decode_varint_impl(bytes, offset, message.retry_interval) ||
+        !decode_reason_phrase(bytes.subspan(0, payload_end), offset, message.reason)) {
+        return false;
+    }
+
+    if (offset == payload_end) {
+        return true;
+    }
+
+    // Optional Redirect structure.
+    std::uint64_t connect_uri_length = 0;
+    std::vector<std::string> redirect_namespace;
+    std::uint64_t track_name_length = 0;
+    if (!decode_varint_impl(bytes, offset, connect_uri_length) || offset + connect_uri_length > payload_end) {
+        return false;
+    }
+    offset += static_cast<std::size_t>(connect_uri_length);
+    if (!decode_track_namespace(bytes.subspan(0, payload_end), offset, redirect_namespace) ||
+        !decode_varint_impl(bytes, offset, track_name_length) || offset + track_name_length > payload_end) {
+        return false;
+    }
+    offset += static_cast<std::size_t>(track_name_length);
+    return offset == payload_end;
 }
 
 bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
@@ -642,7 +758,7 @@ bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
 
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
     if (draft == DraftVersion::kDraft16) {
-        return encode_request_ok_message(request_id);
+        return encode_request_ok_message(draft, request_id);
     }
 
     std::vector<std::uint8_t> payload;
