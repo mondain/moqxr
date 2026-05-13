@@ -32,15 +32,21 @@ bool expect(bool condition, const std::string& message) {
 }
 
 struct MockTransport final : PublisherTransport {
-    EndpointConfig configured_endpoint;
-    TlsConfig configured_tls;
-    bool configure_called = false;
+    struct State {
+        EndpointConfig configured_endpoint;
+        TlsConfig configured_tls;
+        bool configure_called = false;
+    };
+
+    explicit MockTransport(std::shared_ptr<State> state) : shared_state(std::move(state)) {}
+
+    std::shared_ptr<State> shared_state;
     std::string connect_error = "mock connect failure";
 
     TransportStatus configure(const EndpointConfig& endpoint, const TlsConfig& tls) override {
-        configured_endpoint = endpoint;
-        configured_tls = tls;
-        configure_called = true;
+        shared_state->configured_endpoint = endpoint;
+        shared_state->configured_tls = tls;
+        shared_state->configure_called = true;
         return TransportStatus::success();
     }
 
@@ -83,16 +89,14 @@ int main() {
         config.draft_version = DraftVersion::kDraft16;
         config.track_namespace = "app";
 
-        MockTransport* mock = nullptr;
+        const auto state = std::make_shared<MockTransport::State>();
         Publisher publisher(
             config,
-            [&mock](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
+            [state](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
                 if (kind != TransportKind::kRawQuic) {
                     return nullptr;
                 }
-                auto instance = std::make_unique<MockTransport>();
-                mock = instance.get();
-                return instance;
+                return std::make_unique<MockTransport>(state);
             });
 
         PreparedPublish prepared;
@@ -107,11 +111,11 @@ int main() {
         ok &= expect(!status.ok, "expected mock connect failure to propagate");
         ok &= expect(status.message == "transport connect failed: mock connect failure",
                      "expected connect failure message to be wrapped");
-        ok &= expect(mock != nullptr && mock->configure_called,
+        ok &= expect(state->configure_called,
                      "expected transport configure to be invoked");
-        ok &= expect(mock != nullptr && mock->configured_endpoint.alpn == "moqt-16",
+        ok &= expect(state->configured_endpoint.alpn == "moqt-16",
                      "expected default ALPN for draft-16 raw transport");
-        ok &= expect(mock != nullptr && mock->configured_endpoint.application_protocol == "moqt-16",
+        ok &= expect(state->configured_endpoint.application_protocol == "moqt-16",
                      "expected application protocol to follow draft default for raw transport");
     }
 
@@ -119,16 +123,14 @@ int main() {
         PublisherConfig config;
         config.draft_version = DraftVersion::kDraft14;
 
-        MockTransport* mock = nullptr;
+        const auto state = std::make_shared<MockTransport::State>();
         Publisher publisher(
             config,
-            [&mock](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
+            [state](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
                 if (kind != TransportKind::kWebTransport) {
                     return nullptr;
                 }
-                auto instance = std::make_unique<MockTransport>();
-                mock = instance.get();
-                return instance;
+                return std::make_unique<MockTransport>(state);
             });
 
         PreparedPublish prepared;
@@ -143,9 +145,9 @@ int main() {
 
         const TransportStatus status = publisher.publish(prepared, endpoint);
         ok &= expect(!status.ok, "expected mock connect failure to propagate for webtransport");
-        ok &= expect(mock != nullptr && mock->configured_endpoint.alpn == "h3",
+        ok &= expect(state->configured_endpoint.alpn == "h3",
                      "expected default ALPN h3 for webtransport");
-        ok &= expect(mock != nullptr && mock->configured_endpoint.application_protocol.empty(),
+        ok &= expect(state->configured_endpoint.application_protocol.empty(),
                      "expected draft-14 webtransport to offer empty application protocol");
     }
 
