@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <map>
 #include <unordered_map>
 
 namespace openmoq::publisher::transport {
@@ -55,6 +56,8 @@ private:
     std::vector<std::uint8_t> pending_control_bytes_;
     bool control_stream_open_ = false;
     bool setup_complete_ = false;
+    std::uint64_t namespace_stream_id_ = 0;
+    std::map<std::uint64_t, std::uint64_t> publish_stream_id_by_request_id_;
 };
 
 }  // namespace openmoq::publisher::transport
