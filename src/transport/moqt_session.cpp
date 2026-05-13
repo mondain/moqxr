@@ -1862,7 +1862,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
             if (status.ok) {
                 publish_ok.request_id = next_request_id;
                 publish_ok_by_request_id.insert_or_assign(next_request_id, publish_ok);
-                publish_stream_ids.emplace(next_request_id, track_stream_id);
+                publish_stream_ids.insert_or_assign(next_request_id, track_stream_id);
             }
         } else {
             status = transport.write_stream(control_stream_id, encode_track_message(track_message), false);
@@ -2070,7 +2070,7 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
             if (status.ok) {
                 publish_ok.request_id = next_request_id;
                 publish_ok_by_request_id.insert_or_assign(next_request_id, publish_ok);
-                publish_stream_ids.emplace(next_request_id, track_stream_id);
+                publish_stream_ids.insert_or_assign(next_request_id, track_stream_id);
             }
         } else {
             status = transport.write_stream(control_stream_id, encode_track_message(track_message), false);
@@ -2887,6 +2887,14 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
 }
 
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {
+    if (namespace_stream_id_ != 0) {
+        transport_.reset_stream(namespace_stream_id_, 0x0);
+        namespace_stream_id_ = 0;
+    }
+    for (const auto& entry : publish_stream_id_by_request_id_) {
+        transport_.reset_stream(entry.second, 0x0);
+    }
+    publish_stream_id_by_request_id_.clear();
     control_stream_open_ = false;
     control_stream_id_ = 0;
     return transport_.close(application_error_code);
