@@ -124,6 +124,11 @@ struct MockTransport final : PublisherTransport {
         return TransportStatus::success();
     }
 
+    TransportStatus reset_stream(std::uint64_t stream_id, std::uint64_t error_code) override {
+        reset_calls.emplace_back(stream_id, error_code);
+        return TransportStatus::success();
+    }
+
     std::string connection_id() const override {
         return "mock-connection-id";
     }
@@ -134,6 +139,7 @@ struct MockTransport final : PublisherTransport {
     std::uint64_t next_bidi_ = 0;
     std::uint64_t next_uni_ = 2;
     std::uint64_t last_close_code = 0;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> reset_calls;
     std::size_t read_count = 0;
     std::string missing_read_error;
     std::vector<WriteEvent> writes;
@@ -1825,6 +1831,16 @@ int main() {
             ok &= expect(*publish_done_bytes == expected,
                          "expected PUBLISH_DONE.stream_count = 1 for a single-subgroup delivery");
         }
+    }
+
+    {
+        MockTransport transport;
+        transport.state_ = ConnectionState::kConnected;
+        const TransportStatus rst = transport.reset_stream(42, 0);
+        ok &= expect(rst.ok, "mock reset_stream should succeed");
+        ok &= expect(transport.reset_calls.size() == 1, "expected one reset_stream call");
+        ok &= expect(transport.reset_calls[0].first == 42, "expected stream_id 42");
+        ok &= expect(transport.reset_calls[0].second == 0, "expected error_code 0");
     }
 
     return ok ? 0 : 1;
