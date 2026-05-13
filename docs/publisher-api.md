@@ -362,7 +362,10 @@ int main() {
 
     // Optional: dedicated muxer thread if your muxer is not internally threaded.
     std::thread muxer_thread([&] {
-        // Emit init segment first, then moof/mdat fragments containing both tracks.
+        // Emit the init segment first, then fragmented MP4 moof/mdat pairs.
+        // For the current live path, prefer track-separated fragments, such as
+        // ffmpeg output generated with +separate_moof, so each moof/mdat pair
+        // maps cleanly to one media track.
         // Each emitted chunk calls write_muxed_fragment(fragment_bytes).
     });
 
