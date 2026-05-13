@@ -30,7 +30,10 @@ function(openmoq_sanitize_target_link_directories target_name)
         endif()
 
         set(filtered_value "${property_value}")
-        list(FILTER filtered_value EXCLUDE REGEX "^\\($|^\\)$")
+        # picotls can inject literal "(" and ")" via pkg-config parsing; after
+        # CMake normalization these may appear as source-prefixed "/.../(" and
+        # "/.../)" paths. Drop both raw and normalized forms.
+        list(FILTER filtered_value EXCLUDE REGEX "^\\($|^\\)$|.*/\\($|.*/\\)$")
         set_target_properties("${target_name}" PROPERTIES "${property_name}" "${filtered_value}")
     endforeach()
 endfunction()
