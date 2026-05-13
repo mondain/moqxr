@@ -2,7 +2,7 @@
 
 `moqxr` is a C++20 OpenMOQ publisher contribution project for Linux, macOS, and Windows.
 
-It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-specific framing for drafts 14 and 16, and can either inspect the generated publish plan locally or publish it over a picoquic-backed transport when local `picoquic` and `picotls` checkouts are available.
+It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-specific framing for drafts 14, 16, and 18, and can either inspect the generated publish plan locally or publish it over a picoquic-backed transport when local `picoquic` and `picotls` checkouts are available.
 
 ## Overview
 
@@ -42,6 +42,7 @@ This keeps the project aligned with CMAF-style publication while reusing the sam
 
 - `draft-ietf-moq-transport-14` is the primary target
 - `draft-ietf-moq-transport-16` is represented as a secondary compatibility profile
+- `draft-ietf-moq-transport-18` support is implemented for version selection, setup/request framing codec paths, and request-stream response correlation; interop hardening is still in progress
 - draft-specific assumptions are documented in [docs/protocol-mapping.md](docs/protocol-mapping.md)
 
 ## Repository layout
@@ -51,6 +52,7 @@ This keeps the project aligned with CMAF-style publication while reusing the sam
 - `tests`: CTest-based unit coverage
 - `docs`: protocol notes and design references
 - `docs/publisher-api.md`: step-by-step application integration guide for the C++ publisher API
+- `docs/draft18-implementation-plan.md`: implementation plan for draft-18 transport support
 - `docs/transport-plan.md`: picoquic integration plan and implementation checklist
 - `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux, macOS, and Windows
 - `.github/workflows/release.yml`: GitHub Actions release-build workflow that uploads Linux, macOS, and Windows archives

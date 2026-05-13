@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -124,6 +125,11 @@ struct MockTransport final : PublisherTransport {
         return TransportStatus::success();
     }
 
+    TransportStatus reset_stream(std::uint64_t stream_id, std::uint64_t error_code) override {
+        reset_calls.emplace_back(stream_id, error_code);
+        return TransportStatus::success();
+    }
+
     std::string connection_id() const override {
         return "mock-connection-id";
     }
@@ -134,6 +140,7 @@ struct MockTransport final : PublisherTransport {
     std::uint64_t next_bidi_ = 0;
     std::uint64_t next_uni_ = 2;
     std::uint64_t last_close_code = 0;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> reset_calls;
     std::size_t read_count = 0;
     std::string missing_read_error;
     std::vector<WriteEvent> writes;
@@ -148,8 +155,14 @@ void append_be16(std::vector<std::uint8_t>& out, std::uint16_t value) {
 }
 
 std::vector<std::uint8_t> encode_publish_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
-    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    std::vector<std::uint8_t> payload;
+    if (draft != DraftVersion::kDraft18) {
+        payload = encode_varint(request_id);
+    }
     if (draft == DraftVersion::kDraft16) {
+        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    } else if (draft == DraftVersion::kDraft18) {
         const std::vector<std::uint8_t> parameter_count = encode_varint(0);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
     }
@@ -1227,6 +1240,107 @@ int main() {
     }
 
     {
+        MockTransport draft14_duplicate_publish_ok_id_transport;
+        draft14_duplicate_publish_ok_id_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        draft14_duplicate_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        draft14_duplicate_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft14, 2, 1));
+        draft14_duplicate_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft14, 2, 1));
+        MoqtSession draft14_duplicate_publish_ok_id_session(
+            draft14_duplicate_publish_ok_id_transport, std::string(kTestTrackNamespace), true);
+        status = draft14_duplicate_publish_ok_id_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-14 duplicate-publish-ok-id session connect to succeed");
+        status = draft14_duplicate_publish_ok_id_session.publish(
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
+        ok &= expect(!status.ok, "expected draft-14 publish to fail on duplicate PUBLISH_OK request_id");
+        ok &= expect(status.message == "received duplicate publish response request_id",
+                     "expected strict duplicate publish response failure for draft-14");
+    }
+
+    {
+        MockTransport draft14_duplicate_publish_error_id_transport;
+        draft14_duplicate_publish_error_id_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        draft14_duplicate_publish_error_id_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        // First response succeeds for request_id=2.
+        draft14_duplicate_publish_error_id_transport.reads[0].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft14, 2, 1));
+        // Then a duplicate response for same request_id=2 appears as PUBLISH_ERROR.
+        std::vector<std::uint8_t> duplicate_publish_error_payload = encode_varint(2);
+        const auto error_code = encode_varint(0x2);
+        const auto reason = encode_varint(5);
+        duplicate_publish_error_payload.insert(duplicate_publish_error_payload.end(), error_code.begin(), error_code.end());
+        duplicate_publish_error_payload.insert(duplicate_publish_error_payload.end(), reason.begin(), reason.end());
+        duplicate_publish_error_payload.insert(duplicate_publish_error_payload.end(), {'d', 'u', 'p', 'e', '2'});
+        std::vector<std::uint8_t> duplicate_publish_error = encode_varint(0x1f);
+        append_be16(duplicate_publish_error, static_cast<std::uint16_t>(duplicate_publish_error_payload.size()));
+        duplicate_publish_error.insert(
+            duplicate_publish_error.end(), duplicate_publish_error_payload.begin(), duplicate_publish_error_payload.end());
+        draft14_duplicate_publish_error_id_transport.reads[0].push_back(duplicate_publish_error);
+
+        MoqtSession draft14_duplicate_publish_error_id_session(
+            draft14_duplicate_publish_error_id_transport, std::string(kTestTrackNamespace), true);
+        status = draft14_duplicate_publish_error_id_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-14 duplicate-publish-error-id session connect to succeed");
+        status = draft14_duplicate_publish_error_id_session.publish(
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft14), source_bytes));
+        ok &= expect(!status.ok, "expected draft-14 publish to fail on duplicate publish response ID");
+        ok &= expect(status.message == "received duplicate publish response request_id",
+                     "expected duplicate publish response rejection for draft-14 PUBLISH_ERROR");
+    }
+
+    {
+        MockTransport draft16_invalid_publish_ok_id_transport;
+        draft16_invalid_publish_ok_id_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
+            .max_request_id = 8,
+        }));
+        draft16_invalid_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+        // request_id=1 is odd/invalid for client-initiated publish requests.
+        draft16_invalid_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft16, 1, 1));
+        MoqtSession draft16_invalid_publish_ok_id_session(
+            draft16_invalid_publish_ok_id_transport, std::string(kTestTrackNamespace), true);
+        status = draft16_invalid_publish_ok_id_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-16 invalid-publish-ok-id session connect to succeed");
+        status = draft16_invalid_publish_ok_id_session.publish(draft16_materialized);
+        ok &= expect(!status.ok, "expected draft-16 publish to fail on invalid PUBLISH_OK request_id");
+        ok &= expect(status.message == "received invalid request_id in PUBLISH_OK",
+                     "expected strict invalid publish request_id failure");
+    }
+
+    {
+        MockTransport draft16_duplicate_publish_ok_id_transport;
+        draft16_duplicate_publish_ok_id_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
+            .max_request_id = 8,
+        }));
+        draft16_duplicate_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+        draft16_duplicate_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft16, 2, 1));
+        draft16_duplicate_publish_ok_id_transport.reads[0].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft16, 2, 1));
+        MoqtSession draft16_duplicate_publish_ok_id_session(
+            draft16_duplicate_publish_ok_id_transport, std::string(kTestTrackNamespace), true);
+        status = draft16_duplicate_publish_ok_id_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-16 duplicate-publish-ok-id session connect to succeed");
+        status = draft16_duplicate_publish_ok_id_session.publish(draft16_materialized);
+        ok &= expect(!status.ok, "expected draft-16 publish to fail on duplicate PUBLISH_OK request_id");
+        ok &= expect(status.message == "received duplicate publish response request_id",
+                     "expected strict duplicate publish response failure");
+    }
+
+    {
         const auto subscribe_namespace = encode_subscribe_namespace_message(DraftVersion::kDraft16, 7, kTestTrackNamespace);
         std::size_t message_size = 0;
         ok &= expect(openmoq::publisher::transport::next_control_message(
@@ -1367,6 +1481,192 @@ int main() {
                       0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0x3a, 0x34, 0x34, 0x33, 0x33})) {
         std::cerr << "draft16 actual: " << hex_dump(draft16_setup) << '\n';
         ok = false;
+    }
+
+    {
+        MockTransport draft18_transport;
+        draft18_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        draft18_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        draft18_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession draft18_session(draft18_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_session.publish(draft18_materialized);
+        ok &= expect(status.ok, "expected draft-18 publish to succeed");
+        ok &= expect(draft18_transport.writes.size() >= 4, "expected draft-18 request-stream writes");
+        if (draft18_transport.writes.size() >= 4) {
+            ok &= expect(draft18_transport.writes[0].stream_id == 0,
+                         "expected draft-18 setup on control stream");
+            ok &= expect(draft18_transport.writes[1].stream_id == 4 &&
+                             message_type(draft18_transport.writes[1].bytes) == 0x06,
+                         "expected draft-18 PUBLISH_NAMESPACE on dedicated request stream");
+            ok &= expect(draft18_transport.writes[2].stream_id == 8 &&
+                             message_type(draft18_transport.writes[2].bytes) == 0x1d,
+                         "expected first draft-18 PUBLISH on dedicated request stream");
+            ok &= expect(draft18_transport.writes[3].stream_id == 12 &&
+                             message_type(draft18_transport.writes[3].bytes) == 0x1d,
+                         "expected second draft-18 PUBLISH on dedicated request stream");
+        }
+    }
+
+    {
+        MockTransport draft18_bad_response_transport;
+        draft18_bad_response_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        // Inject SUBSCRIBE (0x03) on namespace request stream where REQUEST_OK/REQUEST_ERROR is expected.
+        draft18_bad_response_transport.reads[4].push_back(
+            encode_subscribe_message(1, kTestTrackNamespace, "catalog", 0, DraftVersion::kDraft18));
+        MoqtSession draft18_bad_response_session(draft18_bad_response_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_bad_response_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 bad-response session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_bad_response_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 publish to fail on unexpected request-stream response");
+        ok &= expect(status.message == "unexpected response type for request stream",
+                     "expected strict request-stream response validation message");
+    }
+
+    {
+        MockTransport draft18_wrong_type_transport;
+        draft18_wrong_type_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        // Namespace request stream receives PUBLISH_OK, which is a valid MOQT
+        // message type but invalid response type for a namespace request.
+        draft18_wrong_type_transport.reads[4].push_back(
+            encode_publish_ok_message(DraftVersion::kDraft18, 9, 1));
+
+        MoqtSession draft18_wrong_type_session(draft18_wrong_type_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_wrong_type_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 wrong-type session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_wrong_type_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 publish to fail on wrong response type");
+        ok &= expect(status.message == "unexpected response type for request stream",
+                     "expected strict request/response type correlation failure message");
+    }
+
+    {
+        MockTransport draft18_goaway_transport;
+        draft18_goaway_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        // GOAWAY message on namespace request stream:
+        // type=0x10, length=0.
+        draft18_goaway_transport.reads[4].push_back(std::vector<std::uint8_t>{0x10, 0x00, 0x00});
+
+        MoqtSession draft18_goaway_session(draft18_goaway_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_goaway_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 GOAWAY session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_goaway_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 publish to fail on request-stream GOAWAY");
+        ok &= expect(status.message == "request stream received GOAWAY",
+                     "expected explicit GOAWAY request-stream failure message");
+    }
+
+    {
+        MockTransport draft18_duplicate_response_transport;
+        draft18_duplicate_response_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        draft18_duplicate_response_transport.reads[4].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_duplicate_response_transport.reads[4].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+
+        MoqtSession draft18_duplicate_response_session(
+            draft18_duplicate_response_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_duplicate_response_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 duplicate-response session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_duplicate_response_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 publish to fail on duplicate response");
+        ok &= expect(status.message == "multiple responses on request stream",
+                     "expected duplicate request-stream response failure message");
+    }
+
+    {
+        // After a successful draft-18 publish, close() resets all request stream IDs.
+        // MockTransport bidi stream IDs: 0=control, 4=PUBLISH_NAMESPACE, 8=first PUBLISH, 12=second PUBLISH
+        MockTransport d18_retain_transport;
+        d18_retain_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        d18_retain_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        d18_retain_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        d18_retain_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession d18_retain_session(d18_retain_transport, std::string(kTestTrackNamespace), true);
+        TransportStatus st = d18_retain_session.connect(endpoint, tls);
+        ok &= expect(st.ok, "draft-18 retain: connect should succeed");
+
+        const PublishPlan d18_plan =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        st = d18_retain_session.publish(d18_plan);
+        ok &= expect(st.ok, "draft-18 retain: publish should succeed");
+
+        st = d18_retain_session.close();
+        ok &= expect(st.ok, "draft-18 retain: close should succeed");
+
+        const auto& resets = d18_retain_transport.reset_calls;
+        ok &= expect(resets.size() == 3,
+                     "expected 3 reset_stream calls on close (1 namespace + 2 track)");
+
+        std::set<std::uint64_t> reset_ids;
+        for (const auto& [sid, ec] : resets) {
+            reset_ids.insert(sid);
+            ok &= expect(ec == 0, "expected error_code 0 for all resets");
+        }
+        ok &= expect(reset_ids.count(4) == 1, "expected namespace stream 4 to be reset");
+        ok &= expect(reset_ids.count(8) == 1, "expected track stream 8 to be reset");
+        ok &= expect(reset_ids.count(12) == 1, "expected track stream 12 to be reset");
+    }
+
+    {
+        // Calling close() twice must not re-reset already-cleared stream IDs.
+        MockTransport d18_dc_transport;
+        d18_dc_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        d18_dc_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        d18_dc_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        d18_dc_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession d18_dc_session(d18_dc_transport, std::string(kTestTrackNamespace), true);
+        d18_dc_session.connect(endpoint, tls);
+        const PublishPlan d18_plan2 =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        d18_dc_session.publish(d18_plan2);
+
+        d18_dc_session.close();
+        const std::size_t after_first = d18_dc_transport.reset_calls.size();
+        d18_dc_session.close();
+        ok &= expect(d18_dc_transport.reset_calls.size() == after_first,
+                     "second close() must not re-reset already-cleared stream IDs");
     }
 
     MockTransport close_transport;
@@ -1594,6 +1894,16 @@ int main() {
             ok &= expect(*publish_done_bytes == expected,
                          "expected PUBLISH_DONE.stream_count = 1 for a single-subgroup delivery");
         }
+    }
+
+    {
+        MockTransport transport;
+        transport.state_ = ConnectionState::kConnected;
+        const TransportStatus rst = transport.reset_stream(42, 0);
+        ok &= expect(rst.ok, "mock reset_stream should succeed");
+        ok &= expect(transport.reset_calls.size() == 1, "expected one reset_stream call");
+        ok &= expect(transport.reset_calls[0].first == 42, "expected stream_id 42");
+        ok &= expect(transport.reset_calls[0].second == 0, "expected error_code 0");
     }
 
     return ok ? 0 : 1;

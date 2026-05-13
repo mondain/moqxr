@@ -6,7 +6,18 @@
 
 # CMake
 CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+DartConfiguration.tcl
+Makefile
+cmake_install.cmake
 Testing/
+
+# In-source build binaries
+/openmoq-publisher
+/openmoq-publisher-*-tests
+/libopenmoq_publisher_lib.a
 
 # Editors
 .DS_Store
