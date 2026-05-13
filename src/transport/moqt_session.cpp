@@ -2031,6 +2031,7 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
                                         std::string_view track_namespace,
                                         bool paced,
                                         std::vector<std::uint8_t>& pending_control_bytes,
+                                        std::map<std::uint64_t, std::uint64_t>& publish_stream_ids,
                                         std::map<std::uint64_t, DormantPublishedTrack>* dormant_published_tracks = nullptr,
                                         std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias = nullptr) {
     if (tracks.empty()) {
@@ -2062,11 +2063,14 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
         TransportStatus status = TransportStatus::success();
         if (plan.draft.version == openmoq::publisher::DraftVersion::kDraft18) {
             PublishOk publish_ok;
+            std::uint64_t track_stream_id = 0;
             status = send_request_stream_and_wait(
-                transport, plan.draft.version, encode_track_message(track_message), true, &publish_ok);
+                transport, plan.draft.version, encode_track_message(track_message), true, &publish_ok,
+                &track_stream_id);
             if (status.ok) {
                 publish_ok.request_id = next_request_id;
                 publish_ok_by_request_id.insert_or_assign(next_request_id, publish_ok);
+                publish_stream_ids.emplace(next_request_id, track_stream_id);
             }
         } else {
             status = transport.write_stream(control_stream_id, encode_track_message(track_message), false);
@@ -2359,6 +2363,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
                                              track_namespace_,
                                              paced_,
                                              pending_control_bytes_,
+                                             publish_stream_id_by_request_id_,
                                              &dormant_published_tracks,
                                              &request_id_by_track_alias);
             if (!status.ok) {
