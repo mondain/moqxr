@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -1604,6 +1605,68 @@ int main() {
         ok &= expect(!status.ok, "expected draft-18 publish to fail on duplicate response");
         ok &= expect(status.message == "multiple responses on request stream",
                      "expected duplicate request-stream response failure message");
+    }
+
+    {
+        // After a successful draft-18 publish, close() resets all request stream IDs.
+        // MockTransport bidi stream IDs: 0=control, 4=PUBLISH_NAMESPACE, 8=first PUBLISH, 12=second PUBLISH
+        MockTransport d18_retain_transport;
+        d18_retain_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        d18_retain_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        d18_retain_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        d18_retain_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession d18_retain_session(d18_retain_transport, std::string(kTestTrackNamespace), true);
+        TransportStatus st = d18_retain_session.connect(endpoint, tls);
+        ok &= expect(st.ok, "draft-18 retain: connect should succeed");
+
+        const PublishPlan d18_plan =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        st = d18_retain_session.publish(d18_plan);
+        ok &= expect(st.ok, "draft-18 retain: publish should succeed");
+
+        st = d18_retain_session.close();
+        ok &= expect(st.ok, "draft-18 retain: close should succeed");
+
+        const auto& resets = d18_retain_transport.reset_calls;
+        ok &= expect(resets.size() == 3,
+                     "expected 3 reset_stream calls on close (1 namespace + 2 track)");
+
+        std::set<std::uint64_t> reset_ids;
+        for (const auto& [sid, ec] : resets) {
+            reset_ids.insert(sid);
+            ok &= expect(ec == 0, "expected error_code 0 for all resets");
+        }
+        ok &= expect(reset_ids.count(4) == 1, "expected namespace stream 4 to be reset");
+        ok &= expect(reset_ids.count(8) == 1, "expected track stream 8 to be reset");
+        ok &= expect(reset_ids.count(12) == 1, "expected track stream 12 to be reset");
+    }
+
+    {
+        // Calling close() twice must not re-reset already-cleared stream IDs.
+        MockTransport d18_dc_transport;
+        d18_dc_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        d18_dc_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        d18_dc_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        d18_dc_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession d18_dc_session(d18_dc_transport, std::string(kTestTrackNamespace), true);
+        d18_dc_session.connect(endpoint, tls);
+        const PublishPlan d18_plan2 =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        d18_dc_session.publish(d18_plan2);
+
+        d18_dc_session.close();
+        const std::size_t after_first = d18_dc_transport.reset_calls.size();
+        d18_dc_session.close();
+        ok &= expect(d18_dc_transport.reset_calls.size() == after_first,
+                     "second close() must not re-reset already-cleared stream IDs");
     }
 
     MockTransport close_transport;
