@@ -1,0 +1,79 @@
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <iosfwd>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "openmoq/publisher/cmsf_packager.h"
+#include "openmoq/publisher/moq_draft.h"
+#include "openmoq/publisher/transport/publisher_transport.h"
+
+namespace openmoq::publisher {
+
+struct PublisherConfig {
+    DraftVersion draft_version = DraftVersion::kDraft14;
+    std::string track_namespace = "media";
+    bool forward = false;
+    bool publish_catalog = false;
+    bool include_sap = false;
+    bool split_cmaf_chunks = true;
+    bool paced = false;
+    bool loop = false;
+    std::chrono::seconds subscriber_timeout = std::chrono::seconds(3);
+};
+
+struct PreparedPublish {
+    std::vector<std::uint8_t> input_bytes;
+    PublishPlan plan;
+};
+
+class Publisher {
+public:
+    using TransportFactory = std::function<std::unique_ptr<transport::PublisherTransport>(transport::TransportKind)>;
+
+    explicit Publisher(PublisherConfig config = {}, TransportFactory transport_factory = {});
+
+    const PublisherConfig& config() const;
+    void set_config(const PublisherConfig& config);
+
+    PreparedPublish prepare_file(const std::filesystem::path& path) const;
+    PreparedPublish prepare_stream(std::istream& input, std::string_view source_name) const;
+
+    std::string render_plan(const PreparedPublish& prepared) const;
+    void emit_objects(const PreparedPublish& prepared, const std::filesystem::path& output_dir) const;
+
+    transport::TransportStatus publish(const PreparedPublish& prepared,
+                                       const transport::EndpointConfig& endpoint,
+                                       const transport::TlsConfig& tls = {},
+                                       bool endpoint_alpn_overridden = false) const;
+    transport::TransportStatus publish_file(const std::filesystem::path& path,
+                                            const transport::EndpointConfig& endpoint,
+                                            const transport::TlsConfig& tls = {},
+                                            bool endpoint_alpn_overridden = false) const;
+    transport::TransportStatus publish_stream(std::istream& input,
+                                              std::string_view source_name,
+                                              const transport::EndpointConfig& endpoint,
+                                              const transport::TlsConfig& tls = {},
+                                              bool endpoint_alpn_overridden = false) const;
+    transport::TransportStatus publish_live(std::istream& input,
+                                            const transport::EndpointConfig& endpoint,
+                                            const transport::TlsConfig& tls = {},
+                                            bool endpoint_alpn_overridden = false) const;
+
+private:
+    static TransportFactory default_transport_factory();
+    transport::EndpointConfig resolve_endpoint(const transport::EndpointConfig& endpoint,
+                                               bool endpoint_alpn_overridden) const;
+
+    PublisherConfig config_;
+    TransportFactory transport_factory_;
+};
+
+}  // namespace openmoq::publisher

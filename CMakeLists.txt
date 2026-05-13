@@ -121,6 +121,7 @@ add_library(openmoq_publisher_lib
     src/cmsf_packager.cpp
     src/moq_draft.cpp
     src/mp4_box.cpp
+    src/publisher_api.cpp
     src/transport/moqt_control_messages.cpp
     src/transport/moqt_session.cpp
     src/transport/picoquic_client.cpp
@@ -188,6 +189,12 @@ if(OPENMOQ_BUILD_TESTS)
     )
     target_link_libraries(openmoq-publisher-webtransport-tests PRIVATE openmoq_publisher_lib)
     add_test(NAME openmoq-publisher-webtransport-tests COMMAND openmoq-publisher-webtransport-tests)
+
+    add_executable(openmoq-publisher-api-tests
+        tests/publisher_api_test.cpp
+    )
+    target_link_libraries(openmoq-publisher-api-tests PRIVATE openmoq_publisher_lib)
+    add_test(NAME openmoq-publisher-api-tests COMMAND openmoq-publisher-api-tests)
 
     if(OPENMOQ_HAS_PICOQUIC AND OPENMOQ_RUN_PICOQUIC_SMOKE_TESTS)
         add_executable(openmoq-publisher-picoquic-smoke-tests
