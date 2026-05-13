@@ -2,7 +2,7 @@
 
 This plan tracks adding `draft-ietf-moq-transport-18` support to `moqxr`.
 
-Reference reviewed: `/home/mondain/Downloads/draft-ietf-moq-transport-18.txt` (12 May 2026).
+Reference reviewed: <https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-18> (12 May 2026).
 
 ## Goals
 
