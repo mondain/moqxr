@@ -64,6 +64,10 @@ struct MockTransport final : PublisherTransport {
         return TransportStatus::failure("not implemented");
     }
 
+    TransportStatus reset_stream(std::uint64_t, std::uint64_t) override {
+        return TransportStatus::failure("not implemented");
+    }
+
     std::string connection_id() const override {
         return "mock";
     }
