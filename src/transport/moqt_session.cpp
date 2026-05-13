@@ -782,7 +782,8 @@ TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
                                              openmoq::publisher::DraftVersion draft,
                                              std::span<const std::uint8_t> request_bytes,
                                              bool expect_publish_ack,
-                                             PublishOk* publish_ok = nullptr) {
+                                             PublishOk* publish_ok = nullptr,
+                                             std::uint64_t* out_stream_id = nullptr) {
     std::size_t request_offset = 0;
     std::uint64_t request_type = 0;
     if (!decode_varint(request_bytes, request_offset, request_type)) {
@@ -797,6 +798,12 @@ TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
     if (!status.ok) {
         return status;
     }
+
+    auto set_out_stream = [&]() {
+        if (out_stream_id != nullptr) {
+            *out_stream_id = request_stream_id;
+        }
+    };
 
     std::vector<std::uint8_t> buffered;
     bool fin = false;
@@ -857,6 +864,7 @@ TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
                     if (publish_ok != nullptr) {
                         *publish_ok = decoded_publish_ok;
                     }
+                    set_out_stream();
                     return TransportStatus::success();
                 }
             }
@@ -883,6 +891,7 @@ TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
                     if (!extra_status.ok) {
                         if (extra_status.message == "timed out waiting for stream data" ||
                             extra_status.message == "no queued read for stream") {
+                            set_out_stream();
                             return TransportStatus::success();
                         }
                         return extra_status;
@@ -898,6 +907,7 @@ TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
                         return TransportStatus::failure("trailing bytes after request response");
                     }
                     if (extra_fin) {
+                        set_out_stream();
                         return TransportStatus::success();
                     }
                 }
