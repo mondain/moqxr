@@ -58,7 +58,7 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
             # all of which compile sources that transitively include picotls.h.
             include_directories(BEFORE "${OPENMOQ_PICOTLS_SOURCE_DIR}/picotlsvs/picotls")
         endif()
-        if(APPLE)
+        if(NOT WIN32)
             # picotls appends literal "(" and ")" list items when Brotli is
             # discovered via pkg-config. On macOS, CMake rejects the resulting
             # malformed source-prefixed link directories during generate. Scope
@@ -70,7 +70,7 @@ if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists
             file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/openmoq-empty-pkgconfig")
         endif()
         add_subdirectory("${OPENMOQ_PICOQUIC_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/picoquic")
-        if(APPLE)
+        if(NOT WIN32)
             set(ENV{PKG_CONFIG_LIBDIR} "${_openmoq_saved_pkg_config_libdir}")
             set(ENV{PKG_CONFIG_PATH} "${_openmoq_saved_pkg_config_path}")
             unset(_openmoq_saved_pkg_config_libdir)
