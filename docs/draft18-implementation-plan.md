@@ -12,12 +12,24 @@ Reference reviewed: `/home/mondain/Downloads/draft-ietf-moq-transport-18.txt` (1
 
 ## Current Status
 
-- Phase A is in progress:
-  - Added `DraftVersion::kDraft18`.
-  - Added CLI parsing for `--draft 18`.
-  - Added default ALPN mapping to `moqt-18`.
-  - Added API WebTransport protocol token mapping to `moqt-18`.
-- Draft-18 control/request framing is not implemented yet.
+- Completed:
+  - Phase A: version plumbing (`kDraft18`, CLI/API selection, ALPN defaults).
+  - Phase B: draft-18 codec support in control messages:
+    - `SETUP` (`0x2F00`) handling.
+    - setup options parsing/encoding for `PATH` and `AUTHORITY`.
+    - draft-18 `REQUEST_OK` / `REQUEST_ERROR` parsing support.
+    - dedicated control-message tests.
+  - Phase C (partial): request-stream semantics in session layer:
+    - per-request bidirectional stream request/response flow for namespace/publish paths.
+    - strict response correlation on request streams, including:
+      - unexpected response type rejection
+      - GOAWAY rejection on request stream
+      - duplicate terminal response rejection
+    - legacy (draft-14/16) shared-control-stream publish response ID validation hardening.
+- Remaining:
+  - Complete Phase C across all request categories used by this publisher.
+  - Phase D data-stream/object framing alignment and additional draft-18 conformance checks.
+  - Phase E interop and production hardening.
 
 ## Phase A: Version Plumbing (Low Risk)
 
@@ -68,6 +80,12 @@ Work:
 2. Read responses (`REQUEST_OK` / `REQUEST_ERROR`) on matching request stream.
 3. Keep existing control stream behavior for draft-14/16.
 4. Add per-request state bookkeeping and robust stream-close handling.
+
+Status:
+
+- Implemented for publish namespace and publish-track handshake paths.
+- Includes strict request-stream response validation and duplicate-response rejection.
+- Remaining stream choreography work is focused on full request coverage and expanded state tracking.
 
 ## Phase D: Data Stream/Object Framing Alignment
 
