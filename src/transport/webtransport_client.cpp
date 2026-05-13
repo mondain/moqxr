@@ -694,6 +694,21 @@ TransportStatus WebTransportClient::read_stream(std::uint64_t stream_id,
 #endif
 }
 
+TransportStatus WebTransportClient::reset_stream(std::uint64_t stream_id,
+                                                  std::uint64_t error_code) {
+#ifndef OPENMOQ_HAS_PICOQUIC
+    static_cast<void>(stream_id);
+    static_cast<void>(error_code);
+    return TransportStatus::failure("picoquic support is not enabled in this build");
+#else
+    if (impl_ == nullptr || impl_->cnx == nullptr) {
+        return TransportStatus::failure("transport is not connected");
+    }
+    picoquic_reset_stream(impl_->cnx, stream_id, error_code);
+    return TransportStatus::success();
+#endif
+}
+
 std::string WebTransportClient::connection_id() const {
 #ifdef OPENMOQ_HAS_PICOQUIC
     if (impl_ != nullptr && impl_->cnx != nullptr) {

@@ -23,6 +23,8 @@ public:
                                 std::vector<std::uint8_t>& bytes,
                                 bool& fin,
                                 std::chrono::milliseconds timeout) override;
+    TransportStatus reset_stream(std::uint64_t stream_id,
+                                 std::uint64_t error_code) override;
     std::string connection_id() const override;
     TransportStatus close(std::uint64_t application_error_code) override;
 
