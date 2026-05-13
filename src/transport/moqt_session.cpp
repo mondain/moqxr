@@ -2310,7 +2310,8 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
     };
     if (plan.draft.version == openmoq::publisher::DraftVersion::kDraft18) {
         status = send_request_stream_and_wait(
-            transport_, plan.draft.version, encode_namespace_message(namespace_message), false, nullptr);
+            transport_, plan.draft.version, encode_namespace_message(namespace_message), false, nullptr,
+            &namespace_stream_id_);
     } else {
         status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
         if (status.ok) {
@@ -2473,7 +2474,8 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
     };
     if (draft_version == openmoq::publisher::DraftVersion::kDraft18) {
         status = send_request_stream_and_wait(
-            transport_, draft_version, encode_namespace_message(namespace_message), false, nullptr);
+            transport_, draft_version, encode_namespace_message(namespace_message), false, nullptr,
+            &namespace_stream_id_);
     } else {
         status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
         if (status.ok) {
