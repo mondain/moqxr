@@ -178,6 +178,11 @@ endif()
 add_executable(openmoq-publisher src/main.cpp)
 target_link_libraries(openmoq-publisher PRIVATE openmoq_publisher_lib)
 
+add_executable(openmoq-publisher-psychedelic-example
+    examples/psychedelic/Psychedelic.cpp
+)
+target_link_libraries(openmoq-publisher-psychedelic-example PRIVATE openmoq_publisher_lib)
+
 include(CTest)
 
 if(OPENMOQ_BUILD_TESTS)
