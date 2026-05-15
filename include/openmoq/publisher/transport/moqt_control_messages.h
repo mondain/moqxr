@@ -153,7 +153,8 @@ std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
 // §10.4.2 the first object on the stream carries its absolute Object ID
 // (pass std::nullopt for previous_object_id); subsequent objects encode
 // Object ID Delta = object_id - previous_object_id - 1.
-std::vector<std::uint8_t> encode_subgroup_object(std::optional<std::uint64_t> previous_object_id,
+std::vector<std::uint8_t> encode_subgroup_object(DraftVersion draft,
+                                                 std::optional<std::uint64_t> previous_object_id,
                                                  std::uint64_t object_id,
                                                  std::span<const std::uint8_t> payload);
 

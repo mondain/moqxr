@@ -1228,7 +1228,7 @@ public:
         }
 
         std::vector<std::uint8_t> object_bytes =
-            encode_subgroup_object(previous_object_id, object.object_id, payload);
+            encode_subgroup_object(draft, previous_object_id, object.object_id, payload);
         wire_bytes.insert(wire_bytes.end(), object_bytes.begin(), object_bytes.end());
 
         if (trace_enabled()) {
@@ -1258,6 +1258,13 @@ public:
         const TransportStatus status = transport.write_stream(stream_id, wire_bytes, is_final_in_subgroup);
         if (!status.ok) {
             return status;
+        }
+
+        if (!payload.empty()) {
+            if (object_bytes.size() < payload.size() ||
+                !std::equal(payload.begin(), payload.end(), object_bytes.end() - static_cast<std::ptrdiff_t>(payload.size()))) {
+                return TransportStatus::failure("encoded subgroup object payload mismatch");
+            }
         }
 
         if (is_final_in_subgroup) {
