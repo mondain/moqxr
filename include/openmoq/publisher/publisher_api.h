@@ -7,6 +7,7 @@
 #include <iosfwd>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -66,14 +67,38 @@ public:
                                             const transport::EndpointConfig& endpoint,
                                             const transport::TlsConfig& tls = {},
                                             bool endpoint_alpn_overridden = false) const;
+    transport::TransportStatus disconnect(std::uint64_t application_error_code = 0) const;
+    std::string stats_json() const;
 
 private:
+    struct ActiveSession;
+    struct StatsSnapshot {
+        bool active = false;
+        bool connected = false;
+        bool publishing_live = false;
+        transport::TransportKind transport = transport::TransportKind::kRawQuic;
+        std::string host;
+        std::uint16_t port = 0;
+        std::string path;
+        std::string connection_id;
+        std::string last_error;
+    };
+
     static TransportFactory default_transport_factory();
     transport::EndpointConfig resolve_endpoint(const transport::EndpointConfig& endpoint,
                                                bool endpoint_alpn_overridden) const;
+    void set_active_session(std::shared_ptr<ActiveSession> active,
+                            const transport::EndpointConfig& endpoint,
+                            bool publishing_live) const;
+    void clear_active_session(const std::shared_ptr<ActiveSession>& active,
+                              bool connected,
+                              const std::string& last_error) const;
 
     PublisherConfig config_;
     TransportFactory transport_factory_;
+    mutable std::mutex state_mutex_;
+    mutable std::shared_ptr<ActiveSession> active_session_;
+    mutable StatsSnapshot stats_;
 };
 
 }  // namespace openmoq::publisher

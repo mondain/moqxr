@@ -7,6 +7,7 @@
 #include "openmoq/publisher/transport/webtransport_client.h"
 
 #include <stdexcept>
+#include <sstream>
 #include <utility>
 
 namespace openmoq::publisher {
@@ -26,7 +27,28 @@ std::string webtransport_protocol_offer(DraftVersion version) {
     return "";
 }
 
+std::string json_escape(std::string_view input) {
+    std::string out;
+    out.reserve(input.size() + 8);
+    for (const char c : input) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out += c; break;
+        }
+    }
+    return out;
+}
+
 }  // namespace
+
+struct Publisher::ActiveSession {
+    std::unique_ptr<transport::PublisherTransport> transport;
+    std::unique_ptr<transport::MoqtSession> session;
+};
 
 Publisher::Publisher(PublisherConfig config, TransportFactory transport_factory)
     : config_(std::move(config)),
@@ -79,13 +101,14 @@ transport::TransportStatus Publisher::publish(const PreparedPublish& prepared,
     if (!transport_factory_) {
         return transport::TransportStatus::failure("publisher transport factory is not configured");
     }
-    auto transport = transport_factory_(endpoint.transport);
-    if (!transport) {
+    auto active = std::make_shared<ActiveSession>();
+    active->transport = transport_factory_(endpoint.transport);
+    if (!active->transport) {
         return transport::TransportStatus::failure("failed to create requested transport");
     }
 
-    transport::MoqtSession session(
-        *transport,
+    active->session = std::make_unique<transport::MoqtSession>(
+        *active->transport,
         config_.track_namespace,
         config_.forward,
         config_.publish_catalog,
@@ -94,17 +117,23 @@ transport::TransportStatus Publisher::publish(const PreparedPublish& prepared,
         config_.subscriber_timeout);
 
     const transport::EndpointConfig resolved_endpoint = resolve_endpoint(endpoint, endpoint_alpn_overridden);
-    transport::TransportStatus status = session.connect(resolved_endpoint, tls);
+    set_active_session(active, resolved_endpoint, false);
+    transport::TransportStatus status = active->session->connect(resolved_endpoint, tls);
     if (!status.ok) {
-        return transport::TransportStatus::failure("transport connect failed: " + status.message);
+        const std::string error = "transport connect failed: " + status.message;
+        clear_active_session(active, false, error);
+        return transport::TransportStatus::failure(error);
     }
 
     const PublishPlan materialized = materialize_publish_plan(prepared.plan, prepared.input_bytes);
-    status = session.publish(materialized);
+    status = active->session->publish(materialized);
     if (!status.ok) {
-        return transport::TransportStatus::failure("transport publish failed: " + status.message);
+        const std::string error = "transport publish failed: " + status.message;
+        clear_active_session(active, true, error);
+        return transport::TransportStatus::failure(error);
     }
 
+    clear_active_session(active, true, "");
     return transport::TransportStatus::success();
 }
 
@@ -132,13 +161,14 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
     if (!transport_factory_) {
         return transport::TransportStatus::failure("publisher transport factory is not configured");
     }
-    auto transport = transport_factory_(endpoint.transport);
-    if (!transport) {
+    auto active = std::make_shared<ActiveSession>();
+    active->transport = transport_factory_(endpoint.transport);
+    if (!active->transport) {
         return transport::TransportStatus::failure("failed to create requested transport");
     }
 
-    transport::MoqtSession session(
-        *transport,
+    active->session = std::make_unique<transport::MoqtSession>(
+        *active->transport,
         config_.track_namespace,
         config_.forward,
         config_.publish_catalog,
@@ -147,17 +177,69 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
         config_.subscriber_timeout);
 
     const transport::EndpointConfig resolved_endpoint = resolve_endpoint(endpoint, endpoint_alpn_overridden);
-    transport::TransportStatus status = session.connect(resolved_endpoint, tls);
+    set_active_session(active, resolved_endpoint, true);
+    transport::TransportStatus status = active->session->connect(resolved_endpoint, tls);
     if (!status.ok) {
-        return transport::TransportStatus::failure("transport connect failed: " + status.message);
+        const std::string error = "transport connect failed: " + status.message;
+        clear_active_session(active, false, error);
+        return transport::TransportStatus::failure(error);
     }
 
-    status = session.publish_live(input, config_.draft_version, config_.split_cmaf_chunks);
+    status = active->session->publish_live(input, config_.draft_version, config_.split_cmaf_chunks);
     if (!status.ok) {
-        return transport::TransportStatus::failure("transport live publish failed: " + status.message);
+        const std::string error = "transport live publish failed: " + status.message;
+        clear_active_session(active, true, error);
+        return transport::TransportStatus::failure(error);
     }
 
+    clear_active_session(active, true, "");
     return transport::TransportStatus::success();
+}
+
+transport::TransportStatus Publisher::disconnect(std::uint64_t application_error_code) const {
+    std::shared_ptr<ActiveSession> active;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        active = active_session_;
+        stats_.active = false;
+    }
+    if (!active || !active->session) {
+        return transport::TransportStatus::success();
+    }
+    const auto status = active->session->close(application_error_code);
+    if (!status.ok) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stats_.last_error = "disconnect failed: " + status.message;
+    }
+    return status;
+}
+
+std::string Publisher::stats_json() const {
+    StatsSnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        snapshot = stats_;
+        if (active_session_ && active_session_->transport) {
+            snapshot.connection_id = active_session_->transport->connection_id();
+            snapshot.connected = active_session_->transport->state() == transport::ConnectionState::kConnected;
+            snapshot.active = true;
+        }
+    }
+
+    std::ostringstream os;
+    os << "{"
+       << "\"active\":" << (snapshot.active ? "true" : "false") << ","
+       << "\"connected\":" << (snapshot.connected ? "true" : "false") << ","
+       << "\"publishingLive\":" << (snapshot.publishing_live ? "true" : "false") << ","
+       << "\"transport\":\""
+       << (snapshot.transport == transport::TransportKind::kWebTransport ? "webtransport" : "raw_quic") << "\","
+       << "\"host\":\"" << json_escape(snapshot.host) << "\","
+       << "\"port\":" << snapshot.port << ","
+       << "\"path\":\"" << json_escape(snapshot.path) << "\","
+       << "\"connectionId\":\"" << json_escape(snapshot.connection_id) << "\","
+       << "\"lastError\":\"" << json_escape(snapshot.last_error) << "\""
+       << "}";
+    return os.str();
 }
 
 Publisher::TransportFactory Publisher::default_transport_factory() {
@@ -187,6 +269,38 @@ transport::EndpointConfig Publisher::resolve_endpoint(const transport::EndpointC
     }
 
     return resolved;
+}
+
+void Publisher::set_active_session(std::shared_ptr<ActiveSession> active,
+                                   const transport::EndpointConfig& endpoint,
+                                   bool publishing_live) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    active_session_ = std::move(active);
+    stats_.active = true;
+    stats_.connected = false;
+    stats_.publishing_live = publishing_live;
+    stats_.transport = endpoint.transport;
+    stats_.host = endpoint.host;
+    stats_.port = endpoint.port;
+    stats_.path = endpoint.path;
+    stats_.connection_id.clear();
+    stats_.last_error.clear();
+}
+
+void Publisher::clear_active_session(const std::shared_ptr<ActiveSession>& active,
+                                     bool connected,
+                                     const std::string& last_error) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (active_session_ == active) {
+        if (active_session_ && active_session_->transport) {
+            stats_.connection_id = active_session_->transport->connection_id();
+        }
+        active_session_.reset();
+    }
+    stats_.active = false;
+    stats_.connected = connected;
+    stats_.publishing_live = false;
+    stats_.last_error = last_error;
 }
 
 }  // namespace openmoq::publisher
