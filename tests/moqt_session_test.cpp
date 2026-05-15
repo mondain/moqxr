@@ -967,6 +967,59 @@ int main() {
             .max_request_id = 8,
         }));
         transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_publish_ok_message(DraftVersion::kDraft14, 2, 1));
+        transport.reads[0].push_back(encode_subscribe_message(3, kTestTrackNamespace, "vide_1", 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false, true);
+
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected catalog-content session connect to succeed");
+
+        PublishPlan catalog_content_plan = make_span_backed_plan(DraftVersion::kDraft14);
+        const std::string catalog_text =
+            "{\"version\":1,\"format\":\"cmsf\",\"tracks\":[{\"name\":\"vide_1\",\"initData\":\"AAAA\"}]}";
+        catalog_content_plan.objects[0].payload = ByteSpan{.offset = 0, .size = catalog_text.size()};
+        catalog_content_plan.objects[1].payload = ByteSpan{.offset = catalog_text.size(), .size = 3};
+        std::vector<std::uint8_t> catalog_source_bytes(catalog_text.begin(), catalog_text.end());
+        catalog_source_bytes.insert(catalog_source_bytes.end(), {'V', 'I', 'D'});
+        const PublishPlan materialized = materialize_publish_plan(catalog_content_plan, catalog_source_bytes);
+
+        status = session.publish(materialized);
+        ok &= expect(status.ok, "expected publish to succeed with catalog content validation");
+        ok &= expect(transport.writes.size() >= 4,
+                     "expected catalog-content flow to emit catalog object stream");
+        if (transport.writes.size() >= 4) {
+            std::uint64_t stream_type = 0;
+            std::uint64_t track_alias = 0;
+            std::uint64_t group_id = 0;
+            std::uint64_t object_id_delta = 0;
+            std::uint64_t payload_length = 0;
+            std::vector<std::uint8_t> payload;
+            ok &= expect(
+                decode_object_stream_fields(transport.writes[3].bytes,
+                                            stream_type,
+                                            track_alias,
+                                            group_id,
+                                            object_id_delta,
+                                            payload_length,
+                                            payload),
+                "expected catalog-content object stream fields to decode");
+            const std::string served_catalog(payload.begin(), payload.end());
+            ok &= expect(served_catalog.find("\"format\":\"cmsf\"") != std::string::npos,
+                         "expected served catalog payload to include cmsf format");
+            ok &= expect(served_catalog.find("\"name\":\"vide_1\"") != std::string::npos,
+                         "expected served catalog payload to include vide_1 track");
+            ok &= expect(served_catalog.find("\"initData\":\"AAAA\"") != std::string::npos,
+                         "expected served catalog payload to include initData");
+        }
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
         transport.reads[0].push_back(encode_publish_ok_message(DraftVersion::kDraft14, 2, 0));
         std::vector<std::uint8_t> control = encode_subscribe_update_message(1, 0);
         const auto media_subscribe = encode_subscribe_message(3, kTestTrackNamespace, "vide_1", 0);
