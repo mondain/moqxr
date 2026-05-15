@@ -79,11 +79,24 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+Using presets (same `build/` output directory):
+
+```bash
+cmake --preset default
+cmake --build --preset default
+ctest --preset default
+```
+
 On Windows with the Visual Studio generator, the binary lands in `build\Release\` or `build\Debug\` depending on the config passed to `--build`.
 
 ### Build with local picoquic and picotls
 
-Clone picoquic and picotls to any convenient location and initialise the picotls submodules:
+By default, CMake now looks for:
+
+- `third_party/picoquic` and `third_party/picotls`
+- fallback: `thirdparty/picoquic` and `thirdparty/picotls`
+
+If you prefer custom paths, clone picoquic and picotls to any convenient location and initialise the picotls submodules:
 
 ```bash
 git clone https://github.com/private-octopus/picoquic.git /path/to/picoquic

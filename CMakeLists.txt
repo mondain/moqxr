@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR
+        "In-source builds are not supported. Configure with: cmake -S . -B build")
+endif()
+
 project(openmoq_publisher
     VERSION 0.1.0
     DESCRIPTION "OpenMOQ contribution project: C++20 publisher for fragmented MP4 to CMSF/MOQT"
@@ -13,8 +18,18 @@ option(OPENMOQ_BUILD_TESTS "Build OpenMOQ publisher tests" ON)
 option(OPENMOQ_ENABLE_PICOQUIC "Enable picoquic transport integration when picoquic is available" ON)
 option(OPENMOQ_RUN_PICOQUIC_SMOKE_TESTS "Build and run picoquic loopback smoke tests" OFF)
 
-set(OPENMOQ_PICOQUIC_SOURCE_DIR "" CACHE PATH
-    "Path to a picoquic source checkout")
+set(_OPENMOQ_THIRDPARTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+if(NOT EXISTS "${_OPENMOQ_THIRDPARTY_ROOT}")
+    set(_OPENMOQ_THIRDPARTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty")
+endif()
+
+set(_OPENMOQ_DEFAULT_PICOQUIC_SOURCE_DIR "${_OPENMOQ_THIRDPARTY_ROOT}/picoquic")
+set(_OPENMOQ_DEFAULT_PICOTLS_SOURCE_DIR "${_OPENMOQ_THIRDPARTY_ROOT}/picotls")
+
+set(OPENMOQ_PICOQUIC_SOURCE_DIR "${_OPENMOQ_DEFAULT_PICOQUIC_SOURCE_DIR}" CACHE PATH
+    "Path to a picoquic source checkout (defaults to third_party/ or thirdparty/)")
+set(OPENMOQ_PICOTLS_SOURCE_DIR "${_OPENMOQ_DEFAULT_PICOTLS_SOURCE_DIR}" CACHE PATH
+    "Path to a picotls source checkout (defaults to third_party/ or thirdparty/)")
 
 set(OPENMOQ_HAS_PICOQUIC OFF)
 
@@ -39,9 +54,6 @@ function(openmoq_sanitize_target_link_directories target_name)
 endfunction()
 
 if(OPENMOQ_ENABLE_PICOQUIC AND EXISTS "${OPENMOQ_PICOQUIC_SOURCE_DIR}/CMakeLists.txt")
-    set(OPENMOQ_PICOTLS_SOURCE_DIR "${OPENMOQ_PICOQUIC_SOURCE_DIR}/../picotls" CACHE PATH
-        "Path to a picotls source checkout")
-
     if(EXISTS "${OPENMOQ_PICOTLS_SOURCE_DIR}/CMakeLists.txt")
         # picotls still declares CMake 2.8 compatibility; newer CMake releases
         # require an explicit policy floor when configuring that subproject.
