@@ -2759,6 +2759,7 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
 
     if (auto_forward_) {
         // Forward mode: publish media as fragments arrive, independent of downstream subscriptions.
+        std::optional<std::chrono::steady_clock::time_point> eof_deadline;
         while (true) {
             // Drain media continuously in auto-forward mode.
             {
@@ -2774,13 +2775,6 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 std::lock_guard<std::mutex> lock(queue->mutex);
                 is_eof = queue->eof && queue->fragments.empty();
             }
-            if (is_eof) {
-                break;
-            }
-
-            // Brief sleep to avoid busy-waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
             // Read and process control messages (SUBSCRIBE, SUBSCRIBE_NAMESPACE)
             std::vector<std::uint8_t> chunk;
             bool fin = false;
@@ -2794,6 +2788,21 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 stdin_thread.join();
                 return ctrl_status;
             }
+
+            // Keep polling control briefly after EOF so downstream can still request
+            // one-shot tracks (catalog) before we tear down the session.
+            if (is_eof) {
+                if (!eof_deadline.has_value()) {
+                    eof_deadline = std::chrono::steady_clock::now() + subscriber_timeout_;
+                } else if (std::chrono::steady_clock::now() >= *eof_deadline) {
+                    break;
+                }
+            } else {
+                eof_deadline.reset();
+            }
+
+            // Brief sleep to avoid busy-waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     } else {
         // Await-subscribe mode: wait for subscriptions, then stream
