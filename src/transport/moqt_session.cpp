@@ -2531,6 +2531,16 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
         return TransportStatus::success();
     };
 
+    if (auto_forward_) {
+        const auto catalog_alias_it = alias_by_track.find("catalog");
+        if (catalog_alias_it != alias_by_track.end()) {
+            status = send_catalog(catalog_alias_it->second);
+            if (!status.ok) {
+                return status;
+            }
+        }
+    }
+
     // Phase 4: Stream media from stdin.
     // Use a reader thread so we can also handle control messages.
     struct LiveMediaQueue {
