@@ -2635,8 +2635,9 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 queue->fragments.pop_front();
             }
 
-            // Only send data for tracks that have an active subscription.
-            if (!subscribed_tracks.count(fragment.track_name)) {
+            // In auto-forward mode, publish media immediately even before a downstream
+            // SUBSCRIBE arrives. Keep subscription gating for await-subscribe mode.
+            if (!auto_forward_ && !subscribed_tracks.count(fragment.track_name)) {
                 continue;
             }
 
@@ -2757,10 +2758,10 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
     };
 
     if (auto_forward_) {
-        // Forward mode: wait for subscriptions, then stream objects as they arrive
+        // Forward mode: publish media as fragments arrive, independent of downstream subscriptions.
         while (true) {
-            // Only drain media after at least one non-catalog track is subscribed
-            if (!subscribed_tracks.empty()) {
+            // Drain media continuously in auto-forward mode.
+            {
                 status = drain_queue();
                 if (!status.ok) {
                     stdin_thread.join();
@@ -2773,7 +2774,7 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 std::lock_guard<std::mutex> lock(queue->mutex);
                 is_eof = queue->eof && queue->fragments.empty();
             }
-            if (is_eof && !subscribed_tracks.empty()) {
+            if (is_eof) {
                 break;
             }
 
