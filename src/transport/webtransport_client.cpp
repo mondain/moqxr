@@ -55,6 +55,7 @@ struct WebTransportClient::Impl {
     bool failed = false;
     bool disconnected = false;
     bool close_requested = false;
+    std::uint64_t close_error_code = 0;
     bool loop_ready = false;
     bool loop_exited = false;
     std::string last_error;
@@ -204,7 +205,12 @@ int apply_pending_writes(WebTransportClient::Impl& impl) {
     }
 
     if (close_requested && impl.control_stream_ctx != nullptr) {
-        if (picowt_send_close_session_message(impl.cnx, impl.control_stream_ctx, 0, "closed") != 0) {
+        std::uint64_t close_error_code = 0;
+        {
+            std::lock_guard<std::mutex> lock(impl.mutex);
+            close_error_code = impl.close_error_code;
+        }
+        if (picowt_send_close_session_message(impl.cnx, impl.control_stream_ctx, close_error_code, "closed") != 0) {
             std::lock_guard<std::mutex> lock(impl.mutex);
             impl.failed = true;
             impl.last_error = "failed to close webtransport session";
@@ -381,6 +387,7 @@ TransportStatus WebTransportClient::configure(const EndpointConfig& endpoint, co
     impl_->failed = false;
     impl_->disconnected = false;
     impl_->close_requested = false;
+    impl_->close_error_code = 0;
     impl_->loop_ready = false;
     impl_->loop_exited = false;
     impl_->last_error.clear();
@@ -730,6 +737,7 @@ TransportStatus WebTransportClient::close(std::uint64_t application_error_code) 
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->close_requested = true;
+        impl_->close_error_code = application_error_code;
     }
     if (impl_->cnx != nullptr && impl_->quic != nullptr) {
         picoquic_set_app_wake_time(impl_->cnx, picoquic_get_quic_time(impl_->quic));

@@ -56,6 +56,7 @@ struct PicoquicClient::Impl {
     bool failed = false;
     bool disconnected = false;
     bool close_requested = false;
+    std::uint64_t close_error_code = 0;
     bool loop_ready = false;
     bool loop_exited = false;
     std::size_t total_bytes_sent = 0;
@@ -214,8 +215,13 @@ int apply_pending_operations(PicoquicClient::Impl& impl) {
     }
 
     if (close_requested) {
+        std::uint64_t close_error_code = 0;
+        {
+            std::lock_guard<std::mutex> lock(impl.mutex);
+            close_error_code = impl.close_error_code;
+        }
         trace("close requested");
-        const int ret = picoquic_close(impl.cnx, 0);
+        const int ret = picoquic_close(impl.cnx, close_error_code);
         if (ret != 0) {
             std::lock_guard<std::mutex> lock(impl.mutex);
             impl.failed = true;
@@ -434,6 +440,7 @@ TransportStatus PicoquicClient::configure(const EndpointConfig& endpoint, const 
         impl_->failed = false;
         impl_->disconnected = false;
         impl_->close_requested = false;
+        impl_->close_error_code = 0;
         impl_->loop_ready = false;
         impl_->loop_exited = false;
         impl_->last_error.clear();
@@ -707,6 +714,7 @@ TransportStatus PicoquicClient::close(std::uint64_t application_error_code) {
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             impl_->close_requested = true;
+            impl_->close_error_code = application_error_code;
         }
         trace("joining client packet loop thread");
         if (impl_->packet_loop_thread.joinable()) {

@@ -201,14 +201,26 @@ transport::TransportStatus Publisher::disconnect(std::uint64_t application_error
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         active = active_session_;
-        stats_.active = false;
     }
     if (!active || !active->session) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stats_.active = false;
+        stats_.connected = false;
+        stats_.publishing_live = false;
         return transport::TransportStatus::success();
     }
     const auto status = active->session->close(application_error_code);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (active_session_ == active) {
+        if (active_session_->transport) {
+            stats_.connection_id = active_session_->transport->connection_id();
+        }
+        active_session_.reset();
+    }
+    stats_.active = false;
+    stats_.connected = false;
+    stats_.publishing_live = false;
     if (!status.ok) {
-        std::lock_guard<std::mutex> lock(state_mutex_);
         stats_.last_error = "disconnect failed: " + status.message;
     }
     return status;
