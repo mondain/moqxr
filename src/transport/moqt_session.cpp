@@ -1333,6 +1333,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
     std::map<std::uint64_t, ActiveSubscription> active_subscriptions;
     bool fin = false;
     bool served_any_subscription = false;
+    std::optional<std::chrono::steady_clock::time_point> catalog_last_served_at;
     std::uint64_t first_media_time_us = 0;
     bool first_media_time_set = false;
     const auto pacing_start = std::chrono::steady_clock::now();
@@ -1633,6 +1634,33 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
         }
 
         if (!active_subscriptions.empty()) {
+            std::vector<std::uint64_t> completed_request_ids_to_finalize;
+            for (const auto& [request_id, active] : active_subscriptions) {
+                if (active.completed) {
+                    completed_request_ids_to_finalize.push_back(request_id);
+                }
+            }
+            for (const auto request_id : completed_request_ids_to_finalize) {
+                const auto active_it = active_subscriptions.find(request_id);
+                if (active_it == active_subscriptions.end()) {
+                    continue;
+                }
+                const TransportStatus finalize_status =
+                    finalize_subscription(transport,
+                                          control_stream_id,
+                                          request_id,
+                                          active_it->second.sender->stream_count(),
+                                          completed_request_ids);
+                if (!finalize_status.ok) {
+                    return finalize_status;
+                }
+                active_subscriptions.erase(active_it);
+            }
+            if (!completed_request_ids_to_finalize.empty()) {
+                served_any_subscription = true;
+                continue;
+            }
+
             std::vector<std::uint8_t> chunk;
             bool immediate_fin = false;
             const TransportStatus read_status =
@@ -1726,6 +1754,9 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                               << " track=" << object.track_name
                               << " group=" << object.group_id << " object=" << object.object_id
                               << " bytes=" << object_payload_size(source_object) << '\n';
+                    if (object.track_name == "catalog") {
+                        catalog_last_served_at = std::chrono::steady_clock::now();
+                    }
                     trace_csv_write_served("served",
                                            send_seq,
                                            trace_elapsed_ms(std::chrono::steady_clock::now()),
@@ -1748,32 +1779,6 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 continue;
             }
 
-            std::vector<std::uint64_t> completed_request_ids_to_finalize;
-            for (const auto& [request_id, active] : active_subscriptions) {
-                if (active.completed) {
-                    completed_request_ids_to_finalize.push_back(request_id);
-                }
-            }
-            for (const auto request_id : completed_request_ids_to_finalize) {
-                const auto active_it = active_subscriptions.find(request_id);
-                if (active_it == active_subscriptions.end()) {
-                    continue;
-                }
-                const TransportStatus finalize_status =
-                    finalize_subscription(transport,
-                                          control_stream_id,
-                                          request_id,
-                                          active_it->second.sender->stream_count(),
-                                          completed_request_ids);
-                if (!finalize_status.ok) {
-                    return finalize_status;
-                }
-                active_subscriptions.erase(active_it);
-            }
-            if (!completed_request_ids_to_finalize.empty()) {
-                served_any_subscription = true;
-                continue;
-            }
         }
 
         if (fin) {
@@ -1809,6 +1814,17 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
             return TransportStatus::success();
         }
         return transport.write_stream(control_stream_id, encode_publish_namespace_done_message(namespace_message), false);
+    }
+
+    if (send_namespace_done && catalog_last_served_at.has_value()) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - *catalog_last_served_at);
+        const auto desired_grace = std::min(subscriber_timeout, std::chrono::milliseconds(250));
+        if (elapsed < desired_grace) {
+            const auto remaining = desired_grace - elapsed;
+            std::cerr << "[moqt-session] grace wait after catalog publish: " << remaining.count() << " ms\n";
+            std::this_thread::sleep_for(remaining);
+        }
     }
 
     pending_control_bytes = std::move(buffer);
@@ -2530,16 +2546,6 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
         std::cerr << "[moqt-session] live: catalog published (" << live_catalog.catalog_payload.size() << " bytes)\n";
         return TransportStatus::success();
     };
-
-    if (auto_forward_) {
-        const auto catalog_alias_it = alias_by_track.find("catalog");
-        if (catalog_alias_it != alias_by_track.end()) {
-            status = send_catalog(catalog_alias_it->second);
-            if (!status.ok) {
-                return status;
-            }
-        }
-    }
 
     // Phase 4: Stream media from stdin.
     // Use a reader thread so we can also handle control messages.
