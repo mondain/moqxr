@@ -35,8 +35,8 @@ int main() {
 
     {
         const CliOptions options = parse({"openmoq-publisher", "--input", "sample.mp4"});
-        ok &= expect(options.subscriber_timeout == std::chrono::seconds(3),
-                     "expected default subscriber timeout to remain 3 seconds");
+        ok &= expect(options.subscriber_timeout == std::chrono::seconds(30),
+                     "expected default subscriber timeout to be 30 seconds");
         ok &= expect(options.split_cmaf_chunks, "expected chunk splitting to be enabled by default");
         ok &= expect(options.input_source.kind == openmoq::publisher::InputSourceKind::kFile,
                      "expected file input to remain the default input source kind");

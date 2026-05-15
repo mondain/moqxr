@@ -35,7 +35,7 @@ public:
                          bool publish_catalog = false,
                          bool paced = false,
                          bool loop = false,
-                         std::chrono::seconds subscriber_timeout = std::chrono::seconds(3));
+                         std::chrono::seconds subscriber_timeout = std::chrono::seconds(30));
 
     TransportStatus connect(const EndpointConfig& endpoint, const TlsConfig& tls);
     TransportStatus publish(const openmoq::publisher::PublishPlan& plan);
@@ -59,7 +59,7 @@ private:
     bool publish_catalog_ = false;
     bool paced_ = false;
     bool loop_ = false;
-    std::chrono::seconds subscriber_timeout_ = std::chrono::seconds(3);
+    std::chrono::seconds subscriber_timeout_ = std::chrono::seconds(30);
     std::optional<EndpointConfig> endpoint_;
     std::uint64_t control_stream_id_ = 0;
     std::uint64_t peer_max_request_id_ = 0;

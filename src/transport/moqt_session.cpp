@@ -1815,7 +1815,13 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
     }
 
     if (!served_any_subscription) {
-        std::cerr << "[moqt-session] no downstream SUBSCRIBE before timeout; closing idle publish session" << '\n';
+        std::cerr << "[moqt-session] no downstream SUBSCRIBE before timeout; "
+                     "idle await-subscribe publish closing"
+                  << " namespace=" << track_namespace
+                  << " draft=" << openmoq::publisher::to_string(draft)
+                  << " timeout_s=" << subscriber_timeout.count()
+                  << " note=expecting relay/internal subscriber subscription"
+                  << '\n';
         pending_control_bytes = std::move(buffer);
         if (!send_namespace_done) {
             return TransportStatus::success();
@@ -2888,7 +2894,13 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
             } else if (read_status.message == "timed out waiting for stream data" ||
                        read_status.message == "no queued read for stream") {
                 if (active_subscriptions.empty()) {
-                    std::cerr << "[moqt-session] live: no subscribers before timeout\n";
+                    std::cerr << "[moqt-session] live: no downstream SUBSCRIBE before timeout; "
+                                 "idle await-subscribe publish exiting"
+                              << " namespace=" << track_namespace_
+                              << " draft=" << openmoq::publisher::to_string(draft_version)
+                              << " timeout_s=" << subscriber_timeout_.count()
+                              << " note=expecting relay/internal subscriber subscription"
+                              << '\n';
                     break;
                 }
             } else {

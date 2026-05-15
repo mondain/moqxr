@@ -27,7 +27,7 @@ struct PublisherConfig {
     bool split_cmaf_chunks = true;
     bool paced = false;
     bool loop = false;
-    std::chrono::seconds subscriber_timeout = std::chrono::seconds(3);
+    std::chrono::seconds subscriber_timeout = std::chrono::seconds(30);
 };
 
 struct PreparedPublish {

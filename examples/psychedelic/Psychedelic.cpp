@@ -135,7 +135,6 @@ int main(int argc, char** argv) {
         base_config.include_sap = false;
         base_config.paced = false;
         base_config.loop = false;
-        base_config.subscriber_timeout = std::chrono::seconds(3);
 
         EndpointConfig endpoint;
         endpoint.transport = TransportKind::kWebTransport;

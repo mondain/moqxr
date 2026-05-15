@@ -36,7 +36,7 @@ struct CliOptions {
     bool paced = false;
     bool loop = false;
     bool dump_plan = false;
-    std::chrono::seconds subscriber_timeout = std::chrono::seconds(3);
+    std::chrono::seconds subscriber_timeout = std::chrono::seconds(30);
 };
 
 CliOptions parse_cli_options(int argc, char** argv);

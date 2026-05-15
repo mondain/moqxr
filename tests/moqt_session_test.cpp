@@ -763,9 +763,9 @@ int main() {
         ok &= expect(transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70}),
                      "expected draft-14 PUBLISH_NAMESPACE_DONE to contain the configured track namespace");
-        ok &= expect(std::find(transport.read_timeouts.begin(), transport.read_timeouts.end(), std::chrono::seconds(3)) !=
+        ok &= expect(std::find(transport.read_timeouts.begin(), transport.read_timeouts.end(), std::chrono::seconds(30)) !=
                          transport.read_timeouts.end(),
-                     "expected default subscriber wait timeout to be 3 seconds");
+                     "expected default subscriber wait timeout to be 30 seconds");
     }
 
     {
