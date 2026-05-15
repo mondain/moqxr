@@ -218,6 +218,11 @@ Current JSON fields:
 - `active`: whether a session is currently active
 - `connected`: whether transport is currently connected
 - `publishingLive`: whether the active session is live-publish mode
+- `bytesPublished`: total payload bytes published in the current/last session
+- `objectsPublished`: total objects published in the current/last session
+- `groupsPublished`: total (track, group) units published in the current/last session
+- `splitCmafChunks`: current packaging mode (`true` = split chunks, `false` = coalesced chunks)
+- `includeSap`: whether SAP track/object packaging is enabled
 - `transport`: `"raw_quic"` or `"webtransport"`
 - `host`: configured endpoint host
 - `port`: configured endpoint port
@@ -232,6 +237,11 @@ Example:
   "active": true,
   "connected": true,
   "publishingLive": false,
+  "bytesPublished": 123456,
+  "objectsPublished": 84,
+  "groupsPublished": 42,
+  "splitCmafChunks": true,
+  "includeSap": false,
   "transport": "webtransport",
   "host": "relay.example.com",
   "port": 443,

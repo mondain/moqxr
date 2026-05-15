@@ -2276,11 +2276,33 @@ MoqtSession::MoqtSession(PublisherTransport& transport,
       loop_(loop),
       subscriber_timeout_(subscriber_timeout) {}
 
+void MoqtSession::reset_publish_stats() {
+    publish_stats_ = PublishStats{};
+    last_group_by_track_.clear();
+}
+
+void MoqtSession::record_published_object(const std::string& track_name,
+                                          std::uint64_t group_id,
+                                          std::size_t payload_bytes) {
+    publish_stats_.bytes_published += static_cast<std::uint64_t>(payload_bytes);
+    publish_stats_.objects_published += 1;
+    auto [it, inserted] = last_group_by_track_.emplace(track_name, group_id);
+    if (inserted || it->second != group_id) {
+        publish_stats_.groups_published += 1;
+        it->second = group_id;
+    }
+}
+
+MoqtSession::PublishStats MoqtSession::publish_stats() const {
+    return publish_stats_;
+}
+
 TransportStatus MoqtSession::connect(const EndpointConfig& endpoint, const TlsConfig& tls) {
     endpoint_ = endpoint;
     setup_complete_ = false;
     peer_max_request_id_ = 0;
     pending_control_bytes_.clear();
+    reset_publish_stats();
     TransportStatus status = transport_.configure(endpoint, tls);
     if (!status.ok) {
         return status;
@@ -2542,6 +2564,7 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
         if (!cat_status.ok) {
             return cat_status;
         }
+        record_published_object("catalog", 0, live_catalog.catalog_payload.size());
         catalog_sent = true;
         std::cerr << "[moqt-session] live: catalog published (" << live_catalog.catalog_payload.size() << " bytes)\n";
         return TransportStatus::success();
@@ -2686,6 +2709,9 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
             if (!write_status.ok) {
                 return write_status;
             }
+            record_published_object(fragment.track_name,
+                                    static_cast<std::uint64_t>(fragment.group_id),
+                                    fragment.payload.owned_bytes.size());
             std::cerr << "[moqt-session] live: sent track=" << fragment.track_name
                       << " group=" << fragment.group_id
                       << " obj=" << fragment.object_id

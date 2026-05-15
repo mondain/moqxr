@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 #include <sstream>
+#include <set>
 #include <utility>
 
 namespace openmoq::publisher {
@@ -41,6 +42,26 @@ std::string json_escape(std::string_view input) {
         }
     }
     return out;
+}
+
+struct BatchPublishStats {
+    std::uint64_t bytes_published = 0;
+    std::uint64_t objects_published = 0;
+    std::uint64_t groups_published = 0;
+};
+
+BatchPublishStats summarize_batch_publish_stats(const PublishPlan& plan) {
+    BatchPublishStats snapshot;
+    std::set<std::pair<std::string, std::uint64_t>> groups;
+    for (const auto& object : plan.objects) {
+        const std::size_t payload_size = !object.owned_payload.empty() ? object.owned_payload.size()
+                                                                        : object.payload.size;
+        snapshot.bytes_published += static_cast<std::uint64_t>(payload_size);
+        snapshot.objects_published += 1;
+        groups.emplace(object.track_name, static_cast<std::uint64_t>(object.group_id));
+    }
+    snapshot.groups_published = static_cast<std::uint64_t>(groups.size());
+    return snapshot;
 }
 
 }  // namespace
@@ -132,6 +153,13 @@ transport::TransportStatus Publisher::publish(const PreparedPublish& prepared,
         clear_active_session(active, true, error);
         return transport::TransportStatus::failure(error);
     }
+    {
+        const auto batch_stats = summarize_batch_publish_stats(materialized);
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stats_.bytes_published = batch_stats.bytes_published;
+        stats_.objects_published = batch_stats.objects_published;
+        stats_.groups_published = batch_stats.groups_published;
+    }
 
     clear_active_session(active, true, "");
     return transport::TransportStatus::success();
@@ -191,6 +219,13 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
         clear_active_session(active, true, error);
         return transport::TransportStatus::failure(error);
     }
+    {
+        const auto live_stats = active->session->publish_stats();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stats_.bytes_published = live_stats.bytes_published;
+        stats_.objects_published = live_stats.objects_published;
+        stats_.groups_published = live_stats.groups_published;
+    }
 
     clear_active_session(active, true, "");
     return transport::TransportStatus::success();
@@ -228,9 +263,13 @@ transport::TransportStatus Publisher::disconnect(std::uint64_t application_error
 
 std::string Publisher::stats_json() const {
     StatsSnapshot snapshot;
+    bool split_cmaf_chunks = true;
+    bool include_sap = false;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         snapshot = stats_;
+        split_cmaf_chunks = config_.split_cmaf_chunks;
+        include_sap = config_.include_sap;
         if (active_session_ && active_session_->transport) {
             snapshot.connection_id = active_session_->transport->connection_id();
             snapshot.connected = active_session_->transport->state() == transport::ConnectionState::kConnected;
@@ -243,6 +282,11 @@ std::string Publisher::stats_json() const {
        << "\"active\":" << (snapshot.active ? "true" : "false") << ","
        << "\"connected\":" << (snapshot.connected ? "true" : "false") << ","
        << "\"publishingLive\":" << (snapshot.publishing_live ? "true" : "false") << ","
+       << "\"bytesPublished\":" << snapshot.bytes_published << ","
+       << "\"objectsPublished\":" << snapshot.objects_published << ","
+       << "\"groupsPublished\":" << snapshot.groups_published << ","
+       << "\"splitCmafChunks\":" << (split_cmaf_chunks ? "true" : "false") << ","
+       << "\"includeSap\":" << (include_sap ? "true" : "false") << ","
        << "\"transport\":\""
        << (snapshot.transport == transport::TransportKind::kWebTransport ? "webtransport" : "raw_quic") << "\","
        << "\"host\":\"" << json_escape(snapshot.host) << "\","
@@ -291,6 +335,9 @@ void Publisher::set_active_session(std::shared_ptr<ActiveSession> active,
     stats_.active = true;
     stats_.connected = false;
     stats_.publishing_live = publishing_live;
+    stats_.bytes_published = 0;
+    stats_.objects_published = 0;
+    stats_.groups_published = 0;
     stats_.transport = endpoint.transport;
     stats_.host = endpoint.host;
     stats_.port = endpoint.port;

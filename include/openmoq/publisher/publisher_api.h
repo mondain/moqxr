@@ -76,6 +76,9 @@ private:
         bool active = false;
         bool connected = false;
         bool publishing_live = false;
+        std::uint64_t bytes_published = 0;
+        std::uint64_t objects_published = 0;
+        std::uint64_t groups_published = 0;
         transport::TransportKind transport = transport::TransportKind::kRawQuic;
         std::string host;
         std::uint16_t port = 0;

@@ -16,6 +16,12 @@ namespace openmoq::publisher::transport {
 
 class MoqtSession {
 public:
+    struct PublishStats {
+        std::uint64_t bytes_published = 0;
+        std::uint64_t objects_published = 0;
+        std::uint64_t groups_published = 0;
+    };
+
     explicit MoqtSession(PublisherTransport& transport,
                          std::string track_namespace,
                          bool auto_forward,
@@ -37,8 +43,12 @@ public:
                                  openmoq::publisher::DraftVersion draft_version,
                                  bool split_cmaf_chunks);
     TransportStatus close(std::uint64_t application_error_code = 0);
+    PublishStats publish_stats() const;
 
 private:
+    void reset_publish_stats();
+    void record_published_object(const std::string& track_name, std::uint64_t group_id, std::size_t payload_bytes);
+
     TransportStatus ensure_setup(openmoq::publisher::DraftVersion draft);
     TransportStatus ensure_control_stream();
     TransportStatus write_frame(std::uint64_t stream_id, std::span<const std::uint8_t> frame, bool fin);
@@ -58,6 +68,8 @@ private:
     bool setup_complete_ = false;
     std::uint64_t namespace_stream_id_ = 0;
     std::map<std::uint64_t, std::uint64_t> publish_stream_id_by_request_id_;
+    PublishStats publish_stats_{};
+    std::unordered_map<std::string, std::uint64_t> last_group_by_track_;
 };
 
 }  // namespace openmoq::publisher::transport
