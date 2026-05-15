@@ -204,7 +204,44 @@ For service-style integration:
 5. For continuous input, run `publish_live(...)` in a worker thread.
 6. Use `TransportStatus` messages for metrics and retry decisions.
 
-## 11. Complete Example
+## 11. Runtime Stats (`stats_json`)
+
+You can query publisher runtime state at any time:
+
+```cpp
+const std::string stats = publisher.stats_json();
+std::cout << stats << "\n";
+```
+
+Current JSON fields:
+
+- `active`: whether a session is currently active
+- `connected`: whether transport is currently connected
+- `publishingLive`: whether the active session is live-publish mode
+- `transport`: `"raw_quic"` or `"webtransport"`
+- `host`: configured endpoint host
+- `port`: configured endpoint port
+- `path`: configured endpoint path
+- `connectionId`: transport connection identifier (when available)
+- `lastError`: last tracked error message
+
+Example:
+
+```json
+{
+  "active": true,
+  "connected": true,
+  "publishingLive": false,
+  "transport": "webtransport",
+  "host": "relay.example.com",
+  "port": 443,
+  "path": "/moq",
+  "connectionId": "wt-140735229359104",
+  "lastError": ""
+}
+```
+
+## 12. Complete Example
 
 ```cpp
 #include "openmoq/publisher/publisher_api.h"
@@ -250,7 +287,7 @@ int main() {
 }
 ```
 
-## 12. Live Publish with Audio/Video Encoders on Other Threads
+## 13. Live Publish with Audio/Video Encoders on Other Threads
 
 `publish_live(...)` consumes one MP4 byte stream.  
 For multi-track live publishing, the common pattern is:
