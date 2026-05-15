@@ -427,7 +427,7 @@ Behavior notes:
 - `--coalesce-cmaf-chunks` disables that split and falls back to one media object per group
 - when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
 - `--forward 1` proactively publishes tracks and objects after namespace setup completes
-- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 3 seconds
+- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 30 seconds
 - `--sni <value>` overrides the TLS SNI sent to the relay, which is useful when `--endpoint` uses a raw IP address; WebTransport still sends HTTP authority from the configured endpoint host
 - `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
 - `OPENMOQ_PICOQUIC_TRACE_CSV=/path/file.csv` is optional and only writes CSV output when `OPENMOQ_PICOQUIC_TRACE` is also set; rows include `pacing_before`, `pacing_after`, `enqueue`, and `served`/`sent` events for media objects

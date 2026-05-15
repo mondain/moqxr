@@ -30,7 +30,7 @@ config.include_sap = false;
 config.split_cmaf_chunks = true;
 config.paced = false;
 config.loop = false;
-config.subscriber_timeout = std::chrono::seconds(3);
+config.subscriber_timeout = std::chrono::seconds(30);
 
 openmoq::publisher::Publisher publisher(config);
 ```
@@ -266,7 +266,7 @@ int main() {
     config.draft_version = DraftVersion::kDraft14;
     config.track_namespace = "media";
     config.split_cmaf_chunks = true;
-    config.subscriber_timeout = std::chrono::seconds(3);
+    config.subscriber_timeout = std::chrono::seconds(30);
 
     Publisher publisher(config);
 

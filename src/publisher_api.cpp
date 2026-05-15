@@ -150,6 +150,7 @@ transport::TransportStatus Publisher::publish(const PreparedPublish& prepared,
     status = active->session->publish(materialized);
     if (!status.ok) {
         const std::string error = "transport publish failed: " + status.message;
+        static_cast<void>(active->session->close(0));
         clear_active_session(active, true, error);
         return transport::TransportStatus::failure(error);
     }
@@ -161,7 +162,6 @@ transport::TransportStatus Publisher::publish(const PreparedPublish& prepared,
         stats_.groups_published = batch_stats.groups_published;
     }
 
-    clear_active_session(active, true, "");
     return transport::TransportStatus::success();
 }
 
@@ -216,6 +216,7 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
     status = active->session->publish_live(input, config_.draft_version, config_.split_cmaf_chunks);
     if (!status.ok) {
         const std::string error = "transport live publish failed: " + status.message;
+        static_cast<void>(active->session->close(0));
         clear_active_session(active, true, error);
         return transport::TransportStatus::failure(error);
     }
@@ -227,7 +228,6 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
         stats_.groups_published = live_stats.groups_published;
     }
 
-    clear_active_session(active, true, "");
     return transport::TransportStatus::success();
 }
 
