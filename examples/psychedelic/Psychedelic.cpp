@@ -108,8 +108,10 @@ std::string build_ffmpeg_video_command(int seconds) {
            "-t " + std::to_string(seconds) + " "
            "-c:v libx264 -preset veryfast -tune zerolatency "
            "-g 8 -keyint_min 8 -sc_threshold 0 -pix_fmt yuv420p "
-           "-c:a aac -b:a 128k "
-           "-movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof "
+           "-c:a libopus -b:a 128k -application lowdelay "
+           "-muxdelay 0 -flush_packets 1 "
+           "-movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof+frag_custom "
+           "-frag_duration 50000 "
            "-f mp4 -";
 }
 
