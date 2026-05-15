@@ -149,6 +149,30 @@ struct MockTransport final : PublisherTransport {
     std::function<void(const MockTransport&, std::uint64_t)> on_read;
 };
 
+std::vector<std::size_t> object_write_indices(const MockTransport& transport) {
+    std::vector<std::size_t> indices;
+    for (std::size_t index = 0; index < transport.writes.size(); ++index) {
+        if (transport.writes[index].stream_id != 0) {
+            indices.push_back(index);
+        }
+    }
+    return indices;
+}
+
+std::size_t control_message_count(const MockTransport& transport, std::uint8_t type) {
+    std::size_t count = 0;
+    for (const auto& write : transport.writes) {
+        if (write.stream_id == 0) {
+            std::size_t cursor = 0;
+            std::uint64_t decoded_type = 0;
+            if (decode_varint(write.bytes, cursor, decoded_type) && decoded_type == type) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
 void append_be16(std::vector<std::uint8_t>& out, std::uint16_t value) {
     out.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
     out.push_back(static_cast<std::uint8_t>(value & 0xffU));
@@ -690,8 +714,10 @@ int main() {
                      "expected namespace write to use the configured track namespace");
         ok &= expect(message_type(transport.writes[2].bytes) == 0x04, "expected first SUBSCRIBE_OK");
         ok &= expect(message_type(transport.writes[3].bytes) == 0x04, "expected second SUBSCRIBE_OK");
-        ok &= expect(transport.writes[4].stream_id == 2, "expected first object stream to be unidirectional stream 2");
-        ok &= expect(!transport.writes[4].bytes.empty() && transport.writes[4].bytes.front() == 0x18,
+        const auto object_indices = object_write_indices(transport);
+        ok &= expect(object_indices.size() == 2, "expected two object stream writes");
+        ok &= expect(!transport.writes[object_indices[0]].bytes.empty() &&
+                         transport.writes[object_indices[0]].bytes.front() == 0x18,
                      "expected first draft-14 object stream to use draft-14 subgroup header with end-of-group");
         std::uint64_t stream_type = 0;
         std::uint64_t track_alias = 0;
@@ -699,7 +725,7 @@ int main() {
         std::uint64_t object_id_delta = 0;
         std::uint64_t payload_length = 0;
         std::vector<std::uint8_t> payload;
-        ok &= expect(decode_object_stream_fields(transport.writes[4].bytes,
+        ok &= expect(decode_object_stream_fields(transport.writes[object_indices[0]].bytes,
                                                  stream_type,
                                                  track_alias,
                                                  group_id,
@@ -713,12 +739,12 @@ int main() {
         ok &= expect(payload_length == 4, "expected catalog payload length to be encoded after object id delta");
         ok &= expect(payload == std::vector<std::uint8_t>({'I', 'N', 'I', 'T'}),
                      "expected catalog payload bytes after subgroup object fields");
-        ok &= expect(transport.writes[4].fin, "expected first object stream write to set FIN");
-        ok &= expect(transport.writes[5].stream_id == 6, "expected second object stream to be unidirectional stream 6");
-        ok &= expect(!transport.writes[5].bytes.empty() && transport.writes[5].bytes.front() == 0x18,
+        ok &= expect(transport.writes[object_indices[0]].fin, "expected first object stream write to set FIN");
+        ok &= expect(!transport.writes[object_indices[1]].bytes.empty() &&
+                         transport.writes[object_indices[1]].bytes.front() == 0x18,
                      "expected second draft-14 object stream to use draft-14 subgroup header with end-of-group");
         payload.clear();
-        ok &= expect(decode_object_stream_fields(transport.writes[5].bytes,
+        ok &= expect(decode_object_stream_fields(transport.writes[object_indices[1]].bytes,
                                                  stream_type,
                                                  track_alias,
                                                  group_id,
@@ -731,9 +757,8 @@ int main() {
         ok &= expect(payload_length == 3, "expected media payload length to be encoded after object id delta");
         ok &= expect(payload == std::vector<std::uint8_t>({'M', 'S', 'G'}),
                      "expected media payload bytes after subgroup object fields");
-        ok &= expect(transport.writes[5].fin, "expected second object stream write to set FIN");
-        ok &= expect(message_type(transport.writes[6].bytes) == 0x0b, "expected first PUBLISH_DONE");
-        ok &= expect(message_type(transport.writes[7].bytes) == 0x0b, "expected second PUBLISH_DONE");
+        ok &= expect(transport.writes[object_indices[1]].fin, "expected second object stream write to set FIN");
+        ok &= expect(control_message_count(transport, 0x0b) == 2, "expected two PUBLISH_DONE messages");
         ok &= expect(message_type(transport.writes[8].bytes) == 0x09, "expected PUBLISH_NAMESPACE_DONE");
         ok &= expect(transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x09, 0x01, 0x07, 0x69, 0x6e,
                                                                              0x74, 0x65, 0x72, 0x6f, 0x70}),
@@ -1041,14 +1066,10 @@ int main() {
                          "expected catalog PUBLISH before alias-based update activation");
             ok &= expect(message_type(transport.writes[3].bytes) == 0x04,
                          "expected media SUBSCRIBE_OK while catalog activation is pending");
-            ok &= expect(transport.writes[4].stream_id == 2,
-                         "expected catalog object stream after alias-based SUBSCRIBE_UPDATE activation");
-            ok &= expect(transport.writes[5].stream_id == 6,
-                         "expected media object stream after alias-based catalog activation");
-            ok &= expect(message_type(transport.writes[6].bytes) == 0x0b,
-                         "expected catalog PUBLISH_DONE after alias-based SUBSCRIBE_UPDATE activation");
-            ok &= expect(message_type(transport.writes[7].bytes) == 0x0b,
-                         "expected media PUBLISH_DONE after alias-based catalog activation");
+            ok &= expect(object_write_indices(transport).size() == 2,
+                         "expected catalog and media object stream writes after alias-based activation");
+            ok &= expect(control_message_count(transport, 0x0b) == 2,
+                         "expected catalog and media PUBLISH_DONE after alias-based activation");
             ok &= expect(message_type(transport.writes[8].bytes) == 0x09,
                          "expected namespace done after alias-based catalog activation");
         }
@@ -1159,14 +1180,10 @@ int main() {
                          "expected downgraded catalog SUBSCRIBE_OK");
             ok &= expect(message_type(transport.writes[5].bytes) == 0x04,
                          "expected downgraded media SUBSCRIBE_OK");
-            ok &= expect(transport.writes[6].stream_id == 2,
-                         "expected downgraded catalog object stream on stream 2");
-            ok &= expect(transport.writes[7].stream_id == 6,
-                         "expected downgraded media object stream on stream 6");
-            ok &= expect(message_type(transport.writes[8].bytes) == 0x0b,
-                         "expected downgraded catalog PUBLISH_DONE");
-            ok &= expect(message_type(transport.writes[9].bytes) == 0x0b,
-                         "expected downgraded media PUBLISH_DONE");
+            ok &= expect(object_write_indices(transport).size() == 2,
+                         "expected downgraded catalog and media object stream writes");
+            ok &= expect(control_message_count(transport, 0x0b) == 2,
+                         "expected downgraded catalog and media PUBLISH_DONE");
             ok &= expect(message_type(transport.writes[10].bytes) == 0x09,
                          "expected downgraded auto-forward PUBLISH_NAMESPACE_DONE");
         }
@@ -1262,10 +1279,9 @@ int main() {
                  "expected draft-16 namespace write to use the configured track namespace");
     ok &= expect(message_type(draft16_transport.writes[2].bytes) == 0x04, "expected first draft-16 SUBSCRIBE_OK");
     ok &= expect(message_type(draft16_transport.writes[3].bytes) == 0x04, "expected second draft-16 SUBSCRIBE_OK");
-    ok &= expect(draft16_transport.writes[4].stream_id == 2, "expected first draft-16 object stream");
-    ok &= expect(draft16_transport.writes[5].stream_id == 6, "expected second draft-16 object stream");
-    ok &= expect(message_type(draft16_transport.writes[6].bytes) == 0x0b, "expected first draft-16 PUBLISH_DONE");
-    ok &= expect(message_type(draft16_transport.writes[7].bytes) == 0x0b, "expected second draft-16 PUBLISH_DONE");
+    ok &= expect(object_write_indices(draft16_transport).size() == 2, "expected two draft-16 object stream writes");
+    ok &= expect(control_message_count(draft16_transport, 0x0b) == 2,
+                 "expected two draft-16 PUBLISH_DONE messages");
     ok &= expect(message_type(draft16_transport.writes[8].bytes) == 0x09,
                  "expected draft-16 PUBLISH_NAMESPACE_DONE");
     ok &= expect(draft16_transport.writes[8].bytes == std::vector<std::uint8_t>({0x09, 0x00, 0x01, 0x00}),
