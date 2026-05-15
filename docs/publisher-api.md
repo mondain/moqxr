@@ -119,6 +119,11 @@ if (!status.ok) {
     // status.message includes context such as:
     // "transport connect failed: ..."
     // "transport publish failed: ..."
+} else {
+    const auto disconnect_status = publisher.disconnect(0);
+    if (!disconnect_status.ok) {
+        // handle disconnect_status.message
+    }
 }
 ```
 
@@ -135,6 +140,11 @@ For live pipelines (for example ffmpeg piping fragmented MP4):
 const auto status = publisher.publish_live(std::cin, endpoint, tls);
 if (!status.ok) {
     // handle status.message
+} else {
+    const auto disconnect_status = publisher.disconnect(0);
+    if (!disconnect_status.ok) {
+        // handle disconnect_status.message
+    }
 }
 ```
 
@@ -175,6 +185,11 @@ auto status = publisher.publish_file("sample.mp4", endpoint, tls);
 if (!status.ok) {
     // log status.message
     // map to app-level retry/backoff policy
+} else {
+    auto disconnect_status = publisher.disconnect(0);
+    if (!disconnect_status.ok) {
+        // log disconnect_status.message
+    }
 }
 ```
 
@@ -221,6 +236,12 @@ int main() {
     const auto status = publisher.publish_file("sample.mp4", endpoint, tls);
     if (!status.ok) {
         std::cerr << "publish failed: " << status.message << "\n";
+        return 1;
+    }
+
+    const auto disconnect_status = publisher.disconnect(0);
+    if (!disconnect_status.ok) {
+        std::cerr << "disconnect failed: " << disconnect_status.message << "\n";
         return 1;
     }
 
@@ -372,6 +393,11 @@ int main() {
     const TransportStatus status = publisher.publish_live(live_input, endpoint, tls);
     if (!status.ok) {
         std::cerr << "live publish failed: " << status.message << "\n";
+    } else {
+        const TransportStatus disconnect_status = publisher.disconnect(0);
+        if (!disconnect_status.ok) {
+            std::cerr << "disconnect failed: " << disconnect_status.message << "\n";
+        }
     }
 
     running.store(false);
@@ -398,4 +424,5 @@ int main() {
 `ftyp` + `moov` first, then `moof`/`mdat` pairs.
 3. Apply backpressure in your queue/pipe to avoid unbounded memory growth if network publish slows.
 4. Timestamp audio/video from a common timeline before muxing to preserve A/V sync.
-5. On shutdown, stop encoders, flush muxer, close the pipe, then join threads.
+5. After publish completion, call `disconnect(0)` for explicit graceful teardown.
+6. Then stop encoders, flush muxer, close the pipe, and join threads.

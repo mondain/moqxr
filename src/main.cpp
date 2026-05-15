@@ -39,6 +39,10 @@ int main(int argc, char** argv) {
             if (!status.ok) {
                 throw std::runtime_error(status.message);
             }
+            const auto disconnect_status = publisher.disconnect(0);
+            if (!disconnect_status.ok) {
+                throw std::runtime_error(disconnect_status.message);
+            }
         } else {
             // Original batch mode: read entire file/stdin, segment, plan, publish.
             const PreparedPublish prepared = options.input_source.kind == InputSourceKind::kStdin
@@ -61,6 +65,10 @@ int main(int argc, char** argv) {
                     options.endpoint_alpn_overridden);
                 if (!status.ok) {
                     throw std::runtime_error(status.message);
+                }
+                const auto disconnect_status = publisher.disconnect(0);
+                if (!disconnect_status.ok) {
+                    throw std::runtime_error(disconnect_status.message);
                 }
             }
         }
