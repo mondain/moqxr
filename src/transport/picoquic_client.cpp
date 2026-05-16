@@ -48,6 +48,7 @@ struct PicoquicClient::Impl {
     };
 
     std::mutex mutex;
+    std::mutex join_mutex; // serialises concurrent close()/disconnect() join attempts
     std::condition_variable condition;
     std::deque<PendingWrite> pending_writes;
     std::deque<AcceptedWrite> accepted_writes_waiting_for_send;
@@ -717,8 +718,11 @@ TransportStatus PicoquicClient::close(std::uint64_t application_error_code) {
             impl_->close_error_code = application_error_code;
         }
         trace("joining client packet loop thread");
-        if (impl_->packet_loop_thread.joinable()) {
-            impl_->packet_loop_thread.join();
+        {
+            std::lock_guard<std::mutex> join_lock(impl_->join_mutex);
+            if (impl_->packet_loop_thread.joinable()) {
+                impl_->packet_loop_thread.join();
+            }
         }
     }
 
