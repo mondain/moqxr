@@ -1137,12 +1137,11 @@ std::vector<std::uint8_t> encode_subgroup_object(DraftVersion draft,
         previous_object_id.has_value() ? (object_id - *previous_object_id - 1) : object_id;
     std::vector<std::uint8_t> bytes;
     append_varint(bytes, object_id_delta);
-    if (draft == DraftVersion::kDraft18) {
-        // draft-18 subgroup object encoding includes Object Status. For normal
-        // payload-carrying objects this is OBJECT_STATUS_NORMAL (0).
+    append_varint(bytes, payload.size());
+    if (draft == DraftVersion::kDraft18 && payload.empty()) {
+        // draft-18 only carries Object Status after a zero payload length.
         append_varint(bytes, 0);
     }
-    append_varint(bytes, payload.size());
     bytes.insert(bytes.end(), payload.begin(), payload.end());
     return bytes;
 }

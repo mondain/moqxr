@@ -149,10 +149,11 @@ std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
                                                  std::uint64_t subgroup_id,
                                                  bool end_of_group);
 
-// Object fields to append to an already-open subgroup stream. Per spec
-// §10.4.2 the first object on the stream carries its absolute Object ID
-// (pass std::nullopt for previous_object_id); subsequent objects encode
-// Object ID Delta = object_id - previous_object_id - 1.
+// Object fields to append to an already-open subgroup stream. The first object
+// on the stream carries its absolute Object ID (pass std::nullopt for
+// previous_object_id); subsequent objects encode Object ID Delta =
+// object_id - previous_object_id - 1. Draft-18 only emits Object Status when
+// the payload length is zero.
 std::vector<std::uint8_t> encode_subgroup_object(DraftVersion draft,
                                                  std::optional<std::uint64_t> previous_object_id,
                                                  std::uint64_t object_id,

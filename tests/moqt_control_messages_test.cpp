@@ -1,6 +1,8 @@
 #include "openmoq/publisher/transport/moqt_control_messages.h"
 
 #include <cstdint>
+#include <cstddef>
+#include <optional>
 #include <iostream>
 #include <span>
 #include <string>
@@ -20,6 +22,7 @@ using openmoq::publisher::transport::decode_server_setup_message;
 using openmoq::publisher::transport::decode_varint;
 using openmoq::publisher::transport::encode_request_ok_message;
 using openmoq::publisher::transport::encode_setup_message;
+using openmoq::publisher::transport::encode_subgroup_object;
 
 bool expect(bool condition, const std::string& message) {
     if (!condition) {
@@ -150,6 +153,38 @@ int main() {
         ok &= expect(decode_request_ok(std::span<const std::uint8_t>(bytes), DraftVersion::kDraft16, message),
                      "expected draft-16 request_ok decode to remain valid");
         ok &= expect(message.request_id == 7, "expected draft-16 request_ok request_id to remain parsed");
+    }
+
+    {
+        const std::vector<std::uint8_t> payload = {0xaa, 0xbb, 0xcc};
+        const std::vector<std::uint8_t> bytes =
+            encode_subgroup_object(DraftVersion::kDraft18, std::nullopt, 0, payload);
+        std::size_t offset = 0;
+        std::uint64_t object_id_delta = 99;
+        std::uint64_t payload_length = 99;
+        ok &= expect(decode_varint(bytes, offset, object_id_delta) && object_id_delta == 0,
+                     "expected draft-18 first subgroup object id delta");
+        ok &= expect(decode_varint(bytes, offset, payload_length) && payload_length == payload.size(),
+                     "expected draft-18 payload length immediately after object id delta");
+        ok &= expect(offset + payload_length == bytes.size(), "expected draft-18 payload object to omit status");
+        ok &= expect(std::vector<std::uint8_t>(bytes.begin() + static_cast<std::ptrdiff_t>(offset), bytes.end()) == payload,
+                     "expected draft-18 payload bytes after length");
+    }
+
+    {
+        const std::vector<std::uint8_t> bytes =
+            encode_subgroup_object(DraftVersion::kDraft18, std::nullopt, 0, {});
+        std::size_t offset = 0;
+        std::uint64_t object_id_delta = 99;
+        std::uint64_t payload_length = 99;
+        std::uint64_t object_status = 99;
+        ok &= expect(decode_varint(bytes, offset, object_id_delta) && object_id_delta == 0,
+                     "expected draft-18 empty object id delta");
+        ok &= expect(decode_varint(bytes, offset, payload_length) && payload_length == 0,
+                     "expected draft-18 empty object payload length");
+        ok &= expect(decode_varint(bytes, offset, object_status) && object_status == 0,
+                     "expected draft-18 empty object status after zero length");
+        ok &= expect(offset == bytes.size(), "expected draft-18 empty object to contain no payload");
     }
 
     return ok ? 0 : 1;
