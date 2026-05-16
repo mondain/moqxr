@@ -9,6 +9,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -53,6 +54,7 @@ struct PicoquicClient::Impl {
     std::deque<PendingWrite> pending_writes;
     std::deque<AcceptedWrite> accepted_writes_waiting_for_send;
     std::map<std::uint64_t, ReceivedStreamData> received_streams;
+    std::set<std::uint64_t> accepted_streams;
     bool connected = false;
     bool failed = false;
     bool disconnected = false;
@@ -633,6 +635,62 @@ TransportStatus PicoquicClient::write_stream(std::uint64_t stream_id,
     }
 
     return TransportStatus::success();
+#endif
+}
+
+TransportStatus PicoquicClient::accept_stream(StreamDirection direction,
+                                              std::uint64_t& stream_id,
+                                              std::chrono::milliseconds timeout) {
+    if (state_ != ConnectionState::kConnected) {
+        return TransportStatus::failure("transport is not connected");
+    }
+
+#ifndef OPENMOQ_HAS_PICOQUIC
+    static_cast<void>(direction);
+    static_cast<void>(stream_id);
+    static_cast<void>(timeout);
+    return TransportStatus::failure("picoquic support is not enabled in this build");
+#else
+    const auto matches_direction = [direction](std::uint64_t id) {
+        if (direction == StreamDirection::kBidirectional) {
+            return (id & 0x3ULL) == 0x1ULL;
+        }
+        return (id & 0x3ULL) == 0x3ULL;
+    };
+
+    std::unique_lock<std::mutex> lock(impl_->mutex);
+    const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
+        if (impl_->failed) {
+            return true;
+        }
+        for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
+            static_cast<void>(ignored);
+            if (matches_direction(candidate_stream_id) &&
+                !impl_->accepted_streams.contains(candidate_stream_id)) {
+                return true;
+            }
+        }
+        return false;
+    });
+
+    if (!ready) {
+        return TransportStatus::failure("timed out waiting for stream data");
+    }
+    if (impl_->failed) {
+        return TransportStatus::failure(impl_->last_error.empty() ? "picoquic transport failed"
+                                                                  : impl_->last_error);
+    }
+
+    for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
+        static_cast<void>(ignored);
+        if (matches_direction(candidate_stream_id) &&
+            !impl_->accepted_streams.contains(candidate_stream_id)) {
+            impl_->accepted_streams.insert(candidate_stream_id);
+            stream_id = candidate_stream_id;
+            return TransportStatus::success();
+        }
+    }
+    return TransportStatus::failure("no queued read for stream");
 #endif
 }
 

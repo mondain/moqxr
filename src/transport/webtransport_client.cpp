@@ -51,6 +51,7 @@ struct WebTransportClient::Impl {
     std::deque<PendingWrite> pending_writes;
     std::map<std::uint64_t, ReceivedStreamData> received_streams;
     std::set<std::uint64_t> application_streams;
+    std::set<std::uint64_t> accepted_streams;
     bool connected = false;
     bool failed = false;
     bool disconnected = false;
@@ -656,6 +657,64 @@ TransportStatus WebTransportClient::write_stream(std::uint64_t stream_id,
     }
     impl_->condition.notify_all();
     return TransportStatus::success();
+#endif
+}
+
+TransportStatus WebTransportClient::accept_stream(StreamDirection direction,
+                                                  std::uint64_t& stream_id,
+                                                  std::chrono::milliseconds timeout) {
+    if (state_ != ConnectionState::kConnected) {
+        return TransportStatus::failure("transport is not connected");
+    }
+
+#ifndef OPENMOQ_HAS_PICOQUIC
+    static_cast<void>(direction);
+    static_cast<void>(stream_id);
+    static_cast<void>(timeout);
+    return TransportStatus::failure("picoquic support is not enabled in this build");
+#else
+    const auto matches_direction = [direction](std::uint64_t id) {
+        const bool bidi = (id & 0x2ULL) == 0;
+        return direction == StreamDirection::kBidirectional ? bidi : !bidi;
+    };
+    const auto is_peer_application_stream = [&](std::uint64_t id) {
+        if (impl_->control_stream_ctx != nullptr && id == impl_->control_stream_ctx->stream_id) {
+            return false;
+        }
+        if (impl_->application_streams.contains(id) || impl_->accepted_streams.contains(id)) {
+            return false;
+        }
+        return matches_direction(id);
+    };
+
+    std::unique_lock<std::mutex> lock(impl_->mutex);
+    const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
+        if (impl_->failed) {
+            return true;
+        }
+        for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
+            static_cast<void>(ignored);
+            if (is_peer_application_stream(candidate_stream_id)) {
+                return true;
+            }
+        }
+        return false;
+    });
+    if (!ready) {
+        return TransportStatus::failure("timed out waiting for stream data");
+    }
+    if (impl_->failed) {
+        return TransportStatus::failure(impl_->last_error.empty() ? "webtransport connection failed" : impl_->last_error);
+    }
+    for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
+        static_cast<void>(ignored);
+        if (is_peer_application_stream(candidate_stream_id)) {
+            impl_->accepted_streams.insert(candidate_stream_id);
+            stream_id = candidate_stream_id;
+            return TransportStatus::success();
+        }
+    }
+    return TransportStatus::failure("no queued read for stream");
 #endif
 }
 

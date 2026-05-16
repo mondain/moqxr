@@ -62,6 +62,9 @@ public:
     virtual TransportStatus connect() = 0;
     virtual ConnectionState state() const = 0;
     virtual TransportStatus open_stream(StreamDirection direction, std::uint64_t& stream_id) = 0;
+    virtual TransportStatus accept_stream(StreamDirection direction,
+                                          std::uint64_t& stream_id,
+                                          std::chrono::milliseconds timeout) = 0;
     virtual TransportStatus write_stream(std::uint64_t stream_id,
                                          std::span<const std::uint8_t> bytes,
                                          bool fin) = 0;

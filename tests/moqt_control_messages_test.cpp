@@ -22,6 +22,7 @@ using openmoq::publisher::transport::ServerSetupMessage;
 using openmoq::publisher::transport::SetupMessage;
 using openmoq::publisher::transport::SubscribeMessage;
 using openmoq::publisher::transport::SubscribeNamespaceMessage;
+using openmoq::publisher::transport::SubscribeTracksMessage;
 using openmoq::publisher::transport::SubscribeUpdateMessage;
 using openmoq::publisher::transport::TrackMessage;
 using openmoq::publisher::transport::TransportKind;
@@ -33,6 +34,7 @@ using openmoq::publisher::transport::decode_request_ok;
 using openmoq::publisher::transport::decode_server_setup_message;
 using openmoq::publisher::transport::decode_subscribe_message;
 using openmoq::publisher::transport::decode_subscribe_namespace_message;
+using openmoq::publisher::transport::decode_subscribe_tracks_message;
 using openmoq::publisher::transport::decode_subscribe_update_message;
 using openmoq::publisher::transport::decode_varint;
 using openmoq::publisher::transport::encode_namespace_message;
@@ -246,6 +248,19 @@ std::vector<std::uint8_t> build_subscribe_namespace_message(DraftVersion draft) 
         append_varint(bytes, payload.size());
     }
     bytes.insert(bytes.end(), payload.begin(), payload.end());
+    return bytes;
+}
+
+std::vector<std::uint8_t> build_subscribe_tracks_message() {
+    std::vector<std::uint8_t> payload;
+    append_varint(payload, 93);
+    append_track_namespace(payload, {"live", "alpha"});
+    append_varint(payload, 1);     // one delta-encoded parameter
+    append_varint(payload, 0x10);  // FORWARD
+    append_varint(payload, 0);
+
+    std::vector<std::uint8_t> bytes;
+    append_uint16_length_message(bytes, 0x51, payload);
     return bytes;
 }
 
@@ -485,6 +500,19 @@ bool test_peer_control_message_decoders_for_all_drafts() {
         ok &= expect(subscribe.forward == 1 && subscribe.filter_type == 3 && subscribe.start_group_id == 9 &&
                          subscribe.start_object_id == 4,
                      label + " subscribe filter fields");
+
+        SubscribeTracksMessage subscribe_tracks;
+        if (draft == DraftVersion::kDraft18) {
+            ok &= expect(decode_subscribe_tracks_message(build_subscribe_tracks_message(), draft, subscribe_tracks),
+                         label + " subscribe tracks decode");
+            ok &= expect(subscribe_tracks.request_id == 93, label + " subscribe tracks request id");
+            ok &= expect(subscribe_tracks.track_namespace_prefix == std::vector<std::string>({"live", "alpha"}),
+                         label + " subscribe tracks namespace tuple");
+            ok &= expect(subscribe_tracks.forward == 0, label + " subscribe tracks forward parameter");
+        } else {
+            ok &= expect(!decode_subscribe_tracks_message(build_subscribe_tracks_message(), draft, subscribe_tracks),
+                         label + " subscribe tracks rejected outside draft-18");
+        }
 
         SubscribeUpdateMessage update;
         ok &= expect(decode_subscribe_update_message(build_subscribe_update_message(), update),

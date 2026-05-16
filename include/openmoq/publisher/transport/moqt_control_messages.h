@@ -63,6 +63,12 @@ struct SubscribeNamespaceMessage {
     std::vector<std::string> track_namespace_prefix;
 };
 
+struct SubscribeTracksMessage {
+    std::uint64_t request_id = 0;
+    std::vector<std::string> track_namespace_prefix;
+    std::uint8_t forward = 1;
+};
+
 struct SubscribeMessage {
     std::uint64_t request_id = 0;
     std::vector<std::string> track_namespace;
@@ -122,6 +128,9 @@ bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
                                         DraftVersion draft,
                                         SubscribeNamespaceMessage& message);
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id);
+bool decode_subscribe_tracks_message(std::span<const std::uint8_t> bytes,
+                                     DraftVersion draft,
+                                     SubscribeTracksMessage& message);
 bool decode_subscribe_message(std::span<const std::uint8_t> bytes, DraftVersion draft, SubscribeMessage& message);
 bool decode_subscribe_update_message(std::span<const std::uint8_t> bytes, SubscribeUpdateMessage& message);
 std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,

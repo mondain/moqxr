@@ -30,6 +30,7 @@ constexpr std::uint64_t kMaxRequestIdType = 0x15;
 constexpr std::uint64_t kPublishType = 0x1d;
 constexpr std::uint64_t kPublishOkType = 0x1e;
 constexpr std::uint64_t kPublishErrorType = 0x1f;
+constexpr std::uint64_t kSubscribeTracksType = 0x51;
 // SUBGROUP_HEADER type byte layout (draft-16 §10.4.2):
 //   bit 0: EXTENSIONS         (0 = no per-object extensions on this stream)
 //   bits 1-2: SUBGROUP_ID_MODE (00 = Subgroup ID absent, value is 0)
@@ -327,6 +328,7 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         case kPublishType:
         case kPublishOkType:
         case kPublishErrorType:
+        case kSubscribeTracksType:
         case 0x0a:  // UNSUBSCRIBE
         case 0x10:  // GOAWAY
         case 0x14:  // SUBSCRIBE_DONE (draft-14)
@@ -940,6 +942,63 @@ bool decode_subscribe_message(std::span<const std::uint8_t> bytes, DraftVersion 
                 // session with PROTOCOL_VIOLATION. We surface the rejection to
                 // the caller; session close semantics are the caller's domain.
                 return false;
+        }
+        offset += static_cast<std::size_t>(parameter_length);
+    }
+
+    return offset == payload_end;
+}
+
+bool decode_subscribe_tracks_message(std::span<const std::uint8_t> bytes,
+                                     DraftVersion draft,
+                                     SubscribeTracksMessage& message) {
+    if (draft != DraftVersion::kDraft18) {
+        return false;
+    }
+
+    std::size_t payload_offset = 0;
+    std::size_t payload_length = 0;
+    if (!parse_uint16_length_message(bytes, kSubscribeTracksType, payload_offset, payload_length)) {
+        return false;
+    }
+
+    std::size_t offset = payload_offset;
+    const std::size_t payload_end = payload_offset + payload_length;
+    if (!decode_varint_impl(bytes, offset, message.request_id) ||
+        !decode_track_namespace(bytes.subspan(0, payload_end), offset, message.track_namespace_prefix) ||
+        message.track_namespace_prefix.size() > 32) {
+        return false;
+    }
+
+    message.forward = 1;
+    std::uint64_t parameter_count = 0;
+    if (!decode_varint_impl(bytes, offset, parameter_count)) {
+        return false;
+    }
+
+    std::uint64_t previous_parameter_type = 0;
+    for (std::uint64_t index = 0; index < parameter_count; ++index) {
+        std::uint64_t parameter_type = 0;
+        if (!decode_parameter_type(bytes, offset, previous_parameter_type, true, parameter_type)) {
+            return false;
+        }
+        if ((parameter_type & 0x1ULL) == 0) {
+            std::uint64_t value = 0;
+            if (!decode_varint_impl(bytes, offset, value)) {
+                return false;
+            }
+            if (parameter_type == 0x10) {
+                if (value > 1) {
+                    return false;
+                }
+                message.forward = static_cast<std::uint8_t>(value);
+            }
+            continue;
+        }
+
+        std::uint64_t parameter_length = 0;
+        if (!decode_varint_impl(bytes, offset, parameter_length) || offset + parameter_length > payload_end) {
+            return false;
         }
         offset += static_cast<std::size_t>(parameter_length);
     }

@@ -77,6 +77,27 @@ struct MockTransport final : PublisherTransport {
         return TransportStatus::success();
     }
 
+    TransportStatus accept_stream(StreamDirection direction,
+                                  std::uint64_t& stream_id,
+                                  std::chrono::milliseconds timeout) override {
+        read_timeouts.push_back(timeout);
+        const auto matches_direction = [direction](std::uint64_t id) {
+            if (direction == StreamDirection::kBidirectional) {
+                return (id & 0x3ULL) == 0x1ULL;
+            }
+            return (id & 0x3ULL) == 0x3ULL;
+        };
+        for (const auto& [candidate_stream_id, chunks] : reads) {
+            static_cast<void>(chunks);
+            if (matches_direction(candidate_stream_id) && !accepted_streams.contains(candidate_stream_id)) {
+                accepted_streams.insert(candidate_stream_id);
+                stream_id = candidate_stream_id;
+                return TransportStatus::success();
+            }
+        }
+        return TransportStatus::failure("timed out waiting for stream data");
+    }
+
     TransportStatus write_stream(std::uint64_t stream_id,
                                  std::span<const std::uint8_t> bytes,
                                  bool fin) override {
@@ -147,6 +168,7 @@ struct MockTransport final : PublisherTransport {
     std::vector<WriteEvent> writes;
     std::vector<std::chrono::milliseconds> read_timeouts;
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
+    std::set<std::uint64_t> accepted_streams;
     std::function<void(const MockTransport&, std::uint64_t)> on_read;
 };
 
@@ -334,6 +356,33 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     }
 
     std::vector<std::uint8_t> message = encode_varint(0x03);
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+std::vector<std::uint8_t> encode_subscribe_tracks_message(std::uint64_t request_id,
+                                                          std::string_view track_namespace,
+                                                          std::uint8_t forward = 1) {
+    std::vector<std::uint8_t> payload = encode_varint(request_id);
+    const std::vector<std::uint8_t> tuple_len = encode_varint(1);
+    const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
+    payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
+    payload.insert(payload.end(), component_len.begin(), component_len.end());
+    payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
+    if (forward == 0) {
+        const std::vector<std::uint8_t> parameter_count = encode_varint(1);
+        const std::vector<std::uint8_t> forward_delta = encode_varint(0x10);
+        const std::vector<std::uint8_t> forward_value = encode_varint(0);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+        payload.insert(payload.end(), forward_delta.begin(), forward_delta.end());
+        payload.insert(payload.end(), forward_value.begin(), forward_value.end());
+    } else {
+        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+    }
+
+    std::vector<std::uint8_t> message = encode_varint(0x51);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
@@ -1639,6 +1688,55 @@ int main() {
     }
 
     {
+        MockTransport draft18_subscribe_tracks_transport;
+        draft18_subscribe_tracks_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        draft18_subscribe_tracks_transport.reads[4].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_subscribe_tracks_transport.reads[1].push_back(
+            encode_subscribe_tracks_message(91, kTestTrackNamespace));
+        draft18_subscribe_tracks_transport.reads[8].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        draft18_subscribe_tracks_transport.reads[12].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession draft18_subscribe_tracks_session(
+            draft18_subscribe_tracks_transport,
+            std::string(kTestTrackNamespace),
+            false,
+            false,
+            false,
+            std::chrono::seconds(1));
+        status = draft18_subscribe_tracks_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 SUBSCRIBE_TRACKS session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_subscribe_tracks_session.publish(draft18_materialized);
+        ok &= expect(status.ok, "expected draft-18 SUBSCRIBE_TRACKS publish to succeed");
+
+        bool saw_subscribe_tracks_ok = false;
+        bool saw_first_publish = false;
+        bool saw_second_publish = false;
+        for (const auto& write : draft18_subscribe_tracks_transport.writes) {
+            if (write.stream_id == 1 && message_type(write.bytes) == 0x07) {
+                saw_subscribe_tracks_ok = true;
+            }
+            if (write.stream_id == 8 && message_type(write.bytes) == 0x1d) {
+                saw_first_publish = true;
+            }
+            if (write.stream_id == 12 && message_type(write.bytes) == 0x1d) {
+                saw_second_publish = true;
+            }
+        }
+        ok &= expect(saw_subscribe_tracks_ok, "expected SUBSCRIBE_TRACKS response stream REQUEST_OK");
+        ok &= expect(saw_first_publish && saw_second_publish,
+                     "expected SUBSCRIBE_TRACKS to publish matching draft-18 tracks on request streams");
+    }
+
+    {
         MockTransport draft18_bad_response_transport;
         draft18_bad_response_transport.reads[0].push_back(encode_server_setup_message({
             .draft = DraftVersion::kDraft18,
@@ -1911,6 +2009,56 @@ int main() {
                      "expected draft-18 live PUBLISH_NAMESPACE on a request stream");
         ok &= expect(control_message_count(live_draft18_transport, 0x1d) == 0,
                      "expected draft-18 live publish to avoid legacy control-stream PUBLISH");
+    }
+
+    {
+        MockTransport live_draft18_subscribe_tracks_transport;
+        live_draft18_subscribe_tracks_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        live_draft18_subscribe_tracks_transport.reads[4].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        live_draft18_subscribe_tracks_transport.reads[1].push_back(
+            encode_subscribe_tracks_message(91, kTestTrackNamespace));
+        live_draft18_subscribe_tracks_transport.reads[8].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        live_draft18_subscribe_tracks_transport.reads[12].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+
+        MoqtSession live_draft18_subscribe_tracks_session(
+            live_draft18_subscribe_tracks_transport,
+            std::string(kTestTrackNamespace),
+            false,
+            false,
+            false,
+            std::chrono::seconds(1));
+        status = live_draft18_subscribe_tracks_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 live SUBSCRIBE_TRACKS session connect to succeed");
+
+        const auto live_bytes = make_live_init_mp4();
+        std::string live_input_bytes(live_bytes.begin(), live_bytes.end());
+        std::istringstream live_input(live_input_bytes);
+        status = live_draft18_subscribe_tracks_session.publish_live(live_input, DraftVersion::kDraft18, false);
+        ok &= expect(status.ok, "expected draft-18 live SUBSCRIBE_TRACKS publish to succeed");
+
+        bool saw_subscribe_tracks_ok = false;
+        bool saw_catalog_publish = false;
+        bool saw_media_publish = false;
+        for (const auto& write : live_draft18_subscribe_tracks_transport.writes) {
+            if (write.stream_id == 1 && message_type(write.bytes) == 0x07) {
+                saw_subscribe_tracks_ok = true;
+            }
+            if (write.stream_id == 8 && message_type(write.bytes) == 0x1d) {
+                saw_catalog_publish = true;
+            }
+            if (write.stream_id == 12 && message_type(write.bytes) == 0x1d) {
+                saw_media_publish = true;
+            }
+        }
+        ok &= expect(saw_subscribe_tracks_ok, "expected live SUBSCRIBE_TRACKS response stream REQUEST_OK");
+        ok &= expect(saw_catalog_publish && saw_media_publish,
+                     "expected live SUBSCRIBE_TRACKS to PUBLISH catalog and media tracks");
     }
 
     {

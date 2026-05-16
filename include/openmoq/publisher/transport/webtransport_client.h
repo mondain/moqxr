@@ -16,6 +16,9 @@ public:
     TransportStatus connect() override;
     ConnectionState state() const override;
     TransportStatus open_stream(StreamDirection direction, std::uint64_t& stream_id) override;
+    TransportStatus accept_stream(StreamDirection direction,
+                                  std::uint64_t& stream_id,
+                                  std::chrono::milliseconds timeout) override;
     TransportStatus write_stream(std::uint64_t stream_id,
                                  std::span<const std::uint8_t> bytes,
                                  bool fin) override;

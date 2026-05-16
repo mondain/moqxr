@@ -62,6 +62,10 @@ struct MockTransport final : PublisherTransport {
         return TransportStatus::failure("not implemented");
     }
 
+    TransportStatus accept_stream(StreamDirection, std::uint64_t&, std::chrono::milliseconds) override {
+        return TransportStatus::failure("not implemented");
+    }
+
     TransportStatus write_stream(std::uint64_t, std::span<const std::uint8_t>, bool) override {
         return TransportStatus::failure("not implemented");
     }
