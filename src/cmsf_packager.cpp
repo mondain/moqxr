@@ -654,13 +654,22 @@ LiveCatalog build_live_catalog(const std::vector<TrackDescription>& tracks,
 
     LiveCatalog result;
 
-    // For live streaming, use full init segment for all tracks (simpler than building track-specific)
-    const std::string full_init_base64 = local_base64_encode(init_segment);
-    for (const auto& track : tracks) {
+    // Build per-track init segments (single-track moov), matching the static file publish path.
+    // Each track's initData must be a CMAF init segment containing only that track's trak/trex.
+    std::map<std::string, std::string> init_data_by_track;
+    for (std::size_t index = 0; index < tracks.size(); ++index) {
+        const auto& track = tracks[index];
+        std::vector<std::uint8_t> track_init;
+        try {
+            track_init = build_track_specific_init_segment(init_segment, track, index);
+        } catch (...) {
+            track_init = std::vector<std::uint8_t>(init_segment.begin(), init_segment.end());
+        }
+        init_data_by_track.emplace(track.track_name, local_base64_encode(track_init));
         result.track_initializations.push_back({
             .track_name = track.track_name,
             .codec_payload = {},
-            .init_segment = std::vector<std::uint8_t>(init_segment.begin(), init_segment.end()),
+            .init_segment = std::move(track_init),
         });
     }
 
@@ -697,8 +706,10 @@ LiveCatalog build_live_catalog(const std::vector<TrackDescription>& tracks,
             catalog << ",\"sampleRate\":" << track.sample_rate
                     << ",\"channelCount\":" << track.channel_count;
         }
-        // Use full init segment for all tracks
-        catalog << ",\"initData\":\"" << full_init_base64 << '"';
+        const auto init_it = init_data_by_track.find(track.track_name);
+        if (init_it != init_data_by_track.end()) {
+            catalog << ",\"initData\":\"" << init_it->second << '"';
+        }
         catalog << '}';
     }
     catalog << "]}";
