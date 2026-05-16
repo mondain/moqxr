@@ -659,12 +659,7 @@ LiveCatalog build_live_catalog(const std::vector<TrackDescription>& tracks,
     std::map<std::string, std::string> init_data_by_track;
     for (std::size_t index = 0; index < tracks.size(); ++index) {
         const auto& track = tracks[index];
-        std::vector<std::uint8_t> track_init;
-        try {
-            track_init = build_track_specific_init_segment(init_segment, track, index);
-        } catch (...) {
-            track_init = std::vector<std::uint8_t>(init_segment.begin(), init_segment.end());
-        }
+        std::vector<std::uint8_t> track_init = build_track_specific_init_segment(init_segment, track, index);
         init_data_by_track.emplace(track.track_name, local_base64_encode(track_init));
         result.track_initializations.push_back({
             .track_name = track.track_name,

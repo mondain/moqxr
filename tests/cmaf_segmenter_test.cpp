@@ -614,6 +614,38 @@ int main() {
     ok &= expect(audio_init_boxes[0].type == "ftyp" && audio_init_boxes[1].type == "moov",
                  "expected audio initData to contain ftyp and moov boxes");
 
+    const auto live_catalog = build_live_catalog(multitrack_segmented.tracks, multitrack_init_bytes, true);
+    const std::string live_catalog_text(live_catalog.catalog_payload.begin(), live_catalog.catalog_payload.end());
+    const std::string live_video_init_data = catalog_init_data(live_catalog_text, "vide_1");
+    const std::string live_audio_init_data = catalog_init_data(live_catalog_text, "soun_2");
+    const auto live_video_init_bytes = base64_decode(live_video_init_data);
+    const auto live_audio_init_bytes = base64_decode(live_audio_init_data);
+    const auto live_video_init_tracks = extract_tracks(parse_mp4_boxes(live_video_init_bytes), live_video_init_bytes);
+    const auto live_audio_init_tracks = extract_tracks(parse_mp4_boxes(live_audio_init_bytes), live_audio_init_bytes);
+    ok &= expect(live_catalog.track_initializations.size() == 2, "expected live catalog to expose per-track init payloads");
+    ok &= expect_contains(live_catalog_text, "\"isLive\":true", "expected live catalog isLive flag");
+    ok &= expect(!live_video_init_data.empty(), "expected live video initData in catalog");
+    ok &= expect(!live_audio_init_data.empty(), "expected live audio initData in catalog");
+    ok &= expect(live_video_init_data != live_audio_init_data, "expected live per-track initData entries to differ");
+    ok &= expect(live_catalog.track_initializations[0].init_segment == live_video_init_bytes,
+                 "expected live video init segment to match catalog initData");
+    ok &= expect(live_catalog.track_initializations[1].init_segment == live_audio_init_bytes,
+                 "expected live audio init segment to match catalog initData");
+    ok &= expect(live_video_init_tracks.size() == 1, "expected one track in live video init segment");
+    ok &= expect(live_audio_init_tracks.size() == 1, "expected one track in live audio init segment");
+    ok &= expect(live_video_init_tracks.front().codec == "avc1.64000C", "expected live avc1-only init segment");
+    ok &= expect(live_audio_init_tracks.front().codec == "mp4a.40.2", "expected live mp4a-only init segment");
+
+    bool live_catalog_rejected_bad_track = false;
+    try {
+        std::vector<TrackDescription> bad_tracks = multitrack_segmented.tracks;
+        bad_tracks.front().track_id = 99;
+        (void)build_live_catalog(bad_tracks, multitrack_init_bytes, true);
+    } catch (...) {
+        live_catalog_rejected_bad_track = true;
+    }
+    ok &= expect(live_catalog_rejected_bad_track, "expected live catalog to reject missing track init data");
+
     const auto hevc_main_bytes = make_hevc_init_mp4(0x01, 0x60000000, {0xB0, 0x00, 0x00, 0x00, 0x00, 0x00}, 90);
     const auto hevc_high_bytes = make_hevc_init_mp4(0x22, 0x40000000, {0xB0, 0x00, 0x00, 0x00, 0x00, 0x00}, 150);
     const auto hevc_main_tracks = extract_tracks(parse_mp4_boxes(hevc_main_bytes), hevc_main_bytes);
