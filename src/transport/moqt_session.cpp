@@ -2546,11 +2546,10 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
         alias_by_track.emplace(track.track_name, next_alias++);
     }
 
-    // Send PUBLISH (TrackMessage) for each media track so the relay's internal
-    // auto-subscriber sees explicit track announcements. Without PUBLISH, the relay
-    // subscribes to "catalog" via PUBLISH_NAMESPACE but does not subscribe to the
-    // media tracks listed in the catalog — it waits for PUBLISH from the publisher.
-    // Only applies to non-Draft18 (Draft18 uses per-stream PUBLISH, not needed here).
+    // Preannounce media tracks so relay implementations that need explicit
+    // PUBLISH before subscribing can discover them. Do not wait for PUBLISH_OK
+    // here: some relays first send SUBSCRIBE or stay idle until a subscriber
+    // appears, and live await-subscribe mode must keep draining control bytes.
     if (draft_version != openmoq::publisher::DraftVersion::kDraft18 && !auto_forward_) {
         std::uint64_t pub_req_id = 2;  // Publisher uses even request_ids per MOQT convention
         for (const auto& track : tracks) {
@@ -2572,15 +2571,6 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                       << " request_id=" << pub_req_id << '\n';
             pub_req_id += 2;
         }
-        std::map<std::uint64_t, PublishOk> live_publish_ok;
-        status = collect_control_acknowledgements(
-            transport_, control_stream_id_, draft_version,
-            0, tracks.size(), pending_control_bytes_, &live_publish_ok);
-        if (!status.ok) {
-            return status;
-        }
-        std::cerr << "[moqt-session] live: PUBLISH_OK received for "
-                  << live_publish_ok.size() << " media track(s)\n";
     }
 
     std::cerr << "[moqt-session] live: awaiting subscriptions, mode="
@@ -2617,10 +2607,6 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
         record_published_object("catalog", 0, live_catalog.catalog_payload.size());
         catalog_sent = true;
         std::cerr << "[moqt-session] live: catalog published (" << live_catalog.catalog_payload.size() << " bytes)\n";
-        {
-            const std::string cat_text(live_catalog.catalog_payload.begin(), live_catalog.catalog_payload.end());
-            std::cerr << "[moqt-session] live: catalog JSON: " << cat_text.substr(0, 800) << '\n';
-        }
         return TransportStatus::success();
     };
 

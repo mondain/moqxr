@@ -13,6 +13,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -176,6 +177,57 @@ std::size_t control_message_count(const MockTransport& transport, std::uint8_t t
 void append_be16(std::vector<std::uint8_t>& out, std::uint16_t value) {
     out.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
     out.push_back(static_cast<std::uint8_t>(value & 0xffU));
+}
+
+void append_be32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+    out.push_back(static_cast<std::uint8_t>((value >> 24U) & 0xffU));
+    out.push_back(static_cast<std::uint8_t>((value >> 16U) & 0xffU));
+    out.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
+    out.push_back(static_cast<std::uint8_t>(value & 0xffU));
+}
+
+std::vector<std::uint8_t> make_box(std::string_view type, std::vector<std::uint8_t> payload) {
+    std::vector<std::uint8_t> out;
+    append_be32(out, static_cast<std::uint32_t>(8 + payload.size()));
+    out.insert(out.end(), type.begin(), type.end());
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+std::vector<std::uint8_t> make_full_box(std::string_view type, std::vector<std::uint8_t> payload) {
+    std::vector<std::uint8_t> full_payload(4, 0);
+    full_payload.insert(full_payload.end(), payload.begin(), payload.end());
+    return make_box(type, std::move(full_payload));
+}
+
+std::vector<std::uint8_t> concat(std::initializer_list<std::vector<std::uint8_t>> boxes) {
+    std::vector<std::uint8_t> out;
+    for (const auto& box : boxes) {
+        out.insert(out.end(), box.begin(), box.end());
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> make_live_init_mp4() {
+    const auto ftyp = make_box("ftyp", {'i', 's', 'o', '6', 0, 0, 0, 1, 'i', 's', 'o', '6', 'c', 'm', 'f', 'c'});
+    const auto tkhd = make_full_box("tkhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    const auto mdhd = make_full_box("mdhd",
+                                    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x5d, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0});
+    const auto hdlr = make_full_box("hdlr", {0, 0, 0, 0, 'v', 'i', 'd', 'e', 0, 0, 0, 0});
+    auto visual_header = std::vector<std::uint8_t>(70, 0);
+    visual_header[24] = 0x01;
+    visual_header[25] = 0x40;
+    visual_header[26] = 0x00;
+    visual_header[27] = 0xf0;
+    const auto sample_entry = make_box("avc1", concat({visual_header, make_box("avcC", {1, 100, 0, 12, 0xff})}));
+    const auto stsd = make_full_box("stsd", concat({std::vector<std::uint8_t>{0, 0, 0, 1}, sample_entry}));
+    const auto stbl = make_box("stbl", stsd);
+    const auto minf = make_box("minf", stbl);
+    const auto mdia = make_box("mdia", concat({mdhd, hdlr, minf}));
+    const auto trak = make_box("trak", concat({tkhd, mdia}));
+    const auto moov = make_box("moov", trak);
+    return concat({ftyp, moov});
 }
 
 std::vector<std::uint8_t> encode_publish_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
@@ -1808,6 +1860,57 @@ int main() {
         ok &= expect(!closed_idle_publish_transport.writes.empty() &&
                          message_type(closed_idle_publish_transport.writes.back().bytes) == 0x09,
                      "expected closed-idle publish flow to send PUBLISH_NAMESPACE_DONE");
+    }
+
+    for (const DraftVersion draft : {DraftVersion::kDraft14, DraftVersion::kDraft16}) {
+        MockTransport live_transport;
+        live_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = draft,
+            .max_request_id = 8,
+        }));
+        live_transport.reads[0].push_back(encode_publish_namespace_ok_message(draft, 0));
+
+        MoqtSession live_session(
+            live_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(1));
+        status = live_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected live session connect to succeed");
+
+        const auto live_bytes = make_live_init_mp4();
+        std::string live_input_bytes(live_bytes.begin(), live_bytes.end());
+        std::istringstream live_input(live_input_bytes);
+        status = live_session.publish_live(live_input, draft, false);
+        ok &= expect(status.ok, "expected live publish to avoid blocking on preannounce PUBLISH_OK");
+        ok &= expect(control_message_count(live_transport, 0x1d) == 1,
+                     "expected live publish to preannounce one media track");
+        ok &= expect(!live_transport.writes.empty() &&
+                         message_type(live_transport.writes.back().bytes) == 0x09,
+                     "expected live publish to finish with PUBLISH_NAMESPACE_DONE");
+    }
+
+    {
+        MockTransport live_draft18_transport;
+        live_draft18_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft18,
+            .max_request_id = 0,
+        }));
+        live_draft18_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+
+        MoqtSession live_draft18_session(
+            live_draft18_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(1));
+        status = live_draft18_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 live session connect to succeed");
+
+        const auto live_bytes = make_live_init_mp4();
+        std::string live_input_bytes(live_bytes.begin(), live_bytes.end());
+        std::istringstream live_input(live_input_bytes);
+        status = live_draft18_session.publish_live(live_input, DraftVersion::kDraft18, false);
+        ok &= expect(status.ok, "expected draft-18 live publish namespace request stream to succeed");
+        ok &= expect(live_draft18_transport.writes.size() >= 2 &&
+                         live_draft18_transport.writes[1].stream_id == 4 &&
+                         message_type(live_draft18_transport.writes[1].bytes) == 0x06,
+                     "expected draft-18 live PUBLISH_NAMESPACE on a request stream");
+        ok &= expect(control_message_count(live_draft18_transport, 0x1d) == 0,
+                     "expected draft-18 live publish to avoid legacy control-stream PUBLISH");
     }
 
     {
