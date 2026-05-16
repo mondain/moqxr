@@ -10,6 +10,16 @@
 #include <streambuf>
 #include <string>
 
+#ifdef _WIN32
+#define OPENMOQ_POPEN _popen
+#define OPENMOQ_PCLOSE _pclose
+#define OPENMOQ_POPEN_READ_MODE "rb"
+#else
+#define OPENMOQ_POPEN popen
+#define OPENMOQ_PCLOSE pclose
+#define OPENMOQ_POPEN_READ_MODE "r"
+#endif
+
 namespace {
 
 class PopenStreamBuf final : public std::streambuf {
@@ -195,11 +205,11 @@ int main(int argc, char** argv) {
 
         const std::string ffmpeg_cmd = build_ffmpeg_video_command(args.seconds);
         std::cerr << "[psychedelic] launching ffmpeg: " << ffmpeg_cmd << '\n';
-        FILE* ffmpeg_pipe = popen(ffmpeg_cmd.c_str(), "r");
+        FILE* ffmpeg_pipe = OPENMOQ_POPEN(ffmpeg_cmd.c_str(), OPENMOQ_POPEN_READ_MODE);
         if (ffmpeg_pipe == nullptr) {
             throw std::runtime_error("failed to start ffmpeg. Is it installed and in PATH?");
         }
-        const std::unique_ptr<FILE, int (*)(FILE*)> pipe_guard(ffmpeg_pipe, pclose);
+        const std::unique_ptr<FILE, int (*)(FILE*)> pipe_guard(ffmpeg_pipe, OPENMOQ_PCLOSE);
         PopenIStream live_input(pipe_guard.get());
 
         const TransportStatus status = publisher.publish_live(live_input, endpoint, tls, endpoint_alpn_overridden);
