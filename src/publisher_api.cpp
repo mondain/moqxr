@@ -261,6 +261,36 @@ transport::TransportStatus Publisher::disconnect(std::uint64_t application_error
     return status;
 }
 
+PublisherStats Publisher::stats() const {
+    StatsSnapshot snapshot;
+    bool split_cmaf_chunks = true;
+    bool include_sap = false;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        snapshot = stats_;
+        split_cmaf_chunks = config_.split_cmaf_chunks;
+        include_sap = config_.include_sap;
+        if (active_session_ && active_session_->transport) {
+            snapshot.connection_id = active_session_->transport->connection_id();
+        }
+    }
+
+    return PublisherStats{
+        .publishing_live = snapshot.publishing_live,
+        .bytes_published = snapshot.bytes_published,
+        .objects_published = snapshot.objects_published,
+        .groups_published = snapshot.groups_published,
+        .split_cmaf_chunks = split_cmaf_chunks,
+        .include_sap = include_sap,
+        .transport = snapshot.transport,
+        .host = snapshot.host,
+        .port = snapshot.port,
+        .path = snapshot.path,
+        .connection_id = snapshot.connection_id,
+        .last_error = snapshot.last_error,
+    };
+}
+
 std::string Publisher::stats_json() const {
     StatsSnapshot snapshot;
     bool split_cmaf_chunks = true;

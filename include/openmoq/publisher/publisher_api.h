@@ -35,6 +35,21 @@ struct PreparedPublish {
     PublishPlan plan;
 };
 
+struct PublisherStats {
+    bool publishing_live = false;
+    std::uint64_t bytes_published = 0;
+    std::uint64_t objects_published = 0;
+    std::uint64_t groups_published = 0;
+    bool split_cmaf_chunks = true;
+    bool include_sap = false;
+    transport::TransportKind transport = transport::TransportKind::kRawQuic;
+    std::string host;
+    std::uint16_t port = 0;
+    std::string path;
+    std::string connection_id;
+    std::string last_error;
+};
+
 class Publisher {
 public:
     using TransportFactory = std::function<std::unique_ptr<transport::PublisherTransport>(transport::TransportKind)>;
@@ -68,6 +83,8 @@ public:
                                             const transport::TlsConfig& tls = {},
                                             bool endpoint_alpn_overridden = false) const;
     transport::TransportStatus disconnect(std::uint64_t application_error_code = 0) const;
+    PublisherStats stats() const;
+    [[deprecated("Use stats(); live polling is not supported by the blocking publish API.")]]
     std::string stats_json() const;
 
 private:

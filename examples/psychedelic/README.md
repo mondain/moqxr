@@ -9,7 +9,7 @@ It now:
 - publishes via one `Publisher::publish_live(...)` session
 - uses one namespace containing separate video/audio tracks
 - performs explicit graceful teardown with `disconnect(0)`
-- prints `stats_json()`
+- prints the structured post-publish `Publisher::stats()` summary
 
 ## Prerequisites
 

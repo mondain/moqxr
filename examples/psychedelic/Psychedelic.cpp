@@ -221,8 +221,11 @@ int main(int argc, char** argv) {
             throw std::runtime_error("disconnect failed: " + disconnect_status.message);
         }
 
+        const auto stats = publisher.stats();
         std::cout << "[psychedelic] done (single namespace, separate A/V tracks)\n";
-        std::cout << "[psychedelic] stats: " << publisher.stats_json() << '\n';
+        std::cout << "[psychedelic] published bytes=" << stats.bytes_published
+                  << " objects=" << stats.objects_published
+                  << " groups=" << stats.groups_published << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';

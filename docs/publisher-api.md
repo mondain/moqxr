@@ -209,25 +209,36 @@ For service-style integration:
 5. For continuous input, run `publish_live(...)` in a worker thread.
 6. Use `TransportStatus` messages for metrics and retry decisions.
 
-## 11. Runtime Stats (`stats_json`)
+## 11. Publish Summary (`stats`)
 
-You can query publisher runtime state at any time:
+The publisher API is blocking: `publish(...)`, `publish_file(...)`,
+`publish_stream(...)`, and `publish_live(...)` run the session on the calling
+thread. Because there is no built-in polling loop, stats are exposed as a
+structured summary of the current or most recent publish operation rather than
+as a live telemetry stream.
 
 ```cpp
-const std::string stats = publisher.stats_json();
-std::cout << stats << "\n";
+const auto stats = publisher.stats();
+std::cout << "bytes=" << stats.bytes_published
+          << " objects=" << stats.objects_published
+          << " groups=" << stats.groups_published << "\n";
 ```
 
-Current JSON fields:
+Current fields:
 
-- `active`: whether a session is currently active
-- `connected`: whether transport is currently connected
 - `publishingLive`: whether the active session is live-publish mode
 - `bytesPublished`: total payload bytes published in the current/last session
 - `objectsPublished`: total objects published in the current/last session
 - `groupsPublished`: total (track, group) units published in the current/last session
 - `splitCmafChunks`: current packaging mode (`true` = split chunks, `false` = coalesced chunks)
 - `includeSap`: whether SAP track/object packaging is enabled
+- `transport`, `host`, `port`, `path`: endpoint context for the current/last session
+- `connectionId`: last known transport connection ID
+- `lastError`: last publisher-level error, if any
+
+`stats_json()` remains available for existing integrations, but it is deprecated
+because a JSON polling API implies runtime telemetry support that the blocking
+publisher API does not provide.
 - `transport`: `"raw_quic"` or `"webtransport"`
 - `host`: configured endpoint host
 - `port`: configured endpoint port
