@@ -1121,7 +1121,7 @@ std::vector<std::uint8_t> encode_subgroup_header(DraftVersion draft,
     // or per-subgroup priorities can switch to SubgroupIDExplicit here.
     static_cast<void>(subgroup_id);
     const std::uint64_t base_type =
-        draft == DraftVersion::kDraft16 ? kSubgroupHeaderType : kObjectDatagramTypeDraft14;
+        draft == DraftVersion::kDraft14 ? kObjectDatagramTypeDraft14 : kSubgroupHeaderType;
     const std::uint64_t stream_type = base_type | (end_of_group ? kSubgroupHeaderEndOfGroupBit : 0);
     std::vector<std::uint8_t> bytes;
     append_varint(bytes, stream_type);

@@ -524,7 +524,7 @@ bool test_subgroup_header_and_object_serdes_for_all_drafts() {
         std::uint64_t alias = 0;
         std::uint64_t group = 0;
         ok &= expect(read_varint(header, offset, type), label + " subgroup header type");
-        ok &= expect(type == (draft == DraftVersion::kDraft16 ? 0x38 : 0x18), label + " subgroup header type value");
+        ok &= expect(type == (draft == DraftVersion::kDraft14 ? 0x18 : 0x38), label + " subgroup header type value");
         ok &= expect(read_varint(header, offset, alias) && alias == 7, label + " subgroup header alias placement");
         ok &= expect(read_varint(header, offset, group) && group == 3, label + " subgroup header group placement");
         ok &= expect(offset == header.size(), label + " subgroup header contains no object fields");
