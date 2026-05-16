@@ -2879,6 +2879,17 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 break;
             }
 
+            // Flush any control bytes already buffered by collect_control_acknowledgements
+            // (e.g. a relay SUBSCRIBE that arrived in the same chunk as ANNOUNCE_OK) before
+            // we block on read_stream — otherwise they sit forever while the read hangs.
+            if (!pending_control_bytes_.empty()) {
+                auto [pre_status, pre_subs] = process_control_messages();
+                if (!pre_status.ok) {
+                    stdin_thread.join();
+                    return pre_status;
+                }
+            }
+
             // Read control messages
             std::vector<std::uint8_t> chunk;
             bool immediate_fin = false;
