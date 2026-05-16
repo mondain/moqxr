@@ -265,14 +265,22 @@ PublisherStats Publisher::stats() const {
     StatsSnapshot snapshot;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    std::shared_ptr<ActiveSession> active;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         snapshot = stats_;
         split_cmaf_chunks = config_.split_cmaf_chunks;
         include_sap = config_.include_sap;
-        if (active_session_ && active_session_->transport) {
-            snapshot.connection_id = active_session_->transport->connection_id();
-        }
+        active = active_session_;
+    }
+    if (active && active->session) {
+        const auto live_stats = active->session->publish_stats();
+        snapshot.bytes_published = live_stats.bytes_published;
+        snapshot.objects_published = live_stats.objects_published;
+        snapshot.groups_published = live_stats.groups_published;
+    }
+    if (active && active->transport) {
+        snapshot.connection_id = active->transport->connection_id();
     }
 
     return PublisherStats{
