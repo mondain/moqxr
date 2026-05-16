@@ -156,7 +156,12 @@ By default, the API applies transport-appropriate ALPN:
 
 - Raw QUIC + draft-14: `moq-00`
 - Raw QUIC + draft-16: `moqt-16`
+- Raw QUIC + draft-18: `moqt-18`
 - WebTransport: `h3`
+
+For WebTransport, the API sends the MoQ application protocol offer separately
+from QUIC ALPN: draft-16 offers `moqt-16`, draft-18 offers `moqt-18`, and
+draft-14 keeps the legacy no-subprotocol behavior.
 
 If your application already set endpoint ALPN and wants to keep it:
 

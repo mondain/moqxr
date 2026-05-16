@@ -5,6 +5,7 @@ It is intentionally limited to the draft variants we support today:
 
 - MoQ Transport draft 14
 - MoQ Transport draft 16
+- MoQ Transport draft 18
 - WebTransport over HTTP/3 draft 14
 
 ## Normative Model
@@ -43,19 +44,33 @@ In this codebase, picoquic's `picowt_prepare_client_cnx()` already configures th
 
 ### 3. WT protocol negotiation
 
-MoQ-over-WebTransport draft selection is not QUIC ALPN.
+MoQ-over-WebTransport draft selection is not QUIC ALPN.  QUIC ALPN is
+`h3`; the MoQ application protocol identifier is advertised on the
+WebTransport CONNECT exchange and the MoQ wire version is then confirmed by
+the MoQ setup flow.
 
 It is carried in:
 
 - `WT-Available-Protocols`
 - `WT-Protocol`
 
-These are Structured Fields strings on the CONNECT exchange.
+These are Structured Fields strings on the CONNECT exchange.  The
+WebTransport draft allows a server to omit `WT-Protocol`, but if it sends one
+it must choose a value from the client's offer.  MoQ Transport draft-18 still
+expects clients to include MOQT protocol identifiers in `WT-Available-Protocols`.
 
 Current offers in this repo:
 
-- draft 14: offer no WebTransport subprotocol
+- draft 14: offer no WebTransport subprotocol for legacy compatibility
 - draft 16: offer `"moqt-16"` only
+- draft 18: offer `"moqt-18"` only
+
+Red5's current picoquic/h3zero server path no longer exposes
+`WT-Available-Protocols` to the application on CONNECT accept.  Red5 therefore
+accepts the WebTransport session without returning draft-specific
+`WT-Protocol`, and draft selection proceeds through MoQ setup.  Treat this as
+an interop compatibility mode, not proof that CONNECT-level subprotocol
+selection works.
 
 ### 4. MoQ SETUP parameters over WebTransport
 
@@ -117,19 +132,21 @@ Areas that should be treated as suspect until proven:
 
 Before changing wire behavior, verify each of these:
 
-1. CONNECT succeeded and the WebTransport protocol negotiation matches the intended draft:
-   draft-14 offers no `WT-Protocol`, while draft-16 offers `moqt-16`.
+1. CONNECT succeeded and the WebTransport protocol offer matches the intended draft:
+   draft-14 offers no WebTransport subprotocol, draft-16 offers `moqt-16`,
+   and draft-18 offers `moqt-18`.  If the relay omits `WT-Protocol`, verify
+   the negotiated MoQ setup version before treating the session as draft-specific.
 2. The first client MoQ bytes are sent only on a WT application stream, not the CONNECT stream.
 3. The WT application stream gets exactly one WT preamble.
 4. Incoming CONNECT-stream bytes are logged as WT control/capsule traffic, not parsed as MoQ.
 5. Incoming application-stream bytes are delivered without the WT preamble before MoQ parsing.
-6. Draft-14 and draft-16 are tested separately.
+6. Draft-14, draft-16, and draft-18 are tested separately.
 
 ## Current risk focus
 
 The current WebTransport path is interoperating with the tested moqx and Red5
-draft-16 relays. Remaining risk is now concentrated in broader coverage rather
-than initial session establishment:
+draft-16/draft-18 relay paths. Remaining risk is now concentrated in broader
+coverage rather than initial session establishment:
 
 - higher object volume and backpressure behavior
 - live subscriber timing across multiple tracks
@@ -138,7 +155,7 @@ than initial session establishment:
 
 ## Current interoperability state
 
-Observed behavior as of April 26, 2026:
+Observed behavior as of May 16, 2026:
 
 - `<moqx-la-relay-host>:4433/moq-relay`
   - draft-16 CONNECT succeeds with verified TLS
@@ -152,6 +169,8 @@ Observed behavior as of April 26, 2026:
   - draft-16 CONNECT succeeds with verified TLS
   - `PUBLISH_NAMESPACE_OK` arrives on the WT control stream as expected
   - a live `SUBSCRIBE` for `catalog` was observed and served successfully
+  - draft-14 and draft-18 psychedelic publisher flows have both connected and
+    published against the Red5 relay during local interop checks
 - `moq-relay.red5.net:4433/moq-relay`
   - WebTransport CONNECT is rejected with HTTP `404`
   - use `/moq` for the Red5 relay on port 4433
