@@ -1035,11 +1035,15 @@ std::vector<std::uint8_t> encode_request_error_message(DraftVersion draft,
     }
 
     std::vector<std::uint8_t> payload;
-    append_varint(payload, request_id);
+    if (draft != DraftVersion::kDraft18) {
+        append_varint(payload, request_id);
+    }
     append_varint(payload, error_code);
     append_varint(payload, retry_interval);
     append_string(payload, reason);
-    append_varint(payload, 0);
+    if (draft != DraftVersion::kDraft18) {
+        append_varint(payload, 0);
+    }
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kRequestErrorType);
