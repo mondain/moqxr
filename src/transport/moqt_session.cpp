@@ -1347,7 +1347,10 @@ TransportStatus publish_selected_tracks(PublisherTransport& transport,
                                         std::map<std::uint64_t, std::uint64_t>* request_id_by_track_alias,
                                         std::uint64_t first_request_id = 2);
 
+using PublishedObjectSink = std::function<void(const std::string&, std::uint64_t, std::size_t)>;
+
 TransportStatus serve_subscriptions(PublisherTransport& transport,
+                                    PublishedObjectSink published_sink,
                                     std::uint64_t control_stream_id,
                                     const openmoq::publisher::PublishPlan& plan,
                                     const LoopState& loop_state,
@@ -1872,6 +1875,14 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                     if (!write_status.ok) {
                         return write_status;
                     }
+                    // Record stats for the batch/file path too. Without this,
+                    // Publisher::stats() returns zeros for everything except
+                    // publish_live, even though objects are flowing.
+                    if (published_sink) {
+                        published_sink(object.track_name,
+                                       object.group_id,
+                                       object_payload_size(source_object));
+                    }
                     std::cerr << "[moqt-session] served object send_seq=" << send_seq
                               << " now_ms=" << trace_elapsed_ms(std::chrono::steady_clock::now())
                               << " track=" << object.track_name
@@ -1964,6 +1975,7 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 }
 
 TransportStatus forward_published_tracks(PublisherTransport& transport,
+                                         PublishedObjectSink published_sink,
                                          std::uint64_t control_stream_id,
                                          const openmoq::publisher::PublishPlan& plan,
                                          const LoopState& loop_state,
@@ -2139,6 +2151,7 @@ TransportStatus forward_published_tracks(PublisherTransport& transport,
         std::cerr << "[moqt-session] waiting for downstream SUBSCRIBE on "
                   << downgraded_tracks_by_name.size() << " track(s) after forward=0 reply" << '\n';
         status = serve_subscriptions(transport,
+                                     published_sink,
                                      control_stream_id,
                                      plan,
                                      loop_state,
@@ -2498,9 +2511,14 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
         tracks_by_name.emplace(track.name, track);
     }
 
+    auto stats_sink = [this](const std::string& track, std::uint64_t group, std::size_t bytes) {
+        this->record_published_object(track, group, bytes);
+    };
+
     if (auto_forward_) {
         return forward_published_tracks(
             transport_,
+            stats_sink,
             control_stream_id_,
             plan,
             loop_state,
@@ -2540,6 +2558,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
             }
 
             return serve_subscriptions(transport_,
+                                       stats_sink,
                                        control_stream_id_,
                                        plan,
                                        loop_state,
@@ -2564,6 +2583,7 @@ TransportStatus MoqtSession::publish(const openmoq::publisher::PublishPlan& plan
     std::cerr << '\n';
 
     return serve_subscriptions(transport_,
+                               stats_sink,
                                control_stream_id_,
                                plan,
                                loop_state,

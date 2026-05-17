@@ -217,6 +217,15 @@ thread. Because there is no built-in polling loop, stats are exposed as a
 structured summary of the current or most recent publish operation rather than
 as a live telemetry stream.
 
+`stats()` is safe to call from a separate thread while a `publish*` call is
+blocked; the counters update as objects are served. This is the supported
+way for a GUI front-end to drive a "stats pane" — poll on a timer (e.g. once
+per second) on the UI thread while the publish runs on a worker. The counters
+are updated for every publish mode (`publish`, `publish_file`,
+`publish_stream`, `publish_live`); earlier revisions only updated them for
+`publish_live`, which made `stats()` appear to be unimplemented for batch
+publishing.
+
 ```cpp
 const auto stats = publisher.stats();
 std::cout << "bytes=" << stats.bytes_published
