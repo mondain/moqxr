@@ -51,6 +51,7 @@ using openmoq::publisher::transport::encode_subscribe_error_message;
 using openmoq::publisher::transport::encode_subscribe_namespace_ok_message;
 using openmoq::publisher::transport::encode_subscribe_ok_message;
 using openmoq::publisher::transport::encode_track_message;
+using openmoq::publisher::transport::next_control_message;
 
 constexpr std::uint64_t kDraft14Version = 0xff00000eULL;
 constexpr std::uint64_t kDraft16Version = 0xff000010ULL;
@@ -604,6 +605,56 @@ bool test_subgroup_header_and_object_serdes_for_all_drafts() {
     return ok;
 }
 
+bool test_control_message_framing_and_parameter_regressions() {
+    bool ok = true;
+
+    std::vector<std::uint8_t> fetch_error_payload;
+    append_varint(fetch_error_payload, 22);
+    append_varint(fetch_error_payload, 3);
+    append_string(fetch_error_payload, "fetch failed");
+    std::vector<std::uint8_t> fetch_error;
+    append_uint16_length_message(fetch_error, 0x19, fetch_error_payload);
+    std::size_t message_size = 0;
+    ok &= expect(next_control_message(fetch_error, DraftVersion::kDraft14, message_size),
+                 "FETCH_ERROR frames as uint16-length control message");
+    ok &= expect(message_size == fetch_error.size(), "FETCH_ERROR message size");
+
+    std::vector<std::uint8_t> duplicate_parameter_payload;
+    append_varint(duplicate_parameter_payload, 77);
+    append_track_namespace(duplicate_parameter_payload, {"live", "alpha"});
+    append_string(duplicate_parameter_payload, "catalog");
+    append_varint(duplicate_parameter_payload, 2);
+    append_varint(duplicate_parameter_payload, 0x10);
+    append_varint(duplicate_parameter_payload, 1);
+    append_varint(duplicate_parameter_payload, 0);
+    append_varint(duplicate_parameter_payload, 0);
+    std::vector<std::uint8_t> duplicate_parameter_subscribe;
+    append_uint16_length_message(duplicate_parameter_subscribe, 0x03, duplicate_parameter_payload);
+    SubscribeMessage subscribe;
+    ok &= expect(!decode_subscribe_message(duplicate_parameter_subscribe, DraftVersion::kDraft16, subscribe),
+                 "draft-16 rejects duplicate delta-encoded parameter type");
+
+    std::vector<std::uint8_t> request_ok_payload;
+    append_varint(request_ok_payload, 44);
+    append_varint(request_ok_payload, 1);
+    append_varint(request_ok_payload, 0x10);
+    append_varint(request_ok_payload, 1);
+    std::vector<std::uint8_t> request_ok;
+    append_uint16_length_message(request_ok, 0x07, request_ok_payload);
+    PublishNamespaceOk namespace_ok;
+    ok &= expect(decode_request_ok(request_ok, DraftVersion::kDraft16, namespace_ok),
+                 "draft-16 REQUEST_OK decodes delta-encoded parameters");
+    ok &= expect(namespace_ok.request_id == 44, "draft-16 REQUEST_OK request id with parameters");
+
+    const std::vector<std::uint8_t> draft18_namespace_ok =
+        encode_subscribe_namespace_ok_message(DraftVersion::kDraft18, 44);
+    Uint16Frame frame;
+    ok &= expect_uint16_frame(draft18_namespace_ok, 0x07, frame,
+                              "draft-18 subscribe namespace ok delegates to REQUEST_OK");
+
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -612,5 +663,6 @@ int main() {
     ok &= test_publisher_control_message_encoders_for_all_drafts();
     ok &= test_peer_control_message_decoders_for_all_drafts();
     ok &= test_subgroup_header_and_object_serdes_for_all_drafts();
+    ok &= test_control_message_framing_and_parameter_regressions();
     return ok ? 0 : 1;
 }

@@ -1499,6 +1499,40 @@ int main() {
         ok &= expect(!status.ok, "expected draft-16 publish to fail on invalid PUBLISH_OK request_id");
         ok &= expect(status.message == "received invalid request_id in PUBLISH_OK",
                      "expected strict invalid publish request_id failure");
+        ok &= expect(draft16_invalid_publish_ok_id_transport.last_close_code == 0x3,
+                     "expected invalid PUBLISH_OK request_id to close with PROTOCOL_VIOLATION");
+    }
+
+    {
+        MockTransport draft16_unknown_publish_ok_param_transport;
+        draft16_unknown_publish_ok_param_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
+            .max_request_id = 8,
+        }));
+        draft16_unknown_publish_ok_param_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft16, 0));
+        std::vector<std::uint8_t> payload = encode_varint(2);
+        const std::vector<std::uint8_t> parameter_count = encode_varint(1);
+        const std::vector<std::uint8_t> unknown_parameter_delta = encode_varint(0x11);
+        const std::vector<std::uint8_t> unknown_parameter_length = encode_varint(0);
+        payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
+        payload.insert(payload.end(), unknown_parameter_delta.begin(), unknown_parameter_delta.end());
+        payload.insert(payload.end(), unknown_parameter_length.begin(), unknown_parameter_length.end());
+        std::vector<std::uint8_t> invalid_publish_ok = encode_varint(0x1e);
+        append_be16(invalid_publish_ok, static_cast<std::uint16_t>(payload.size()));
+        invalid_publish_ok.insert(invalid_publish_ok.end(), payload.begin(), payload.end());
+        draft16_unknown_publish_ok_param_transport.reads[0].push_back(invalid_publish_ok);
+
+        MoqtSession draft16_unknown_publish_ok_param_session(
+            draft16_unknown_publish_ok_param_transport, std::string(kTestTrackNamespace), true);
+        status = draft16_unknown_publish_ok_param_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-16 unknown-param session connect to succeed");
+        status = draft16_unknown_publish_ok_param_session.publish(draft16_materialized);
+        ok &= expect(!status.ok, "expected draft-16 publish to fail on unknown PUBLISH_OK parameter");
+        ok &= expect(status.message == "received invalid PUBLISH_OK",
+                     "expected unknown PUBLISH_OK parameter to fail decode");
+        ok &= expect(draft16_unknown_publish_ok_param_transport.last_close_code == 0x3,
+                     "expected unknown PUBLISH_OK parameter to close with PROTOCOL_VIOLATION");
     }
 
     {
@@ -1767,6 +1801,8 @@ int main() {
         ok &= expect(!status.ok, "expected draft-18 to reject legacy SERVER_SETUP");
         ok &= expect(status.message == "received invalid SETUP message",
                      "expected draft-18 legacy SERVER_SETUP rejection to name SETUP");
+        ok &= expect(draft18_legacy_setup_transport.last_close_code == 0x3,
+                     "expected invalid draft-18 SETUP to close with PROTOCOL_VIOLATION");
     }
 
     {
@@ -1840,7 +1876,7 @@ int main() {
 
         bool saw_subscribe_ok_on_request_stream = false;
         bool saw_object_on_unidirectional_stream = false;
-        bool saw_publish_done_on_control_stream = false;
+        bool saw_publish_done_on_request_stream = false;
         for (const auto& write : draft18_subscribe_transport.writes) {
             if (write.stream_id == 1 && message_type(write.bytes) == 0x04) {
                 saw_subscribe_ok_on_request_stream = true;
@@ -1848,16 +1884,16 @@ int main() {
             if ((write.stream_id & 0x2ULL) != 0 && message_type(write.bytes) != 0x2f00) {
                 saw_object_on_unidirectional_stream = true;
             }
-            if (write.stream_id == 2 && message_type(write.bytes) == 0x0b) {
-                saw_publish_done_on_control_stream = true;
+            if (write.stream_id == 1 && message_type(write.bytes) == 0x0b) {
+                saw_publish_done_on_request_stream = true;
             }
         }
         ok &= expect(saw_subscribe_ok_on_request_stream,
                      "expected draft-18 SUBSCRIBE_OK on the inbound request stream");
         ok &= expect(saw_object_on_unidirectional_stream,
                      "expected draft-18 SUBSCRIBE objects on unidirectional streams");
-        ok &= expect(saw_publish_done_on_control_stream,
-                     "expected draft-18 PUBLISH_DONE on local unidirectional control stream");
+        ok &= expect(saw_publish_done_on_request_stream,
+                     "expected draft-18 PUBLISH_DONE on the inbound request stream");
     }
 
     {

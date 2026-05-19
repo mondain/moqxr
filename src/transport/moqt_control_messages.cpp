@@ -269,6 +269,9 @@ bool decode_parameter_type(std::span<const std::uint8_t> bytes,
         previous_type = parameter_type;
         return true;
     }
+    if (previous_type != 0 && encoded_type == 0) {
+        return false;
+    }
     if (encoded_type > std::numeric_limits<std::uint64_t>::max() - previous_type) {
         return false;
     }
@@ -335,8 +338,9 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         case 0x10:  // GOAWAY
         case 0x14:  // SUBSCRIBE_DONE (draft-14)
         case 0x16:  // FETCH
-        case 0x17:  // FETCH_OK
-        case 0x18:  // FETCH_CANCEL
+        case 0x17:  // FETCH_CANCEL
+        case 0x18:  // FETCH_OK
+        case 0x19:  // FETCH_ERROR
         case 0x1a:  // REQUESTS_BLOCKED (draft-16)
         {
             if (offset + 2 > bytes.size()) {
@@ -641,7 +645,7 @@ bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
     std::uint64_t previous_parameter_type = 0;
     for (std::uint64_t parameter_index = 0; parameter_index < parameter_count; ++parameter_index) {
         std::uint64_t parameter_type = 0;
-        if (!decode_parameter_type(bytes, offset, previous_parameter_type, false, parameter_type)) {
+        if (!decode_parameter_type(bytes, offset, previous_parameter_type, draft == DraftVersion::kDraft16, parameter_type)) {
             return false;
         }
         if ((parameter_type & 0x1ULL) == 0) {
@@ -786,7 +790,7 @@ bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
 }
 
 std::vector<std::uint8_t> encode_subscribe_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
-    if (draft == DraftVersion::kDraft16) {
+    if (draft == DraftVersion::kDraft16 || draft == DraftVersion::kDraft18) {
         return encode_request_ok_message(draft, request_id);
     }
 
