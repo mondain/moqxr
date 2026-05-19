@@ -32,6 +32,7 @@ using openmoq::publisher::transport::decode_publish_ok;
 using openmoq::publisher::transport::decode_request_error;
 using openmoq::publisher::transport::decode_request_ok;
 using openmoq::publisher::transport::decode_server_setup_message;
+using openmoq::publisher::transport::decode_setup_response_message;
 using openmoq::publisher::transport::decode_subscribe_message;
 using openmoq::publisher::transport::decode_subscribe_namespace_message;
 using openmoq::publisher::transport::decode_subscribe_tracks_message;
@@ -240,8 +241,8 @@ std::vector<std::uint8_t> build_subscribe_namespace_message(DraftVersion draft) 
     append_varint(payload, 0);  // parameters
 
     std::vector<std::uint8_t> bytes;
-    append_varint(bytes, 0x11);
-    if (draft == DraftVersion::kDraft16) {
+    append_varint(bytes, draft == DraftVersion::kDraft18 ? 0x50 : 0x11);
+    if (draft == DraftVersion::kDraft16 || draft == DraftVersion::kDraft18) {
         bytes.push_back(static_cast<std::uint8_t>((payload.size() >> 8) & 0xff));
         bytes.push_back(static_cast<std::uint8_t>(payload.size() & 0xff));
     } else {
@@ -367,14 +368,22 @@ bool test_setup_serdes_for_all_drafts() {
             ok &= expect(offset == frame.payload_end || parameter_count == 3, label + " payload remains valid");
         }
 
-        const std::vector<std::uint8_t> server_bytes = encode_server_setup_message({.draft = draft, .max_request_id = 32});
+        const std::vector<std::uint8_t> server_bytes =
+            draft == DraftVersion::kDraft18
+                ? encode_setup_message({.draft = draft, .transport = TransportKind::kWebTransport})
+                : encode_server_setup_message({.draft = draft, .max_request_id = 32});
         ServerSetupMessage server;
-        ok &= expect(decode_server_setup_message(server_bytes, server), label + " server setup decode");
+        ok &= expect(decode_setup_response_message(server_bytes, draft, server), label + " setup response decode");
         ok &= expect(server.draft == draft, label + " server setup draft");
         if (draft != DraftVersion::kDraft18) {
             ok &= expect(server.max_request_id == 32, label + " server setup max request id");
         }
     }
+    ServerSetupMessage legacy_server_setup;
+    ok &= expect(!decode_setup_response_message(encode_server_setup_message({.draft = DraftVersion::kDraft16}),
+                                                DraftVersion::kDraft18,
+                                                legacy_server_setup),
+                 "draft-18 setup response rejects legacy SERVER_SETUP");
     return ok;
 }
 
@@ -489,6 +498,12 @@ bool test_peer_control_message_decoders_for_all_drafts() {
         ok &= expect(subscribe_namespace.request_id == 91, label + " subscribe namespace request id");
         ok &= expect(subscribe_namespace.track_namespace_prefix == std::vector<std::string>({"live", "alpha"}),
                      label + " subscribe namespace tuple");
+        if (draft == DraftVersion::kDraft18) {
+            std::vector<std::uint8_t> legacy_subscribe_namespace = build_subscribe_namespace_message(draft);
+            legacy_subscribe_namespace[0] = 0x11;
+            ok &= expect(!decode_subscribe_namespace_message(legacy_subscribe_namespace, draft, subscribe_namespace),
+                         label + " rejects legacy subscribe namespace type");
+        }
 
         SubscribeMessage subscribe;
         ok &= expect(decode_subscribe_message(build_subscribe_message(draft), draft, subscribe),

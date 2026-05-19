@@ -30,6 +30,7 @@ constexpr std::uint64_t kMaxRequestIdType = 0x15;
 constexpr std::uint64_t kPublishType = 0x1d;
 constexpr std::uint64_t kPublishOkType = 0x1e;
 constexpr std::uint64_t kPublishErrorType = 0x1f;
+constexpr std::uint64_t kSubscribeNamespaceTypeDraft18 = 0x50;
 constexpr std::uint64_t kSubscribeTracksType = 0x51;
 // SUBGROUP_HEADER type byte layout (draft-16 §10.4.2):
 //   bit 0: EXTENSIONS         (0 = no per-object extensions on this stream)
@@ -328,6 +329,7 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         case kPublishType:
         case kPublishOkType:
         case kPublishErrorType:
+        case kSubscribeNamespaceTypeDraft18:
         case kSubscribeTracksType:
         case 0x0a:  // UNSUBSCRIBE
         case 0x10:  // GOAWAY
@@ -525,6 +527,29 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
     return offset == payload_end;
 }
 
+bool decode_setup_response_message(std::span<const std::uint8_t> bytes,
+                                   DraftVersion expected_draft,
+                                   ServerSetupMessage& message) {
+    std::size_t offset = 0;
+    std::uint64_t message_type = 0;
+    if (!decode_varint_impl(bytes, offset, message_type)) {
+        return false;
+    }
+
+    if (expected_draft == DraftVersion::kDraft18) {
+        if (message_type != kSetupType) {
+            return false;
+        }
+    } else if (message_type != kServerSetupType) {
+        return false;
+    }
+
+    if (!decode_server_setup_message(bytes, message)) {
+        return false;
+    }
+    return message.draft == expected_draft;
+}
+
 std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& message) {
     if (message.draft == DraftVersion::kDraft18) {
         std::vector<std::uint8_t> message_bytes;
@@ -704,10 +729,12 @@ bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
                                         SubscribeNamespaceMessage& message) {
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;
+    const std::uint64_t message_type =
+        draft == DraftVersion::kDraft18 ? kSubscribeNamespaceTypeDraft18 : kSubscribeNamespaceType;
     const bool framed =
-        draft == DraftVersion::kDraft16
-            ? parse_uint16_length_message(bytes, kSubscribeNamespaceType, payload_offset, payload_length)
-            : parse_varint_length_message(bytes, kSubscribeNamespaceType, payload_offset, payload_length);
+        draft == DraftVersion::kDraft14
+            ? parse_varint_length_message(bytes, message_type, payload_offset, payload_length)
+            : parse_uint16_length_message(bytes, message_type, payload_offset, payload_length);
     if (!framed) {
         return false;
     }

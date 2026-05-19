@@ -117,6 +117,9 @@ bool decode_varint(std::span<const std::uint8_t> bytes, std::size_t& offset, std
 
 std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message);
 bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetupMessage& message);
+bool decode_setup_response_message(std::span<const std::uint8_t> bytes,
+                                   DraftVersion expected_draft,
+                                   ServerSetupMessage& message);
 std::vector<std::uint8_t> encode_server_setup_message(const ServerSetupMessage& message);
 bool decode_max_request_id_message(std::span<const std::uint8_t> bytes, MaxRequestIdMessage& message);
 bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draft, std::size_t& message_size);

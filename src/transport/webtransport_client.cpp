@@ -770,6 +770,13 @@ TransportStatus WebTransportClient::reset_stream(std::uint64_t stream_id,
     if (impl_ == nullptr || impl_->cnx == nullptr) {
         return TransportStatus::failure("transport is not connected");
     }
+    h3zero_stream_ctx_t* stream_ctx = find_local_stream_context(*impl_, stream_id);
+    if (stream_ctx != nullptr) {
+        if (picowt_reset_stream(impl_->cnx, stream_ctx, error_code) != 0) {
+            return TransportStatus::failure("failed to reset webtransport stream");
+        }
+        return TransportStatus::success();
+    }
     picoquic_reset_stream(impl_->cnx, stream_id, error_code);
     return TransportStatus::success();
 #endif

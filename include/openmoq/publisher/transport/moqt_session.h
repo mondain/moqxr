@@ -50,7 +50,7 @@ private:
     void record_published_object(const std::string& track_name, std::uint64_t group_id, std::size_t payload_bytes);
 
     TransportStatus ensure_setup(openmoq::publisher::DraftVersion draft);
-    TransportStatus ensure_control_stream();
+    TransportStatus ensure_control_stream(openmoq::publisher::DraftVersion draft);
     TransportStatus write_frame(std::uint64_t stream_id, std::span<const std::uint8_t> frame, bool fin);
 
     PublisherTransport& transport_;
@@ -62,11 +62,14 @@ private:
     std::chrono::seconds subscriber_timeout_ = std::chrono::seconds(30);
     std::optional<EndpointConfig> endpoint_;
     std::uint64_t control_stream_id_ = 0;
+    std::uint64_t peer_control_stream_id_ = 0;
     std::uint64_t peer_max_request_id_ = 0;
     std::vector<std::uint8_t> pending_control_bytes_;
     bool control_stream_open_ = false;
+    bool peer_control_stream_open_ = false;
     bool setup_complete_ = false;
     std::uint64_t namespace_stream_id_ = 0;
+    bool namespace_stream_open_ = false;
     std::map<std::uint64_t, std::uint64_t> publish_stream_id_by_request_id_;
     PublishStats publish_stats_{};
     std::unordered_map<std::string, std::uint64_t> last_group_by_track_;

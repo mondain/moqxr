@@ -46,6 +46,10 @@ struct MockTransport final : PublisherTransport {
         std::vector<std::uint8_t> bytes;
         bool fin = false;
     };
+    struct OpenEvent {
+        StreamDirection direction = StreamDirection::kBidirectional;
+        std::uint64_t stream_id = 0;
+    };
 
     TransportStatus configure(const EndpointConfig& endpoint, const TlsConfig& tls) override {
         endpoint_ = endpoint;
@@ -74,6 +78,7 @@ struct MockTransport final : PublisherTransport {
             stream_id = next_uni_;
             next_uni_ += 4;
         }
+        opens.push_back({direction, stream_id});
         return TransportStatus::success();
     }
 
@@ -165,6 +170,7 @@ struct MockTransport final : PublisherTransport {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> reset_calls;
     std::size_t read_count = 0;
     std::string missing_read_error;
+    std::vector<OpenEvent> opens;
     std::vector<WriteEvent> writes;
     std::vector<std::chrono::milliseconds> read_timeouts;
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
@@ -286,8 +292,8 @@ std::vector<std::uint8_t> encode_subscribe_namespace_message(DraftVersion draft,
     const std::vector<std::uint8_t> parameter_count = encode_varint(0);
     payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
 
-    std::vector<std::uint8_t> message = encode_varint(0x11);
-    if (draft == DraftVersion::kDraft16) {
+    std::vector<std::uint8_t> message = encode_varint(draft == DraftVersion::kDraft18 ? 0x50 : 0x11);
+    if (draft == DraftVersion::kDraft16 || draft == DraftVersion::kDraft18) {
         append_be16(message, static_cast<std::uint16_t>(payload.size()));
     } else {
         const std::vector<std::uint8_t> length = encode_varint(payload.size());
@@ -503,6 +509,13 @@ std::optional<std::uint64_t> message_type(const std::vector<std::uint8_t>& bytes
         return std::nullopt;
     }
     return type;
+}
+
+std::vector<std::uint8_t> encode_draft18_setup_response() {
+    return encode_setup_message({
+        .draft = DraftVersion::kDraft18,
+        .transport = openmoq::publisher::transport::TransportKind::kWebTransport,
+    });
 }
 
 bool decode_setup_fields(const std::vector<std::uint8_t>& bytes,
@@ -1530,6 +1543,27 @@ int main() {
     }
 
     {
+        const auto subscribe_namespace = encode_subscribe_namespace_message(DraftVersion::kDraft18, 7, kTestTrackNamespace);
+        std::size_t message_size = 0;
+        ok &= expect(message_type(subscribe_namespace) == 0x50,
+                     "expected draft-18 SUBSCRIBE_NAMESPACE type 0x50");
+        ok &= expect(openmoq::publisher::transport::next_control_message(
+                         subscribe_namespace, DraftVersion::kDraft18, message_size),
+                     "expected draft-18 SUBSCRIBE_NAMESPACE to frame with uint16 length");
+        ok &= expect(message_size == subscribe_namespace.size(),
+                     "expected draft-18 SUBSCRIBE_NAMESPACE frame size to match bytes");
+
+        SubscribeNamespaceMessage decoded;
+        ok &= expect(openmoq::publisher::transport::decode_subscribe_namespace_message(
+                         subscribe_namespace, DraftVersion::kDraft18, decoded),
+                     "expected draft-18 SUBSCRIBE_NAMESPACE to decode");
+        ok &= expect(decoded.request_id == 7, "expected draft-18 SUBSCRIBE_NAMESPACE request_id");
+        ok &= expect(decoded.track_namespace_prefix.size() == 1 &&
+                         decoded.track_namespace_prefix.front() == kTestTrackNamespace,
+                     "expected draft-18 SUBSCRIBE_NAMESPACE prefix");
+    }
+
+    {
         openmoq::publisher::transport::PublishOk empty_publish_ok;
         ok &= expect(openmoq::publisher::transport::decode_publish_ok(
                          encode_publish_ok_message(DraftVersion::kDraft16, 9), DraftVersion::kDraft16, empty_publish_ok),
@@ -1655,13 +1689,10 @@ int main() {
 
     {
         MockTransport draft18_transport;
-        draft18_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
-        draft18_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
-        draft18_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
-        draft18_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+        draft18_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        draft18_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
 
         MoqtSession draft18_session(draft18_transport, std::string(kTestTrackNamespace), true);
         status = draft18_session.connect(endpoint, tls);
@@ -1673,33 +1704,81 @@ int main() {
         ok &= expect(status.ok, "expected draft-18 publish to succeed");
         ok &= expect(draft18_transport.writes.size() >= 4, "expected draft-18 request-stream writes");
         if (draft18_transport.writes.size() >= 4) {
-            ok &= expect(draft18_transport.writes[0].stream_id == 0,
-                         "expected draft-18 setup on control stream");
-            ok &= expect(draft18_transport.writes[1].stream_id == 4 &&
+            ok &= expect(draft18_transport.writes[0].stream_id == 2,
+                         "expected draft-18 setup on client unidirectional control stream");
+            ok &= expect(draft18_transport.writes[1].stream_id == 0 &&
                              message_type(draft18_transport.writes[1].bytes) == 0x06,
                          "expected draft-18 PUBLISH_NAMESPACE on dedicated request stream");
-            ok &= expect(draft18_transport.writes[2].stream_id == 8 &&
+            ok &= expect(draft18_transport.writes[2].stream_id == 4 &&
                              message_type(draft18_transport.writes[2].bytes) == 0x1d,
                          "expected first draft-18 PUBLISH on dedicated request stream");
-            ok &= expect(draft18_transport.writes[3].stream_id == 12 &&
+            ok &= expect(draft18_transport.writes[3].stream_id == 8 &&
                              message_type(draft18_transport.writes[3].bytes) == 0x1d,
                          "expected second draft-18 PUBLISH on dedicated request stream");
+        }
+        ok &= expect(draft18_transport.opens.size() >= 4 &&
+                         draft18_transport.opens[0].direction == StreamDirection::kUnidirectional &&
+                         draft18_transport.opens[1].direction == StreamDirection::kBidirectional,
+                     "expected draft-18 to use uni setup then bidi request streams");
+    }
+
+    {
+        MockTransport draft18_wt_transport;
+        draft18_wt_transport.reads[3].push_back(encode_draft18_setup_response());
+        EndpointConfig wt_endpoint = endpoint;
+        wt_endpoint.transport = openmoq::publisher::transport::TransportKind::kWebTransport;
+        wt_endpoint.path = "/moq";
+
+        MoqtSession draft18_wt_session(draft18_wt_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_wt_session.connect(wt_endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 WebTransport session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_wt_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 WebTransport publish to stop after setup without request fixtures");
+        ok &= expect(!draft18_wt_transport.writes.empty(), "expected draft-18 WebTransport SETUP write");
+        if (!draft18_wt_transport.writes.empty()) {
+            const auto& setup = draft18_wt_transport.writes.front().bytes;
+            std::size_t offset = 0;
+            std::uint64_t type = 0;
+            ok &= expect(decode_varint(setup, offset, type) && type == 0x2f00,
+                         "expected draft-18 WebTransport setup type SETUP");
+            ok &= expect(offset + 2 == setup.size() && setup[offset] == 0 && setup[offset + 1] == 0,
+                         "expected draft-18 WebTransport SETUP to omit AUTHORITY and PATH options");
         }
     }
 
     {
-        MockTransport draft18_subscribe_tracks_transport;
-        draft18_subscribe_tracks_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
+        MockTransport draft18_legacy_setup_transport;
+        draft18_legacy_setup_transport.reads[3].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft16,
             .max_request_id = 0,
         }));
-        draft18_subscribe_tracks_transport.reads[4].push_back(
+
+        MoqtSession draft18_legacy_setup_session(
+            draft18_legacy_setup_transport, std::string(kTestTrackNamespace), true);
+        status = draft18_legacy_setup_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 legacy-setup session connect to defer setup");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_legacy_setup_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 to reject legacy SERVER_SETUP");
+        ok &= expect(status.message == "received invalid SETUP message",
+                     "expected draft-18 legacy SERVER_SETUP rejection to name SETUP");
+    }
+
+    {
+        MockTransport draft18_subscribe_tracks_transport;
+        draft18_subscribe_tracks_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_subscribe_tracks_transport.reads[0].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
         draft18_subscribe_tracks_transport.reads[1].push_back(
             encode_subscribe_tracks_message(91, kTestTrackNamespace));
-        draft18_subscribe_tracks_transport.reads[8].push_back(
+        draft18_subscribe_tracks_transport.reads[4].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
-        draft18_subscribe_tracks_transport.reads[12].push_back(
+        draft18_subscribe_tracks_transport.reads[8].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
 
         MoqtSession draft18_subscribe_tracks_session(
@@ -1724,10 +1803,10 @@ int main() {
             if (write.stream_id == 1 && message_type(write.bytes) == 0x07) {
                 saw_subscribe_tracks_ok = true;
             }
-            if (write.stream_id == 8 && message_type(write.bytes) == 0x1d) {
+            if (write.stream_id == 4 && message_type(write.bytes) == 0x1d) {
                 saw_first_publish = true;
             }
-            if (write.stream_id == 12 && message_type(write.bytes) == 0x1d) {
+            if (write.stream_id == 8 && message_type(write.bytes) == 0x1d) {
                 saw_second_publish = true;
             }
         }
@@ -1737,13 +1816,142 @@ int main() {
     }
 
     {
+        MockTransport draft18_subscribe_transport;
+        draft18_subscribe_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_subscribe_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_subscribe_transport.reads[1].push_back(
+            encode_subscribe_message(91, kTestTrackNamespace, "vide_1", 0, DraftVersion::kDraft18));
+
+        MoqtSession draft18_subscribe_session(
+            draft18_subscribe_transport,
+            std::string(kTestTrackNamespace),
+            false,
+            false,
+            false,
+            std::chrono::seconds(1));
+        status = draft18_subscribe_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 SUBSCRIBE session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_subscribe_session.publish(draft18_materialized);
+        ok &= expect(status.ok, "expected draft-18 SUBSCRIBE request stream publish to succeed");
+
+        bool saw_subscribe_ok_on_request_stream = false;
+        bool saw_object_on_unidirectional_stream = false;
+        bool saw_publish_done_on_control_stream = false;
+        for (const auto& write : draft18_subscribe_transport.writes) {
+            if (write.stream_id == 1 && message_type(write.bytes) == 0x04) {
+                saw_subscribe_ok_on_request_stream = true;
+            }
+            if ((write.stream_id & 0x2ULL) != 0 && message_type(write.bytes) != 0x2f00) {
+                saw_object_on_unidirectional_stream = true;
+            }
+            if (write.stream_id == 2 && message_type(write.bytes) == 0x0b) {
+                saw_publish_done_on_control_stream = true;
+            }
+        }
+        ok &= expect(saw_subscribe_ok_on_request_stream,
+                     "expected draft-18 SUBSCRIBE_OK on the inbound request stream");
+        ok &= expect(saw_object_on_unidirectional_stream,
+                     "expected draft-18 SUBSCRIBE objects on unidirectional streams");
+        ok &= expect(saw_publish_done_on_control_stream,
+                     "expected draft-18 PUBLISH_DONE on local unidirectional control stream");
+    }
+
+    {
+        MockTransport draft18_subscribe_namespace_transport;
+        draft18_subscribe_namespace_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_subscribe_namespace_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_subscribe_namespace_transport.reads[1].push_back(
+            encode_subscribe_namespace_message(DraftVersion::kDraft18, 91, kTestTrackNamespace));
+
+        MoqtSession draft18_subscribe_namespace_session(
+            draft18_subscribe_namespace_transport,
+            std::string(kTestTrackNamespace),
+            false,
+            false,
+            false,
+            std::chrono::seconds(1));
+        status = draft18_subscribe_namespace_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 SUBSCRIBE_NAMESPACE session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_subscribe_namespace_session.publish(draft18_materialized);
+        ok &= expect(status.ok, "expected draft-18 SUBSCRIBE_NAMESPACE request stream publish to succeed");
+
+        bool saw_namespace_request_ok = false;
+        for (const auto& write : draft18_subscribe_namespace_transport.writes) {
+            if (write.stream_id == 1 && message_type(write.bytes) == 0x07) {
+                saw_namespace_request_ok = true;
+            }
+        }
+        ok &= expect(saw_namespace_request_ok,
+                     "expected draft-18 SUBSCRIBE_NAMESPACE REQUEST_OK on the inbound request stream");
+    }
+
+    {
+        MockTransport draft18_legacy_subscribe_namespace_transport;
+        draft18_legacy_subscribe_namespace_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_legacy_subscribe_namespace_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        std::vector<std::uint8_t> legacy_subscribe_namespace =
+            encode_subscribe_namespace_message(DraftVersion::kDraft18, 91, kTestTrackNamespace);
+        legacy_subscribe_namespace[0] = 0x11;
+        draft18_legacy_subscribe_namespace_transport.reads[1].push_back(legacy_subscribe_namespace);
+
+        MoqtSession draft18_legacy_subscribe_namespace_session(
+            draft18_legacy_subscribe_namespace_transport,
+            std::string(kTestTrackNamespace),
+            false,
+            false,
+            false,
+            std::chrono::seconds(1));
+        status = draft18_legacy_subscribe_namespace_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 legacy SUBSCRIBE_NAMESPACE session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_legacy_subscribe_namespace_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 legacy SUBSCRIBE_NAMESPACE type to fail");
+        ok &= expect(status.message == "received unsupported request stream",
+                     "expected draft-18 legacy SUBSCRIBE_NAMESPACE to be treated as unsupported request type");
+    }
+
+    {
+        MockTransport draft18_control_subscribe_transport;
+        draft18_control_subscribe_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_control_subscribe_transport.reads[0].push_back(
+            encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        draft18_control_subscribe_transport.reads[3].push_back(
+            encode_subscribe_message(91, kTestTrackNamespace, "vide_1", 0, DraftVersion::kDraft18));
+
+        MoqtSession draft18_control_subscribe_session(
+            draft18_control_subscribe_transport,
+            std::string(kTestTrackNamespace),
+            false,
+            false,
+            false,
+            std::chrono::seconds(1));
+        status = draft18_control_subscribe_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected draft-18 misplaced-control SUBSCRIBE session connect to succeed");
+
+        const PublishPlan draft18_materialized =
+            materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
+        status = draft18_control_subscribe_session.publish(draft18_materialized);
+        ok &= expect(!status.ok, "expected draft-18 SUBSCRIBE on control stream to fail");
+        ok &= expect(status.message == "draft-18 request message received on control stream",
+                     "expected explicit draft-18 control-stream request rejection");
+    }
+
+    {
         MockTransport draft18_bad_response_transport;
-        draft18_bad_response_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
+        draft18_bad_response_transport.reads[3].push_back(encode_draft18_setup_response());
         // Inject SUBSCRIBE (0x03) on namespace request stream where REQUEST_OK/REQUEST_ERROR is expected.
-        draft18_bad_response_transport.reads[4].push_back(
+        draft18_bad_response_transport.reads[0].push_back(
             encode_subscribe_message(1, kTestTrackNamespace, "catalog", 0, DraftVersion::kDraft18));
         MoqtSession draft18_bad_response_session(draft18_bad_response_transport, std::string(kTestTrackNamespace), true);
         status = draft18_bad_response_session.connect(endpoint, tls);
@@ -1759,13 +1967,10 @@ int main() {
 
     {
         MockTransport draft18_wrong_type_transport;
-        draft18_wrong_type_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
+        draft18_wrong_type_transport.reads[3].push_back(encode_draft18_setup_response());
         // Namespace request stream receives PUBLISH_OK, which is a valid MOQT
         // message type but invalid response type for a namespace request.
-        draft18_wrong_type_transport.reads[4].push_back(
+        draft18_wrong_type_transport.reads[0].push_back(
             encode_publish_ok_message(DraftVersion::kDraft18, 9, 1));
 
         MoqtSession draft18_wrong_type_session(draft18_wrong_type_transport, std::string(kTestTrackNamespace), true);
@@ -1782,13 +1987,10 @@ int main() {
 
     {
         MockTransport draft18_goaway_transport;
-        draft18_goaway_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
+        draft18_goaway_transport.reads[3].push_back(encode_draft18_setup_response());
         // GOAWAY message on namespace request stream:
         // type=0x10, length=0.
-        draft18_goaway_transport.reads[4].push_back(std::vector<std::uint8_t>{0x10, 0x00, 0x00});
+        draft18_goaway_transport.reads[0].push_back(std::vector<std::uint8_t>{0x10, 0x00, 0x00});
 
         MoqtSession draft18_goaway_session(draft18_goaway_transport, std::string(kTestTrackNamespace), true);
         status = draft18_goaway_session.connect(endpoint, tls);
@@ -1804,13 +2006,10 @@ int main() {
 
     {
         MockTransport draft18_duplicate_response_transport;
-        draft18_duplicate_response_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
-        draft18_duplicate_response_transport.reads[4].push_back(
+        draft18_duplicate_response_transport.reads[3].push_back(encode_draft18_setup_response());
+        draft18_duplicate_response_transport.reads[0].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
-        draft18_duplicate_response_transport.reads[4].push_back(
+        draft18_duplicate_response_transport.reads[0].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
 
         MoqtSession draft18_duplicate_response_session(
@@ -1828,15 +2027,13 @@ int main() {
 
     {
         // After a successful draft-18 publish, close() resets all request stream IDs.
-        // MockTransport bidi stream IDs: 0=control, 4=PUBLISH_NAMESPACE, 8=first PUBLISH, 12=second PUBLISH
+        // MockTransport draft-18 stream IDs: 2=local setup/control, 0=PUBLISH_NAMESPACE,
+        // 4=first PUBLISH, 8=second PUBLISH.
         MockTransport d18_retain_transport;
-        d18_retain_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
-        d18_retain_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
-        d18_retain_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
-        d18_retain_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+        d18_retain_transport.reads[3].push_back(encode_draft18_setup_response());
+        d18_retain_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        d18_retain_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        d18_retain_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
 
         MoqtSession d18_retain_session(d18_retain_transport, std::string(kTestTrackNamespace), true);
         TransportStatus st = d18_retain_session.connect(endpoint, tls);
@@ -1859,21 +2056,18 @@ int main() {
             reset_ids.insert(sid);
             ok &= expect(ec == 0, "expected error_code 0 for all resets");
         }
-        ok &= expect(reset_ids.count(4) == 1, "expected namespace stream 4 to be reset");
+        ok &= expect(reset_ids.count(0) == 1, "expected namespace stream 0 to be reset");
+        ok &= expect(reset_ids.count(4) == 1, "expected track stream 4 to be reset");
         ok &= expect(reset_ids.count(8) == 1, "expected track stream 8 to be reset");
-        ok &= expect(reset_ids.count(12) == 1, "expected track stream 12 to be reset");
     }
 
     {
         // Calling close() twice must not re-reset already-cleared stream IDs.
         MockTransport d18_dc_transport;
-        d18_dc_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
-        d18_dc_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
-        d18_dc_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
-        d18_dc_transport.reads[12].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
+        d18_dc_transport.reads[3].push_back(encode_draft18_setup_response());
+        d18_dc_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        d18_dc_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
+        d18_dc_transport.reads[8].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
 
         MoqtSession d18_dc_session(d18_dc_transport, std::string(kTestTrackNamespace), true);
         d18_dc_session.connect(endpoint, tls);
@@ -1987,11 +2181,8 @@ int main() {
 
     {
         MockTransport live_draft18_transport;
-        live_draft18_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
-        live_draft18_transport.reads[4].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
+        live_draft18_transport.reads[3].push_back(encode_draft18_setup_response());
+        live_draft18_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
 
         MoqtSession live_draft18_session(
             live_draft18_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(1));
@@ -2004,7 +2195,7 @@ int main() {
         status = live_draft18_session.publish_live(live_input, DraftVersion::kDraft18, false);
         ok &= expect(status.ok, "expected draft-18 live publish namespace request stream to succeed");
         ok &= expect(live_draft18_transport.writes.size() >= 2 &&
-                         live_draft18_transport.writes[1].stream_id == 4 &&
+                         live_draft18_transport.writes[1].stream_id == 0 &&
                          message_type(live_draft18_transport.writes[1].bytes) == 0x06,
                      "expected draft-18 live PUBLISH_NAMESPACE on a request stream");
         ok &= expect(control_message_count(live_draft18_transport, 0x1d) == 0,
@@ -2013,17 +2204,14 @@ int main() {
 
     {
         MockTransport live_draft18_subscribe_tracks_transport;
-        live_draft18_subscribe_tracks_transport.reads[0].push_back(encode_server_setup_message({
-            .draft = DraftVersion::kDraft18,
-            .max_request_id = 0,
-        }));
-        live_draft18_subscribe_tracks_transport.reads[4].push_back(
+        live_draft18_subscribe_tracks_transport.reads[3].push_back(encode_draft18_setup_response());
+        live_draft18_subscribe_tracks_transport.reads[0].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 0));
         live_draft18_subscribe_tracks_transport.reads[1].push_back(
             encode_subscribe_tracks_message(91, kTestTrackNamespace));
-        live_draft18_subscribe_tracks_transport.reads[8].push_back(
+        live_draft18_subscribe_tracks_transport.reads[4].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 2));
-        live_draft18_subscribe_tracks_transport.reads[12].push_back(
+        live_draft18_subscribe_tracks_transport.reads[8].push_back(
             encode_publish_namespace_ok_message(DraftVersion::kDraft18, 4));
 
         MoqtSession live_draft18_subscribe_tracks_session(
@@ -2049,10 +2237,10 @@ int main() {
             if (write.stream_id == 1 && message_type(write.bytes) == 0x07) {
                 saw_subscribe_tracks_ok = true;
             }
-            if (write.stream_id == 8 && message_type(write.bytes) == 0x1d) {
+            if (write.stream_id == 4 && message_type(write.bytes) == 0x1d) {
                 saw_catalog_publish = true;
             }
-            if (write.stream_id == 12 && message_type(write.bytes) == 0x1d) {
+            if (write.stream_id == 8 && message_type(write.bytes) == 0x1d) {
                 saw_media_publish = true;
             }
         }

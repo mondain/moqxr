@@ -118,7 +118,8 @@ Areas that are aligned with the drafts:
 - WT mode uses QUIC ALPN `h3` by default
 - CONNECT uses the endpoint `authority` and `path`
 - WT protocol offer is sent separately from QUIC ALPN
-- MoQ `CLIENT_SETUP` omits `AUTHORITY` and `PATH` in WT mode
+- MoQ setup omits `AUTHORITY` and `PATH` in WT mode: `CLIENT_SETUP` for
+  draft-14/draft-16, `SETUP` for draft-18
 - local WT app streams are created through `picowt_create_local_stream()`
 - WebTransport app-stream writes use picoquic's callback-driven provide-data path instead of direct stream injection
 
