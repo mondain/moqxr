@@ -23,6 +23,7 @@ constexpr std::uint64_t kPublishNamespaceOkType = 0x07;
 constexpr std::uint64_t kRequestOkType = 0x07;
 constexpr std::uint64_t kPublishNamespaceErrorType = 0x08;
 constexpr std::uint64_t kPublishNamespaceDoneType = 0x09;
+constexpr std::uint64_t kNamespaceDoneType = 0x0e;
 constexpr std::uint64_t kPublishDoneType = 0x0b;
 constexpr std::uint64_t kSubscribeNamespaceType = 0x11;
 constexpr std::uint64_t kSubscribeNamespaceOkType = 0x12;
@@ -464,6 +465,7 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         case kPublishNamespaceOkType:
         case kPublishNamespaceErrorType:
         case kPublishNamespaceDoneType:
+        case kNamespaceDoneType:
         case kPublishDoneType:
         case kMaxRequestIdType:
         case kSubscribeNamespaceTypeDraft18:
@@ -815,7 +817,7 @@ bool decode_request_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
     std::uint64_t previous_parameter_type = 0;
     for (std::uint64_t parameter_index = 0; parameter_index < parameter_count; ++parameter_index) {
         std::uint64_t parameter_type = 0;
-        if (!decode_parameter_type(bytes, offset, draft, previous_parameter_type, draft == DraftVersion::kDraft16, parameter_type)) {
+        if (!decode_parameter_type(bytes, offset, draft, previous_parameter_type, true, parameter_type)) {
             return false;
         }
         if ((parameter_type & 0x1ULL) == 0) {
@@ -940,7 +942,7 @@ bool decode_subscribe_namespace_message(std::span<const std::uint8_t> bytes,
     std::uint64_t previous_parameter_type = 0;
     for (std::uint64_t index = 0; index < parameters; ++index) {
         std::uint64_t parameter_type = 0;
-        if (!decode_parameter_type(bytes, offset, draft, previous_parameter_type, draft == DraftVersion::kDraft16, parameter_type)) {
+        if (!decode_parameter_type(bytes, offset, draft, previous_parameter_type, true, parameter_type)) {
             return false;
         }
         if ((parameter_type & 0x1ULL) == 0) {
@@ -1053,7 +1055,7 @@ bool decode_subscribe_message(std::span<const std::uint8_t> bytes, DraftVersion 
         message.subscriber_priority = bytes[offset++];
         message.group_order = bytes[offset++];
         message.forward = bytes[offset++];
-        if (message.group_order > 2 || message.forward > 1) {
+        if (message.group_order == 0 || message.group_order > 2 || message.forward > 1) {
             return false;
         }
 
@@ -1404,11 +1406,13 @@ std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceM
     } else if (!uses_moq_vi64(message.draft)) {
         append_moqint(payload, message.draft, message.request_id);
     } else {
-        return {};
+        append_track_namespace(payload, message.draft, message.track_namespace);
     }
 
     std::vector<std::uint8_t> message_bytes;
-    append_moqint(message_bytes, message.draft, kPublishNamespaceDoneType);
+    append_moqint(message_bytes,
+                  message.draft,
+                  uses_moq_vi64(message.draft) ? kNamespaceDoneType : kPublishNamespaceDoneType);
     append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
     message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
     return message_bytes;
@@ -1500,6 +1504,9 @@ bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
         message.forward = bytes[offset++];
         message.subscriber_priority = bytes[offset++];
         message.group_order = bytes[offset++];
+        if (message.group_order == 0 || message.group_order > 2 || message.forward > 1) {
+            return false;
+        }
         if (!decode_moqint_impl(bytes, offset, draft, message.filter_type)) {
             return false;
         }

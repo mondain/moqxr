@@ -630,8 +630,13 @@ bool test_publisher_control_message_encoders_for_all_drafts() {
 
         ok &= expect_uint16_frame(encode_publish_done_message(draft, 44, 2), 0x0b, frame, label + " publish done");
         if (uses_vi64(draft)) {
-            ok &= expect(encode_publish_namespace_done_message(namespace_message).empty(),
-                         label + " publish namespace done is not emitted");
+            const auto namespace_done = encode_publish_namespace_done_message(namespace_message);
+            ok &= expect_uint16_frame(namespace_done, 0x0e, frame, label + " namespace done");
+            offset = frame.payload_offset;
+            ok &= expect(read_track_namespace(namespace_done, offset, frame.payload_end, draft, tuple) &&
+                             tuple == std::vector<std::string>({"live", "alpha"}),
+                         label + " namespace done suffix placement");
+            ok &= expect(offset == frame.payload_end, label + " namespace done boundary");
         } else {
             ok &= expect_uint16_frame(encode_publish_namespace_done_message(namespace_message), 0x09, frame,
                                       label + " publish namespace done");
@@ -814,6 +819,30 @@ bool test_control_message_framing_and_parameter_regressions() {
     ok &= expect(!decode_subscribe_message(duplicate_parameter_subscribe, DraftVersion::kDraft16, subscribe),
                  "draft-16 rejects duplicate delta-encoded parameter type");
 
+    std::vector<std::uint8_t> draft14_bad_group_order_subscribe =
+        build_subscribe_message(DraftVersion::kDraft14);
+    for (std::size_t index = 0; index + 3 < draft14_bad_group_order_subscribe.size(); ++index) {
+        if (draft14_bad_group_order_subscribe[index] == 128 &&
+            draft14_bad_group_order_subscribe[index + 1] == 1 &&
+            draft14_bad_group_order_subscribe[index + 2] == 1 &&
+            draft14_bad_group_order_subscribe[index + 3] == 3) {
+            draft14_bad_group_order_subscribe[index + 1] = 0;
+            break;
+        }
+    }
+    ok &= expect(!decode_subscribe_message(
+                     draft14_bad_group_order_subscribe, DraftVersion::kDraft14, subscribe),
+                 "draft-14 SUBSCRIBE rejects group order 0");
+
+    std::vector<std::uint8_t> draft14_bad_group_order_publish_ok =
+        build_publish_ok_message(DraftVersion::kDraft14);
+    if (draft14_bad_group_order_publish_ok.size() > 5) {
+        draft14_bad_group_order_publish_ok[5] = 0;
+    }
+    PublishOk publish_ok;
+    ok &= expect(!decode_publish_ok(draft14_bad_group_order_publish_ok, DraftVersion::kDraft14, publish_ok),
+                 "draft-14 PUBLISH_OK rejects group order 0");
+
     std::vector<std::uint8_t> request_ok_payload;
     append_varint(request_ok_payload, 44);
     append_varint(request_ok_payload, 1);
@@ -825,6 +854,42 @@ bool test_control_message_framing_and_parameter_regressions() {
     ok &= expect(decode_request_ok(request_ok, DraftVersion::kDraft16, namespace_ok),
                  "draft-16 REQUEST_OK decodes delta-encoded parameters");
     ok &= expect(namespace_ok.request_id == 44, "draft-16 REQUEST_OK request id with parameters");
+
+    std::vector<std::uint8_t> draft18_request_ok_payload;
+    append_moqint(draft18_request_ok_payload, DraftVersion::kDraft18, 2);
+    append_moqint(draft18_request_ok_payload, DraftVersion::kDraft18, 0x21);
+    append_moqint(draft18_request_ok_payload, DraftVersion::kDraft18, 0);
+    append_moqint(draft18_request_ok_payload, DraftVersion::kDraft18, 1);
+    append_moqint(draft18_request_ok_payload, DraftVersion::kDraft18, 7);
+    std::vector<std::uint8_t> draft18_request_ok;
+    append_moqint(draft18_request_ok, DraftVersion::kDraft18, 0x07);
+    draft18_request_ok.push_back(static_cast<std::uint8_t>((draft18_request_ok_payload.size() >> 8) & 0xff));
+    draft18_request_ok.push_back(static_cast<std::uint8_t>(draft18_request_ok_payload.size() & 0xff));
+    draft18_request_ok.insert(
+        draft18_request_ok.end(), draft18_request_ok_payload.begin(), draft18_request_ok_payload.end());
+    ok &= expect(decode_request_ok(draft18_request_ok, DraftVersion::kDraft18, namespace_ok),
+                 "draft-18 REQUEST_OK decodes multi-parameter delta KVPs");
+
+    std::vector<std::uint8_t> draft18_subscribe_namespace_payload;
+    append_moqint(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, 2);
+    append_track_namespace(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, {"live"});
+    append_moqint(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, 2);
+    append_moqint(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, 0x21);
+    append_moqint(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, 0);
+    append_moqint(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, 1);
+    append_moqint(draft18_subscribe_namespace_payload, DraftVersion::kDraft18, 7);
+    std::vector<std::uint8_t> draft18_subscribe_namespace;
+    append_moqint(draft18_subscribe_namespace, DraftVersion::kDraft18, 0x50);
+    draft18_subscribe_namespace.push_back(
+        static_cast<std::uint8_t>((draft18_subscribe_namespace_payload.size() >> 8) & 0xff));
+    draft18_subscribe_namespace.push_back(static_cast<std::uint8_t>(draft18_subscribe_namespace_payload.size() & 0xff));
+    draft18_subscribe_namespace.insert(draft18_subscribe_namespace.end(),
+                                       draft18_subscribe_namespace_payload.begin(),
+                                       draft18_subscribe_namespace_payload.end());
+    SubscribeNamespaceMessage subscribe_namespace;
+    ok &= expect(decode_subscribe_namespace_message(
+                     draft18_subscribe_namespace, DraftVersion::kDraft18, subscribe_namespace),
+                 "draft-18 SUBSCRIBE_NAMESPACE decodes multi-parameter delta KVPs");
 
     const std::vector<std::uint8_t> draft18_namespace_ok =
         encode_subscribe_namespace_ok_message(DraftVersion::kDraft18, 44);

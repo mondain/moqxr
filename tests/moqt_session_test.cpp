@@ -243,7 +243,7 @@ struct MockTransport final : PublisherTransport {
     std::vector<std::chrono::milliseconds> read_timeouts;
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
     std::set<std::uint64_t> accepted_streams;
-    std::function<void(const MockTransport&, std::uint64_t)> on_read;
+    std::function<void(MockTransport&, std::uint64_t)> on_read;
 };
 
 std::vector<std::size_t> object_write_indices(const MockTransport& transport) {
@@ -479,6 +479,14 @@ std::vector<std::uint8_t> encode_subscribe_update_message(std::uint64_t request_
     payload.push_back(0x01);
     payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
     std::vector<std::uint8_t> message = encode_varint(0x02);
+    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    message.insert(message.end(), payload.begin(), payload.end());
+    return message;
+}
+
+std::vector<std::uint8_t> encode_unsubscribe_message(DraftVersion draft, std::uint64_t request_id) {
+    std::vector<std::uint8_t> payload = encode_moqint(draft, request_id);
+    std::vector<std::uint8_t> message = encode_moqint(draft, 0x0a);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
@@ -961,6 +969,57 @@ int main() {
         ok &= expect(std::find(transport.read_timeouts.begin(), transport.read_timeouts.end(), std::chrono::seconds(30)) !=
                          transport.read_timeouts.end(),
                      "expected default subscriber wait timeout to be 30 seconds");
+    }
+
+    {
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        transport.reads[0].push_back(encode_subscribe_message(1, kTestTrackNamespace, "vide_1", 1));
+
+        bool injected_unsubscribe = false;
+        transport.on_read = [&](MockTransport& current, std::uint64_t stream_id) {
+            if (stream_id != 0 || injected_unsubscribe) {
+                return;
+            }
+            std::size_t object_payload_writes = 0;
+            for (const auto& write : current.writes) {
+                if (write.stream_id != 0 && !write.bytes.empty()) {
+                    ++object_payload_writes;
+                }
+            }
+            if (object_payload_writes == 1) {
+                current.reads[0].push_back(encode_unsubscribe_message(DraftVersion::kDraft14, 1));
+                injected_unsubscribe = true;
+            }
+        };
+
+        MoqtSession session(transport, std::string(kTestTrackNamespace), false);
+        auto status = session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected unsubscribe session connect to succeed");
+
+        status = session.publish(make_multi_object_subgroup_plan());
+        ok &= expect(status.ok, "expected UNSUBSCRIBE flow to finish cleanly");
+        ok &= expect(injected_unsubscribe, "expected test to inject UNSUBSCRIBE after first object");
+        std::size_t object_payload_writes = 0;
+        bool saw_stream_fin = false;
+        for (const auto& write : transport.writes) {
+            if (write.stream_id == 0) {
+                continue;
+            }
+            if (write.bytes.empty() && write.fin) {
+                saw_stream_fin = true;
+            } else if (!write.bytes.empty()) {
+                ++object_payload_writes;
+            }
+        }
+        ok &= expect(object_payload_writes == 1, "expected UNSUBSCRIBE to stop further object writes");
+        ok &= expect(saw_stream_fin, "expected UNSUBSCRIBE to FIN the open data stream");
+        ok &= expect(control_message_count(transport, 0x0b) == 1,
+                     "expected UNSUBSCRIBE to emit PUBLISH_DONE for active subscription");
     }
 
     {
@@ -2121,9 +2180,14 @@ int main() {
         const PublishPlan draft18_materialized =
             materialize_publish_plan(make_span_backed_plan(DraftVersion::kDraft18), source_bytes);
         status = draft18_goaway_session.publish(draft18_materialized);
-        ok &= expect(!status.ok, "expected draft-18 publish to fail on request-stream GOAWAY");
-        ok &= expect(status.message == "request stream received GOAWAY",
-                     "expected explicit GOAWAY request-stream failure message");
+        ok &= expect(!status.ok, "expected draft-18 publish to surface request-stream GOAWAY migration");
+        ok &= expect(status.message == "request stream received GOAWAY migration",
+                     "expected explicit GOAWAY request-stream migration message");
+        ok &= expect(draft18_goaway_transport.state() == ConnectionState::kConnected,
+                     "expected request-stream GOAWAY not to close draft-18 session");
+        ok &= expect(!draft18_goaway_transport.reset_calls.empty() &&
+                         draft18_goaway_transport.reset_calls.back().first == 0,
+                     "expected request-stream GOAWAY to reset the old request stream");
     }
 
     {

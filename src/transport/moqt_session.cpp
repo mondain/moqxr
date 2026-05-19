@@ -914,7 +914,14 @@ TransportStatus send_request_stream_and_wait(PublisherTransport& transport,
             const bool is_goaway = response_type == 0x10;
 
             if (is_goaway) {
-                return protocol_violation(transport, "request stream received GOAWAY");
+                if (draft != openmoq::publisher::DraftVersion::kDraft18) {
+                    return protocol_violation(transport, "request stream received GOAWAY");
+                }
+                const TransportStatus reset_status = transport.reset_stream(request_stream_id, 0x0);
+                if (!reset_status.ok) {
+                    return reset_status;
+                }
+                return TransportStatus::failure("request stream received GOAWAY migration");
             }
 
             bool response_type_allowed = false;
@@ -1178,6 +1185,23 @@ bool decode_legacy_subscribe_update_message(std::span<const std::uint8_t> bytes,
     }
 
     return false;
+}
+
+bool decode_unsubscribe_message(std::span<const std::uint8_t> bytes,
+                                openmoq::publisher::DraftVersion draft,
+                                std::uint64_t& request_id) {
+    std::size_t offset = 0;
+    std::uint64_t message_type = 0;
+    if (!decode_moqint(bytes, offset, draft, message_type) || message_type != 0x0a || offset + 2 > bytes.size()) {
+        return false;
+    }
+    const std::size_t payload_length =
+        (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
+    offset += 2;
+    const std::size_t payload_end = offset + payload_length;
+    return payload_end == bytes.size() &&
+           decode_moqint(bytes, offset, draft, request_id) &&
+           offset == payload_end;
 }
 
 bool find_next_matching_object_index(const openmoq::publisher::PublishPlan& plan,
@@ -1690,6 +1714,37 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
                 (message_type == 0x03 || message_type == 0x06 || message_type == 0x50 ||
                  message_type == 0x16 || message_type == 0x1d || message_type == 0x51)) {
                 return protocol_violation(transport, "draft-18 request message received on control stream");
+            }
+            if (message_type == 0x0a) {
+                if (uses_request_streams(draft)) {
+                    return protocol_violation(transport, "UNSUBSCRIBE received on draft-18 control stream");
+                }
+                std::uint64_t unsubscribe_request_id = 0;
+                if (!decode_unsubscribe_message(message_bytes, draft, unsubscribe_request_id)) {
+                    return protocol_violation(transport, "received invalid UNSUBSCRIBE");
+                }
+                pending_subscriptions.erase(unsubscribe_request_id);
+                auto active_it = active_subscriptions.find(unsubscribe_request_id);
+                if (active_it != active_subscriptions.end()) {
+                    const TransportStatus finish_status = active_it->second.sender->finish_group(transport);
+                    if (!finish_status.ok) {
+                        return finish_status;
+                    }
+                    const TransportStatus finalize_status =
+                        finalize_subscription(transport,
+                                              draft,
+                                              control_stream_id,
+                                              unsubscribe_request_id,
+                                              active_it->second.sender->stream_count(),
+                                              completed_request_ids);
+                    if (!finalize_status.ok) {
+                        return finalize_status;
+                    }
+                    active_subscriptions.erase(active_it);
+                    served_any_subscription = true;
+                }
+                buffer.erase(buffer.begin(), buffer.begin() + message_size);
+                continue;
             }
             const bool is_handled_type =
                 message_type == 0x02 ||  // SUBSCRIBE_UPDATE
