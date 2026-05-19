@@ -159,5 +159,37 @@ int main() {
                      "expected draft-14 webtransport to offer empty application protocol");
     }
 
+    {
+        PublisherConfig config;
+        config.draft_version = DraftVersion::kDraft18;
+
+        const auto state = std::make_shared<MockTransport::State>();
+        Publisher publisher(
+            config,
+            [state](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
+                if (kind != TransportKind::kWebTransport) {
+                    return nullptr;
+                }
+                return std::make_unique<MockTransport>(state);
+            });
+
+        PreparedPublish prepared;
+        prepared.plan = PublishPlan{.draft = draft_profile(DraftVersion::kDraft18)};
+
+        EndpointConfig endpoint;
+        endpoint.transport = TransportKind::kWebTransport;
+        endpoint.host = "relay.example.com";
+        endpoint.port = 443;
+        endpoint.path = "/moq";
+        endpoint.path_explicit = true;
+
+        const TransportStatus status = publisher.publish(prepared, endpoint);
+        ok &= expect(!status.ok, "expected mock connect failure to propagate for draft-18 webtransport");
+        ok &= expect(state->configured_endpoint.alpn == "h3",
+                     "expected default ALPN h3 for draft-18 webtransport");
+        ok &= expect(state->configured_endpoint.application_protocol == "moqt-18",
+                     "expected draft-18 webtransport to offer bare WT protocol token");
+    }
+
     return ok ? 0 : 1;
 }

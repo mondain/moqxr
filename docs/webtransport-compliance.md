@@ -62,8 +62,8 @@ expects clients to include MOQT protocol identifiers in `WT-Available-Protocols`
 Current offers in this repo:
 
 - draft 14: offer no WebTransport subprotocol for legacy compatibility
-- draft 16: offer `"moqt-16"` only
-- draft 18: offer `"moqt-18"` only
+- draft 16: offer `moqt-16` only
+- draft 18: offer `moqt-18` only
 
 Red5's current picoquic/h3zero server path no longer exposes
 `WT-Available-Protocols` to the application on CONNECT accept.  Red5 therefore
