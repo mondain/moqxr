@@ -477,15 +477,25 @@ bool test_setup_serdes_for_all_drafts() {
         if (uses_vi64(draft)) {
             bool saw_path = false;
             bool saw_authority = false;
+            std::uint64_t previous_option_type = 0;
+            std::uint64_t option_index = 0;
             while (offset < frame.payload_end) {
-                std::uint64_t option_type = 0;
+                std::uint64_t option_delta = 0;
                 std::uint64_t option_length = 0;
-                ok &= expect(read_moqint(bytes, offset, draft, option_type), label + " option type");
+                ok &= expect(read_moqint(bytes, offset, draft, option_delta), label + " option delta type");
+                if (option_index == 0) {
+                    ok &= expect(option_delta == 0x01, label + " first setup option is PATH delta");
+                } else if (option_index == 1) {
+                    ok &= expect(option_delta == 0x04, label + " second setup option is AUTHORITY delta");
+                }
+                const std::uint64_t option_type = previous_option_type + option_delta;
                 ok &= expect(read_moqint(bytes, offset, draft, option_length), label + " option length");
                 ok &= expect(offset + option_length <= frame.payload_end, label + " option length fits");
                 saw_path = saw_path || option_type == 0x01;
                 saw_authority = saw_authority || option_type == 0x05;
                 offset += static_cast<std::size_t>(option_length);
+                previous_option_type = option_type;
+                ++option_index;
             }
             ok &= expect(saw_path, label + " path option placement");
             ok &= expect(saw_authority, label + " authority option placement");

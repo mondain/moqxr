@@ -365,13 +365,15 @@ void append_parameter(std::vector<std::uint8_t>& out,
     }
 }
 
-void append_setup_option(std::vector<std::uint8_t>& out,
-                         DraftVersion draft,
-                         std::uint64_t type,
-                         std::span<const std::uint8_t> value) {
-    append_moqint(out, draft, type);
+void append_setup_option_delta(std::vector<std::uint8_t>& out,
+                               DraftVersion draft,
+                               std::uint64_t& previous_type,
+                               std::uint64_t type,
+                               std::span<const std::uint8_t> value) {
+    append_moqint(out, draft, type - previous_type);
     append_moqint(out, draft, value.size());
     out.insert(out.end(), value.begin(), value.end());
+    previous_type = type;
 }
 
 void append_parameter_delta(std::vector<std::uint8_t>& out,
@@ -547,8 +549,9 @@ std::vector<std::uint8_t> encode_setup_message(const SetupMessage& message) {
         if (message.transport == TransportKind::kRawQuic) {
             const std::vector<std::uint8_t> path = to_bytes(message.path);
             const std::vector<std::uint8_t> authority = to_bytes(message.authority);
-            append_setup_option(payload, message.draft, kSetupParamPath, path);
-            append_setup_option(payload, message.draft, kSetupParamAuthority, authority);
+            std::uint64_t previous_option_type = 0;
+            append_setup_option_delta(payload, message.draft, previous_option_type, kSetupParamPath, path);
+            append_setup_option_delta(payload, message.draft, previous_option_type, kSetupParamAuthority, authority);
         }
 
         std::vector<std::uint8_t> message_bytes;
@@ -631,10 +634,16 @@ bool decode_server_setup_message(std::span<const std::uint8_t> bytes, ServerSetu
 
     if (message_type == kSetupType) {
         message.draft = DraftVersion::kDraft18;
+        std::uint64_t previous_option_type = 0;
         while (offset < payload_end) {
             std::uint64_t option_type = 0;
             std::uint64_t option_length = 0;
-            if (!decode_moqint_impl(payload_bytes, offset, message_draft, option_type) ||
+            if (!decode_parameter_type(payload_bytes,
+                                       offset,
+                                       message_draft,
+                                       previous_option_type,
+                                       true,
+                                       option_type) ||
                 !decode_moqint_impl(payload_bytes, offset, message_draft, option_length) ||
                 offset + option_length > payload_end) {
                 return false;
