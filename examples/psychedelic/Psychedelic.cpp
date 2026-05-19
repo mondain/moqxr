@@ -89,10 +89,12 @@ Args parse_args(int argc, char** argv) {
                 args.draft = openmoq::publisher::DraftVersion::kDraft14;
             } else if (value == "16") {
                 args.draft = openmoq::publisher::DraftVersion::kDraft16;
+            } else if (value == "17") {
+                args.draft = openmoq::publisher::DraftVersion::kDraft17;
             } else if (value == "18") {
                 args.draft = openmoq::publisher::DraftVersion::kDraft18;
             } else {
-                throw std::runtime_error("--draft must be one of: 14, 16, 18");
+                throw std::runtime_error("--draft must be one of: 14, 16, 17, 18");
             }
         } else {
             throw std::runtime_error("unknown argument: " + flag);
@@ -127,7 +129,7 @@ std::string build_ffmpeg_video_command(int seconds) {
 
 void print_usage(const char* argv0) {
     std::cout << "Usage: " << argv0
-              << " [--endpoint https://host:port/moq] [--namespace name] [--draft 14|16|18] [--seconds N]\n";
+              << " [--endpoint https://host:port/moq] [--namespace name] [--draft 14|16|17|18] [--seconds N]\n";
 }
 
 }  // namespace
@@ -181,6 +183,8 @@ int main(int argc, char** argv) {
                 endpoint.transport = had_https ? TransportKind::kWebTransport : TransportKind::kRawQuic;
             } else {
                 endpoint.transport = TransportKind::kRawQuic;
+                endpoint.path = "/";
+                endpoint.path_explicit = false;
             }
 
             const std::size_t colon = authority.rfind(':');

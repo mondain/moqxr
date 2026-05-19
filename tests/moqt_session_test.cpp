@@ -40,6 +40,74 @@ using openmoq::publisher::transport::encode_setup_message;
 using openmoq::publisher::transport::encode_server_setup_message;
 using openmoq::publisher::transport::encode_varint;
 
+std::vector<std::uint8_t> encode_vi64(std::uint64_t value) {
+    if (value <= 127) {
+        return {static_cast<std::uint8_t>(value)};
+    }
+    if (value <= 16383) {
+        return {
+            static_cast<std::uint8_t>(0x80 | ((value >> 8) & 0x3f)),
+            static_cast<std::uint8_t>(value & 0xff),
+        };
+    }
+    if (value <= 2097151ULL) {
+        return {
+            static_cast<std::uint8_t>(0xc0 | ((value >> 16) & 0x1f)),
+            static_cast<std::uint8_t>((value >> 8) & 0xff),
+            static_cast<std::uint8_t>(value & 0xff),
+        };
+    }
+    return {
+        static_cast<std::uint8_t>(0xe0 | ((value >> 24) & 0x0f)),
+        static_cast<std::uint8_t>((value >> 16) & 0xff),
+        static_cast<std::uint8_t>((value >> 8) & 0xff),
+        static_cast<std::uint8_t>(value & 0xff),
+    };
+}
+
+std::vector<std::uint8_t> encode_moqint(DraftVersion draft, std::uint64_t value) {
+    return (draft == DraftVersion::kDraft17 || draft == DraftVersion::kDraft18)
+               ? encode_vi64(value)
+               : encode_varint(value);
+}
+
+void append_bytes(std::vector<std::uint8_t>& out, std::vector<std::uint8_t> bytes) {
+    out.insert(out.end(), bytes.begin(), bytes.end());
+}
+
+bool decode_vi64(std::span<const std::uint8_t> bytes, std::size_t& offset, std::uint64_t& value) {
+    if (offset >= bytes.size()) {
+        return false;
+    }
+    const std::uint8_t first = bytes[offset];
+    std::size_t length = 0;
+    std::uint8_t prefix_mask = 0;
+    if ((first & 0x80) == 0) {
+        length = 1;
+        prefix_mask = 0x7f;
+    } else if ((first & 0xc0) == 0x80) {
+        length = 2;
+        prefix_mask = 0x3f;
+    } else if ((first & 0xe0) == 0xc0) {
+        length = 3;
+        prefix_mask = 0x1f;
+    } else if ((first & 0xf0) == 0xe0) {
+        length = 4;
+        prefix_mask = 0x0f;
+    } else {
+        return false;
+    }
+    if (offset + length > bytes.size()) {
+        return false;
+    }
+    value = first & prefix_mask;
+    for (std::size_t i = 1; i < length; ++i) {
+        value = (value << 8) | bytes[offset + i];
+    }
+    offset += length;
+    return true;
+}
+
 struct MockTransport final : PublisherTransport {
     struct WriteEvent {
         std::uint64_t stream_id = 0;
@@ -261,16 +329,16 @@ std::vector<std::uint8_t> make_live_init_mp4() {
 std::vector<std::uint8_t> encode_publish_namespace_ok_message(DraftVersion draft, std::uint64_t request_id) {
     std::vector<std::uint8_t> payload;
     if (draft != DraftVersion::kDraft18) {
-        payload = encode_varint(request_id);
+        payload = encode_moqint(draft, request_id);
     }
     if (draft == DraftVersion::kDraft16) {
         const std::vector<std::uint8_t> parameter_count = encode_varint(0);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
     } else if (draft == DraftVersion::kDraft18) {
-        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        const std::vector<std::uint8_t> parameter_count = encode_moqint(draft, 0);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
     }
-    std::vector<std::uint8_t> message = encode_varint(0x07);
+    std::vector<std::uint8_t> message = encode_moqint(draft, 0x07);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
@@ -279,9 +347,9 @@ std::vector<std::uint8_t> encode_publish_namespace_ok_message(DraftVersion draft
 std::vector<std::uint8_t> encode_subscribe_namespace_message(DraftVersion draft,
                                                              std::uint64_t request_id,
                                                              std::string_view track_namespace) {
-    std::vector<std::uint8_t> payload = encode_varint(request_id);
-    const std::vector<std::uint8_t> tuple_len = encode_varint(1);
-    const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
+    std::vector<std::uint8_t> payload = encode_moqint(draft, request_id);
+    const std::vector<std::uint8_t> tuple_len = encode_moqint(draft, 1);
+    const std::vector<std::uint8_t> component_len = encode_moqint(draft, track_namespace.size());
     payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
     payload.insert(payload.end(), component_len.begin(), component_len.end());
     payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
@@ -289,10 +357,10 @@ std::vector<std::uint8_t> encode_subscribe_namespace_message(DraftVersion draft,
         const std::vector<std::uint8_t> subscribe_options = encode_varint(0x02);
         payload.insert(payload.end(), subscribe_options.begin(), subscribe_options.end());
     }
-    const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+    const std::vector<std::uint8_t> parameter_count = encode_moqint(draft, 0);
     payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
 
-    std::vector<std::uint8_t> message = encode_varint(draft == DraftVersion::kDraft18 ? 0x50 : 0x11);
+    std::vector<std::uint8_t> message = encode_moqint(draft, draft == DraftVersion::kDraft18 ? 0x50 : 0x11);
     if (draft == DraftVersion::kDraft16 || draft == DraftVersion::kDraft18) {
         append_be16(message, static_cast<std::uint16_t>(payload.size()));
     } else {
@@ -308,13 +376,13 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
                                                    std::string_view track_name,
                                                    std::uint8_t forward,
                                                    DraftVersion draft = DraftVersion::kDraft14) {
-    std::vector<std::uint8_t> payload = encode_varint(request_id);
-    const std::vector<std::uint8_t> tuple_len = encode_varint(1);
-    const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
+    std::vector<std::uint8_t> payload = encode_moqint(draft, request_id);
+    const std::vector<std::uint8_t> tuple_len = encode_moqint(draft, 1);
+    const std::vector<std::uint8_t> component_len = encode_moqint(draft, track_namespace.size());
     payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
     payload.insert(payload.end(), component_len.begin(), component_len.end());
     payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
-    const std::vector<std::uint8_t> track_name_length = encode_varint(track_name.size());
+    const std::vector<std::uint8_t> track_name_length = encode_moqint(draft, track_name.size());
     payload.insert(payload.end(), track_name_length.begin(), track_name_length.end());
     payload.insert(payload.end(), track_name.begin(), track_name.end());
 
@@ -333,35 +401,35 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
     } else {
         // Draft-16: parameters as delta-encoded KVPs.
         // FORWARD(0x10), SUBSCRIBER_PRIORITY(0x20), SUBSCRIPTION_FILTER(0x21)
-        const std::vector<std::uint8_t> parameter_count = encode_varint(3);
+        const std::vector<std::uint8_t> parameter_count = encode_moqint(draft, 3);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
         // FORWARD (0x10, even) delta=0x10, value=forward
-        const std::vector<std::uint8_t> forward_delta = encode_varint(0x10);
-        const std::vector<std::uint8_t> forward_value = encode_varint(forward);
+        const std::vector<std::uint8_t> forward_delta = encode_moqint(draft, 0x10);
+        const std::vector<std::uint8_t> forward_value = encode_moqint(draft, forward);
         payload.insert(payload.end(), forward_delta.begin(), forward_delta.end());
         payload.insert(payload.end(), forward_value.begin(), forward_value.end());
         // SUBSCRIBER_PRIORITY (0x20, even) delta=0x10
-        const std::vector<std::uint8_t> priority_delta = encode_varint(0x20 - 0x10);
-        const std::vector<std::uint8_t> priority_value = encode_varint(0x80);
+        const std::vector<std::uint8_t> priority_delta = encode_moqint(draft, 0x20 - 0x10);
+        const std::vector<std::uint8_t> priority_value = encode_moqint(draft, 0x80);
         payload.insert(payload.end(), priority_delta.begin(), priority_delta.end());
         payload.insert(payload.end(), priority_value.begin(), priority_value.end());
         // SUBSCRIPTION_FILTER (0x21, odd) delta=0x01
         // Value: FilterType(0x03=AbsoluteStart) + StartGroup(0) + StartObject(0)
-        const std::vector<std::uint8_t> filter_delta = encode_varint(0x21 - 0x20);
+        const std::vector<std::uint8_t> filter_delta = encode_moqint(draft, 0x21 - 0x20);
         std::vector<std::uint8_t> filter_value;
-        const std::vector<std::uint8_t> ft = encode_varint(0x03);
-        const std::vector<std::uint8_t> sg = encode_varint(0);
-        const std::vector<std::uint8_t> so = encode_varint(0);
+        const std::vector<std::uint8_t> ft = encode_moqint(draft, 0x03);
+        const std::vector<std::uint8_t> sg = encode_moqint(draft, 0);
+        const std::vector<std::uint8_t> so = encode_moqint(draft, 0);
         filter_value.insert(filter_value.end(), ft.begin(), ft.end());
         filter_value.insert(filter_value.end(), sg.begin(), sg.end());
         filter_value.insert(filter_value.end(), so.begin(), so.end());
-        const std::vector<std::uint8_t> filter_len = encode_varint(filter_value.size());
+        const std::vector<std::uint8_t> filter_len = encode_moqint(draft, filter_value.size());
         payload.insert(payload.end(), filter_delta.begin(), filter_delta.end());
         payload.insert(payload.end(), filter_len.begin(), filter_len.end());
         payload.insert(payload.end(), filter_value.begin(), filter_value.end());
     }
 
-    std::vector<std::uint8_t> message = encode_varint(0x03);
+    std::vector<std::uint8_t> message = encode_moqint(draft, 0x03);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
@@ -370,25 +438,26 @@ std::vector<std::uint8_t> encode_subscribe_message(std::uint64_t request_id,
 std::vector<std::uint8_t> encode_subscribe_tracks_message(std::uint64_t request_id,
                                                           std::string_view track_namespace,
                                                           std::uint8_t forward = 1) {
-    std::vector<std::uint8_t> payload = encode_varint(request_id);
-    const std::vector<std::uint8_t> tuple_len = encode_varint(1);
-    const std::vector<std::uint8_t> component_len = encode_varint(track_namespace.size());
+    constexpr DraftVersion draft = DraftVersion::kDraft18;
+    std::vector<std::uint8_t> payload = encode_moqint(draft, request_id);
+    const std::vector<std::uint8_t> tuple_len = encode_moqint(draft, 1);
+    const std::vector<std::uint8_t> component_len = encode_moqint(draft, track_namespace.size());
     payload.insert(payload.end(), tuple_len.begin(), tuple_len.end());
     payload.insert(payload.end(), component_len.begin(), component_len.end());
     payload.insert(payload.end(), track_namespace.begin(), track_namespace.end());
     if (forward == 0) {
-        const std::vector<std::uint8_t> parameter_count = encode_varint(1);
-        const std::vector<std::uint8_t> forward_delta = encode_varint(0x10);
-        const std::vector<std::uint8_t> forward_value = encode_varint(0);
+        const std::vector<std::uint8_t> parameter_count = encode_moqint(draft, 1);
+        const std::vector<std::uint8_t> forward_delta = encode_moqint(draft, 0x10);
+        const std::vector<std::uint8_t> forward_value = encode_moqint(draft, 0);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
         payload.insert(payload.end(), forward_delta.begin(), forward_delta.end());
         payload.insert(payload.end(), forward_value.begin(), forward_value.end());
     } else {
-        const std::vector<std::uint8_t> parameter_count = encode_varint(0);
+        const std::vector<std::uint8_t> parameter_count = encode_moqint(draft, 0);
         payload.insert(payload.end(), parameter_count.begin(), parameter_count.end());
     }
 
-    std::vector<std::uint8_t> message = encode_varint(0x51);
+    std::vector<std::uint8_t> message = encode_moqint(draft, 0x51);
     append_be16(message, static_cast<std::uint16_t>(payload.size()));
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
@@ -511,7 +580,14 @@ std::optional<std::uint64_t> message_type(const std::vector<std::uint8_t>& bytes
     std::size_t offset = 0;
     std::uint64_t type = 0;
     if (!decode_varint(bytes, offset, type)) {
-        return std::nullopt;
+        offset = 0;
+        if (!decode_vi64(bytes, offset, type)) {
+            return std::nullopt;
+        }
+    }
+    if ((type == 0 || type > 0xff) && !bytes.empty() && (bytes[0] & 0x40) != 0) {
+        offset = 0;
+        decode_vi64(bytes, offset, type);
     }
     return type;
 }
@@ -1786,7 +1862,7 @@ int main() {
             const auto& setup = draft18_wt_transport.writes.front().bytes;
             std::size_t offset = 0;
             std::uint64_t type = 0;
-            ok &= expect(decode_varint(setup, offset, type) && type == 0x2f00,
+            ok &= expect(decode_vi64(setup, offset, type) && type == 0x2f00,
                          "expected draft-18 WebTransport setup type SETUP");
             ok &= expect(offset + 2 == setup.size() && setup[offset] == 0 && setup[offset + 1] == 0,
                          "expected draft-18 WebTransport SETUP to omit AUTHORITY and PATH options");

@@ -21,6 +21,8 @@ std::string webtransport_protocol_offer(DraftVersion version) {
             return "";
         case DraftVersion::kDraft16:
             return "\"moqt-16\"";
+        case DraftVersion::kDraft17:
+            return "\"moqt-17\"";
         case DraftVersion::kDraft18:
             return "\"moqt-18\"";
     }

@@ -22,6 +22,14 @@ DraftProfile draft_profile(DraftVersion version) {
                 .object_status_label = "Object Status",
                 .notes = "Secondary profile. Verify control message details against transport integration.",
             };
+        case DraftVersion::kDraft17:
+            return {
+                .version = version,
+                .subscribe_namespace_label = "Track Namespace",
+                .track_alias_label = "Track Alias",
+                .object_status_label = "Object Status",
+                .notes = "Draft-17 profile. Uses MOQT vi64 integers and request stream semantics.",
+            };
         case DraftVersion::kDraft18:
             return {
                 .version = version,
@@ -41,6 +49,8 @@ std::string to_string(DraftVersion version) {
             return "draft-14";
         case DraftVersion::kDraft16:
             return "draft-16";
+        case DraftVersion::kDraft17:
+            return "draft-17";
         case DraftVersion::kDraft18:
             return "draft-18";
     }
@@ -54,6 +64,8 @@ std::string default_alpn(DraftVersion version) {
             return "moq-00";
         case DraftVersion::kDraft16:
             return "moqt-16";
+        case DraftVersion::kDraft17:
+            return "moqt-17";
         case DraftVersion::kDraft18:
             return "moqt-18";
     }

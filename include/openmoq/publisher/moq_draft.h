@@ -7,6 +7,7 @@ namespace openmoq::publisher {
 enum class DraftVersion {
     kDraft14,
     kDraft16,
+    kDraft17,
     kDraft18,
 };
 

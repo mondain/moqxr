@@ -151,7 +151,9 @@ std::vector<std::uint8_t> encode_request_error_message(DraftVersion draft,
                                                        std::uint64_t retry_interval,
                                                        std::string_view reason);
 std::vector<std::uint8_t> encode_track_message(const TrackMessage& message);
-std::vector<std::uint8_t> encode_publish_done_message(std::uint64_t request_id, std::uint64_t stream_count);
+std::vector<std::uint8_t> encode_publish_done_message(DraftVersion draft,
+                                                      std::uint64_t request_id,
+                                                      std::uint64_t stream_count);
 std::vector<std::uint8_t> encode_publish_namespace_done_message(const NamespaceMessage& message);
 // SUBGROUP_HEADER bytes only. A subgroup stream begins with exactly one
 // header, followed by one or more encode_subgroup_object payloads.
