@@ -109,6 +109,14 @@ void append_uint16_length_message(std::vector<std::uint8_t>& out,
     out.insert(out.end(), payload.begin(), payload.end());
 }
 
+void append_varint_length_message(std::vector<std::uint8_t>& out,
+                                  std::uint64_t type,
+                                  const std::vector<std::uint8_t>& payload) {
+    append_varint(out, type);
+    append_varint(out, payload.size());
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
 bool read_varint(std::span<const std::uint8_t> bytes, std::size_t& offset, std::uint64_t& value) {
     return decode_varint(bytes, offset, value);
 }
@@ -170,6 +178,23 @@ bool expect_uint16_frame(std::span<const std::uint8_t> bytes,
                          const std::string& label) {
     return expect(read_uint16_frame(bytes, frame), label + " frame parses") &&
            expect(frame.type == expected_type, label + " type");
+}
+
+bool expect_varint_frame(std::span<const std::uint8_t> bytes,
+                         std::uint64_t expected_type,
+                         Uint16Frame& frame,
+                         const std::string& label) {
+    std::size_t offset = 0;
+    std::uint64_t payload_length = 0;
+    return expect(read_varint(bytes, offset, frame.type), label + " type parses") &&
+           expect(frame.type == expected_type, label + " type") &&
+           expect(read_varint(bytes, offset, payload_length), label + " length parses") &&
+           expect(offset + payload_length == bytes.size(), label + " length fits") &&
+           [&]() {
+               frame.payload_offset = offset;
+               frame.payload_end = offset + static_cast<std::size_t>(payload_length);
+               return true;
+           }();
 }
 
 std::uint64_t draft_version_number(DraftVersion draft) {
@@ -311,18 +336,26 @@ std::vector<std::uint8_t> build_publish_ok_message(DraftVersion draft) {
     }
 
     std::vector<std::uint8_t> bytes;
-    append_uint16_length_message(bytes, 0x1e, payload);
+    if (draft == DraftVersion::kDraft14) {
+        append_varint_length_message(bytes, 0x1e, payload);
+    } else {
+        append_uint16_length_message(bytes, 0x1e, payload);
+    }
     return bytes;
 }
 
-std::vector<std::uint8_t> build_publish_error_message() {
+std::vector<std::uint8_t> build_publish_error_message(DraftVersion draft) {
     std::vector<std::uint8_t> payload;
     append_varint(payload, 55);
     append_varint(payload, 2);
     append_string(payload, "nope");
 
     std::vector<std::uint8_t> bytes;
-    append_uint16_length_message(bytes, 0x1f, payload);
+    if (draft == DraftVersion::kDraft14) {
+        append_varint_length_message(bytes, 0x1f, payload);
+    } else {
+        append_uint16_length_message(bytes, 0x1f, payload);
+    }
     return bytes;
 }
 
@@ -424,7 +457,11 @@ bool test_publisher_control_message_encoders_for_all_drafts() {
             .content_exists = true,
         };
         const auto track_bytes = encode_track_message(track);
-        ok &= expect_uint16_frame(track_bytes, 0x1d, frame, label + " publish track");
+        if (draft == DraftVersion::kDraft14) {
+            ok &= expect_varint_frame(track_bytes, 0x1d, frame, label + " publish track");
+        } else {
+            ok &= expect_uint16_frame(track_bytes, 0x1d, frame, label + " publish track");
+        }
         offset = frame.payload_offset;
         std::string track_name;
         std::uint64_t alias = 0;
@@ -480,8 +517,32 @@ bool test_publisher_control_message_encoders_for_all_drafts() {
         ok &= expect_uint16_frame(encode_publish_done_message(44, 2), 0x0b, frame, label + " publish done");
         ok &= expect_uint16_frame(encode_publish_namespace_done_message(namespace_message), 0x09, frame,
                                   label + " publish namespace done");
-        ok &= expect_uint16_frame(encode_subscribe_ok_message(draft, 44, 7, 3, 5, true), 0x04,
-                                  frame, label + " subscribe ok");
+        const auto subscribe_ok = encode_subscribe_ok_message(draft, 44, 7, 3, 5, true);
+        ok &= expect_uint16_frame(subscribe_ok, 0x04, frame, label + " subscribe ok");
+        if (draft != DraftVersion::kDraft14) {
+            offset = frame.payload_offset;
+            ok &= expect(read_varint(subscribe_ok, offset, request_id) && request_id == 44,
+                         label + " subscribe ok request id");
+            ok &= expect(read_varint(subscribe_ok, offset, alias) && alias == 7,
+                         label + " subscribe ok track alias");
+            ok &= expect(read_varint(subscribe_ok, offset, parameter_count) && parameter_count == 1,
+                         label + " subscribe ok largest-object parameter count");
+            std::uint64_t largest_object_delta = 0;
+            std::uint64_t largest_object_length = 0;
+            std::uint64_t largest_group = 0;
+            std::uint64_t largest_object = 0;
+            ok &= expect(read_varint(subscribe_ok, offset, largest_object_delta) && largest_object_delta == 0x09,
+                         label + " subscribe ok largest-object parameter delta");
+            ok &= expect(read_varint(subscribe_ok, offset, largest_object_length),
+                         label + " subscribe ok largest-object length");
+            const std::size_t largest_object_end = offset + static_cast<std::size_t>(largest_object_length);
+            ok &= expect(read_varint(subscribe_ok, offset, largest_group) && largest_group == 3,
+                         label + " subscribe ok largest group");
+            ok &= expect(read_varint(subscribe_ok, offset, largest_object) && largest_object == 5,
+                         label + " subscribe ok largest object");
+            ok &= expect(offset == largest_object_end && offset == frame.payload_end,
+                         label + " subscribe ok largest-object payload boundary");
+        }
         ok &= expect_uint16_frame(encode_subscribe_error_message(44, 2, "missing"), 0x05,
                                   frame, label + " subscribe error");
     }
@@ -543,7 +604,7 @@ bool test_peer_control_message_decoders_for_all_drafts() {
                      label + " publish ok fields");
 
         PublishError publish_error;
-        ok &= expect(decode_publish_error(build_publish_error_message(), draft, publish_error), label + " publish error decode");
+        ok &= expect(decode_publish_error(build_publish_error_message(draft), draft, publish_error), label + " publish error decode");
         ok &= expect(publish_error.request_id == 55 && publish_error.error_code == 2 && publish_error.reason == "nope",
                      label + " publish error fields");
 
@@ -651,6 +712,42 @@ bool test_control_message_framing_and_parameter_regressions() {
     Uint16Frame frame;
     ok &= expect_uint16_frame(draft18_namespace_ok, 0x07, frame,
                               "draft-18 subscribe namespace ok delegates to REQUEST_OK");
+
+    TrackMessage large_draft14_track{
+        .draft = DraftVersion::kDraft14,
+        .track_name = std::string(300, 'v'),
+        .track_namespace = "live/alpha",
+        .request_id = 66,
+        .track_alias = 9,
+        .largest_group_id = 3,
+        .largest_object_id = 5,
+        .content_exists = true,
+    };
+    const auto large_publish = encode_track_message(large_draft14_track);
+    ok &= expect_varint_frame(large_publish, 0x1d, frame,
+                              "draft-14 PUBLISH uses varint length for large payload");
+    message_size = 0;
+    ok &= expect(next_control_message(large_publish, DraftVersion::kDraft14, message_size),
+                 "draft-14 large PUBLISH frames");
+    ok &= expect(message_size == large_publish.size(), "draft-14 large PUBLISH message size");
+
+    std::vector<std::uint8_t> large_publish_ok_payload = build_publish_ok_message(DraftVersion::kDraft14);
+    large_publish_ok_payload.insert(large_publish_ok_payload.end(), 300, 0);
+    // Rebuild the frame around the oversized payload from the helper's parsed payload.
+    std::size_t payload_offset = 0;
+    std::uint64_t ignored_type = 0;
+    std::uint64_t ignored_length = 0;
+    ok &= expect(read_varint(large_publish_ok_payload, payload_offset, ignored_type), "draft-14 helper type");
+    ok &= expect(read_varint(large_publish_ok_payload, payload_offset, ignored_length), "draft-14 helper length");
+    std::vector<std::uint8_t> oversized_publish_ok_payload(
+        large_publish_ok_payload.begin() + static_cast<std::ptrdiff_t>(payload_offset),
+        large_publish_ok_payload.end());
+    oversized_publish_ok_payload.insert(oversized_publish_ok_payload.end(), 260, 0);
+    std::vector<std::uint8_t> oversized_publish_ok;
+    append_varint_length_message(oversized_publish_ok, 0x1e, oversized_publish_ok_payload);
+    ok &= expect(next_control_message(oversized_publish_ok, DraftVersion::kDraft14, message_size),
+                 "draft-14 oversized PUBLISH_OK frames with varint length");
+    ok &= expect(message_size == oversized_publish_ok.size(), "draft-14 oversized PUBLISH_OK message size");
 
     return ok;
 }

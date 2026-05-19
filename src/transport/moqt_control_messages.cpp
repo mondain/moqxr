@@ -124,6 +124,17 @@ bool parse_varint_length_message(std::span<const std::uint8_t> bytes,
     return true;
 }
 
+bool parse_publish_family_message(std::span<const std::uint8_t> bytes,
+                                  DraftVersion draft,
+                                  std::uint64_t expected_type,
+                                  std::size_t& payload_offset,
+                                  std::size_t& payload_length) {
+    if (draft == DraftVersion::kDraft14) {
+        return parse_varint_length_message(bytes, expected_type, payload_offset, payload_length);
+    }
+    return parse_uint16_length_message(bytes, expected_type, payload_offset, payload_length);
+}
+
 bool decode_reason_phrase(std::span<const std::uint8_t> bytes, std::size_t& offset, std::string& reason) {
     std::uint64_t length = 0;
     if (!decode_varint_impl(bytes, offset, length) || offset + length > bytes.size()) {
@@ -329,9 +340,6 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         case kPublishNamespaceDoneType:
         case kPublishDoneType:
         case kMaxRequestIdType:
-        case kPublishType:
-        case kPublishOkType:
-        case kPublishErrorType:
         case kSubscribeNamespaceTypeDraft18:
         case kSubscribeTracksType:
         case 0x0a:  // UNSUBSCRIBE
@@ -343,6 +351,26 @@ bool next_control_message(std::span<const std::uint8_t> bytes, DraftVersion draf
         case 0x19:  // FETCH_ERROR
         case 0x1a:  // REQUESTS_BLOCKED (draft-16)
         {
+            if (offset + 2 > bytes.size()) {
+                return false;
+            }
+            const std::size_t payload_length =
+                (static_cast<std::size_t>(bytes[offset]) << 8) | static_cast<std::size_t>(bytes[offset + 1]);
+            message_size = offset + 2 + payload_length;
+            return bytes.size() >= message_size;
+        }
+        case kPublishType:
+        case kPublishOkType:
+        case kPublishErrorType:
+        {
+            if (draft == DraftVersion::kDraft14) {
+                std::uint64_t payload_length = 0;
+                if (!decode_varint_impl(bytes, offset, payload_length)) {
+                    return false;
+                }
+                message_size = offset + static_cast<std::size_t>(payload_length);
+                return bytes.size() >= message_size;
+            }
             if (offset + 2 > bytes.size()) {
                 return false;
             }
@@ -1090,7 +1118,17 @@ std::vector<std::uint8_t> encode_subscribe_ok_message(DraftVersion draft,
         append_varint(payload, 0);
     } else {
         append_varint(payload, track_alias);
-        append_varint(payload, 0);
+        std::vector<std::uint8_t> parameters;
+        std::uint64_t previous_parameter_type = 0;
+        std::uint64_t parameter_count = 0;
+        if (content_exists) {
+            std::vector<std::uint8_t> largest_object;
+            append_location(largest_object, largest_group_id, largest_object_id);
+            append_parameter_delta(parameters, previous_parameter_type, 0x09, largest_object);
+            ++parameter_count;
+        }
+        append_varint(payload, parameter_count);
+        payload.insert(payload.end(), parameters.begin(), parameters.end());
     }
 
     std::vector<std::uint8_t> message_bytes;
@@ -1165,7 +1203,11 @@ std::vector<std::uint8_t> encode_track_message(const TrackMessage& message) {
 
     std::vector<std::uint8_t> message_bytes;
     append_varint(message_bytes, kPublishType);
-    append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
+    if (message.draft == DraftVersion::kDraft14) {
+        append_varint(message_bytes, payload.size());
+    } else {
+        append_uint16(message_bytes, static_cast<std::uint16_t>(payload.size()));
+    }
     message_bytes.insert(message_bytes.end(), payload.begin(), payload.end());
     return message_bytes;
 }
@@ -1265,7 +1307,7 @@ bool decode_publish_namespace_error(std::span<const std::uint8_t> bytes, Publish
 bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishOk& message) {
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;
-    if (!parse_uint16_length_message(bytes, kPublishOkType, payload_offset, payload_length)) {
+    if (!parse_publish_family_message(bytes, draft, kPublishOkType, payload_offset, payload_length)) {
         return false;
     }
     if (payload_offset + payload_length > bytes.size()) {
@@ -1389,10 +1431,9 @@ bool decode_publish_ok(std::span<const std::uint8_t> bytes, DraftVersion draft, 
 }
 
 bool decode_publish_error(std::span<const std::uint8_t> bytes, DraftVersion draft, PublishError& message) {
-    static_cast<void>(draft);
     std::size_t payload_offset = 0;
     std::size_t payload_length = 0;
-    if (!parse_uint16_length_message(bytes, kPublishErrorType, payload_offset, payload_length)) {
+    if (!parse_publish_family_message(bytes, draft, kPublishErrorType, payload_offset, payload_length)) {
         return false;
     }
     if (payload_offset + payload_length > bytes.size()) {

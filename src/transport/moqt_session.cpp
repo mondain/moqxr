@@ -3360,6 +3360,7 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                         return {ws, 0};
                     }
                     active_subscriptions.emplace(subscribe.request_id, subscribe);
+                    active_subscription_stream_ids.insert_or_assign(subscribe.request_id, control_stream_id_);
                     ++new_subs;
                     std::cerr << "[moqt-session] live: accepted subscribe track=" << subscribe.track_name
                               << " request_id=" << subscribe.request_id << '\n';
@@ -3370,7 +3371,13 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                         if (!ws.ok) {
                             return {ws, 0};
                         }
-                        ws = transport_.write_stream(control_stream_id_,
+                        const auto stream_it = active_subscription_stream_ids.find(subscribe.request_id);
+                        const std::uint64_t response_stream_id =
+                            draft_version == openmoq::publisher::DraftVersion::kDraft18 &&
+                                    stream_it != active_subscription_stream_ids.end()
+                                ? stream_it->second
+                                : control_stream_id_;
+                        ws = transport_.write_stream(response_stream_id,
                                                      encode_publish_done_message(subscribe.request_id, 1),
                                                      false);
                         if (!ws.ok) {

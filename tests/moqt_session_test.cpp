@@ -456,7 +456,12 @@ std::vector<std::uint8_t> encode_publish_ok_message(DraftVersion draft,
     }
 
     std::vector<std::uint8_t> message = encode_varint(0x1e);
-    append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    if (draft == DraftVersion::kDraft14) {
+        const std::vector<std::uint8_t> length = encode_varint(payload.size());
+        message.insert(message.end(), length.begin(), length.end());
+    } else {
+        append_be16(message, static_cast<std::uint16_t>(payload.size()));
+    }
     message.insert(message.end(), payload.begin(), payload.end());
     return message;
 }
@@ -1464,7 +1469,12 @@ int main() {
         duplicate_publish_error_payload.insert(duplicate_publish_error_payload.end(), reason.begin(), reason.end());
         duplicate_publish_error_payload.insert(duplicate_publish_error_payload.end(), {'d', 'u', 'p', 'e', '2'});
         std::vector<std::uint8_t> duplicate_publish_error = encode_varint(0x1f);
-        append_be16(duplicate_publish_error, static_cast<std::uint16_t>(duplicate_publish_error_payload.size()));
+        const std::vector<std::uint8_t> duplicate_publish_error_length =
+            encode_varint(duplicate_publish_error_payload.size());
+        duplicate_publish_error.insert(
+            duplicate_publish_error.end(),
+            duplicate_publish_error_length.begin(),
+            duplicate_publish_error_length.end());
         duplicate_publish_error.insert(
             duplicate_publish_error.end(), duplicate_publish_error_payload.begin(), duplicate_publish_error_payload.end());
         draft14_duplicate_publish_error_id_transport.reads[0].push_back(duplicate_publish_error);
