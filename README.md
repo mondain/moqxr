@@ -1,77 +1,25 @@
 # OpenMOQ Publisher
 
-`moqxr` is a C++20 OpenMOQ publisher contribution project for Linux, macOS, and Windows.
+[English](README.md) | [Español](README.es.md) | [Français](README.fr.md) | [Italiano](README.it.md) | [日本語](README.ja.md) | [Português](README.pt.md) | [中文](README.zh.md)
 
-It packages MP4 input into CMSF-style publishable objects, supports MOQT draft-specific framing for drafts 14, 16, and 18, and can either inspect the generated publish plan locally or publish it over a picoquic-backed transport when local `picoquic` and `picotls` checkouts are available.
+`moqxr` is a C++20 OpenMOQ publisher for Linux, macOS, and Windows.
 
-## Overview
+It turns MP4 input into CMSF-style publishable objects, builds draft-aware MOQT publish plans, and can either inspect those plans locally or publish them over picoquic-backed Raw QUIC and WebTransport paths.
 
-- Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`
-- Remuxes progressive MP4 input into synthesized fragmented media objects
-- Extracts track metadata and RFC 6381 codec identifiers from MP4 sample tables
-- Preserves HEVC track signaling and normalizes `hev1` to `hvc1` when samples do not carry in-band parameter sets
-- Builds a publish plan with catalog, SAP event timeline, and media objects
-- Emits generated objects and catalog metadata to disk for inspection
-- Supports a configurable track namespace, optional paced publication, and draft-aware MOQT control/object encoding
-- Can optionally add per-track SAP event timeline metadata with a CLI flag
-- Includes packaging, CLI, and MOQT session tests through CTest
+## What It Does
 
-## Design overview
+- Parses fragmented MP4 input with `ftyp` + `moov` + `moof`/`mdat`.
+- Remuxes progressive MP4 input into synthesized fragmented media objects.
+- Extracts track metadata and RFC 6381 codec identifiers.
+- Preserves HEVC signaling and normalizes `hev1` to `hvc1` when needed.
+- Builds publish plans with catalog, optional SAP event timeline metadata, and media objects.
+- Emits generated objects and catalog metadata to disk for inspection.
+- Supports draft-aware MOQT framing for drafts 14, 16, and 18.
+- Publishes over Raw QUIC or WebTransport when picoquic and picotls are available.
 
-### Fragmented MP4 fast path
+## Quick Start
 
-For already fragmented input:
-
-- `ftyp` + `moov` are reused as the initialization segment
-- by default, each fragmented input is split into lower-latency MOQT media objects within the same group when per-sample boundaries can be derived
-- `--coalesce-cmaf-chunks` keeps the older one-media-object-per-group behavior
-- the pipeline preserves source-byte spans until optional file emission
-
-### Progressive MP4 remux path
-
-For non-fragmented input:
-
-- the tool reads `stbl` tables such as `stsz`, `stsc`, `stco` or `co64`, `stts`, and optional `ctts` and `stss`
-- it synthesizes a fragmented initialization segment by adding `mvex` and `trex`
-- it builds synthetic `moof` + `mdat` payloads from the original sample data
-- by default, progressive remux output is split into multiple MOQT objects per group for lower latency
-
-This keeps the project aligned with CMAF-style publication while reusing the same publish-plan model for local inspection and transport-driven publication.
-
-### Draft handling
-
-- `draft-ietf-moq-transport-14` is the primary target
-- `draft-ietf-moq-transport-16` is represented as a secondary compatibility profile
-- `draft-ietf-moq-transport-18` support is implemented for version selection, setup/request framing codec paths, and request-stream response correlation; interop hardening is still in progress
-- draft-specific assumptions are documented in [docs/protocol-mapping.md](docs/protocol-mapping.md)
-
-## Repository layout
-
-- `include/openmoq/publisher`: public headers
-- `src`: library and CLI implementation
-- `tests`: CTest-based unit coverage
-- `docs`: protocol notes and design references
-- `docs/publisher-api.md`: step-by-step application integration guide for the C++ publisher API
-- `docs/draft18-implementation-plan.md`: implementation plan for draft-18 transport support
-- `docs/transport-plan.md`: picoquic integration plan and implementation checklist
-- `.github/workflows/ci.yml`: GitHub Actions build and test workflow for Linux, macOS, and Windows
-- `.github/workflows/release.yml`: GitHub Actions release-build workflow that uploads Linux, macOS, and Windows archives
-
-## Release builds
-
-For users who just want a prebuilt binary, GitHub Actions publishes release archives for Linux, macOS, and Windows:
-
-- pushing a `v*` tag builds release artifacts and attaches them to the matching GitHub Release
-- running the `Release Builds` workflow manually uploads the same archives as workflow artifacts
-- manual runs can also publish a GitHub Release when you provide a `release_tag` such as `v0.1.0`
-- both CI and release workflows check out `private-octopus/picoquic` plus `private-octopus/picotls`, so published binaries include the picoquic transport path instead of falling back to a local-inspection-only build
-- Linux and macOS archives are `.tar.gz`; Windows archives are `.zip` and contain `openmoq-publisher.exe`
-
-## Build
-
-### Baseline build
-
-This is the default path for local development. It works on Linux, macOS, and Windows:
+Build and test:
 
 ```bash
 cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
@@ -79,571 +27,62 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Using presets (same `build/` output directory):
-
-```bash
-cmake --preset default
-cmake --build --preset default
-ctest --preset default
-```
-
-On Windows with the Visual Studio generator, the binary lands in `build\Release\` or `build\Debug\` depending on the config passed to `--build`.
-
-### Build with local picoquic and picotls
-
-By default, CMake now looks for:
-
-- `third_party/picoquic` and `third_party/picotls`
-- fallback: `thirdparty/picoquic` and `thirdparty/picotls`
-
-If you prefer custom paths, clone picoquic and picotls to any convenient location and initialise the picotls submodules:
-
-```bash
-git clone https://github.com/private-octopus/picoquic.git /path/to/picoquic
-git clone --recurse-submodules https://github.com/private-octopus/picotls.git /path/to/picotls
-```
-
-Then point CMake at them:
-
-```bash
-cmake -S . -B build \
-  -DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic \
-  -DOPENMOQ_PICOTLS_SOURCE_DIR=/path/to/picotls \
-  -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-**Windows additional requirements — pkg-config and OpenSSL**
-
-picotls requires both `pkg-config` (to probe for optional brotli) and OpenSSL headers and libraries. On Windows you need to install both and tell CMake where OpenSSL is:
-
-```powershell
-# One-time: install pkg-config shim and OpenSSL (skip if already present)
-choco install pkgconfiglite openssl
-
-cmake -S . -B build `
-  -DOPENMOQ_PICOQUIC_SOURCE_DIR=C:\path\to\picoquic `
-  -DOPENMOQ_PICOTLS_SOURCE_DIR=C:\path\to\picotls `
-  -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64" `
-  -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
-
-On Windows, GitHub Actions workflows (including CI and release) set `OPENSSL_ROOT_DIR` automatically from the runner's pre-installed OpenSSL, so no manual step is needed there.
-
-Useful CMake options:
-
-- `-DOPENMOQ_ENABLE_PICOQUIC=ON|OFF`
-- `-DOPENMOQ_PICOQUIC_SOURCE_DIR=/path/to/picoquic`
-- `-DOPENMOQ_PICOTLS_SOURCE_DIR=/path/to/picotls`
-- `-DOPENSSL_ROOT_DIR=/path/to/openssl` (Windows only, when OpenSSL is not on the system path)
-- `-DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON|OFF`
-
-## Quick Start
-
-If you already have a sample MP4 and just want to see what the publisher does, these are the most useful first commands.
-
-> **Windows note**: replace `./build/openmoq-publisher` with `build\Release\openmoq-publisher.exe` in the examples below. For trace-enabled examples, use `set OPENMOQ_PICOQUIC_TRACE=1` in `cmd.exe` or `$env:OPENMOQ_PICOQUIC_TRACE=1` in PowerShell instead of the shell prefix form.
-
-Inspect the publish plan with the default settings:
+Inspect a publish plan:
 
 ```bash
 ./build/openmoq-publisher --input sample.mp4 --dump-plan
 ```
 
-Inspect the same input with SAP event timeline metadata enabled:
-
-```bash
-./build/openmoq-publisher --input sample.mp4 --sap --dump-plan
-```
-
-Emit the catalog and media objects to disk:
+Emit catalog and media objects:
 
 ```bash
 ./build/openmoq-publisher --input sample.mp4 --emit-dir out/
 ```
 
-Stream the input over stdin instead of reading it from a file path:
-
-```bash
-cat sample.mp4 | ./build/openmoq-publisher --input - --dump-plan
-```
-
-## How To Test
-
-### Packaging and session tests
-
-For routine development, run the packaging, CLI, and transport tests from the default build directory:
-
-```bash
-cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-This covers:
-
-- fragmented MP4 packaging
-- progressive MP4 remux into CMAF-style objects
-- CLI option parsing and validation
-- MOQT setup encoding and decoding
-- binary namespace announcement plus subscribe-serving or forward-publish control/object sequencing
-- multitrack subscribe serving in publish-plan/media-time order rather than draining one track at a time
-- paced send scheduling against fragment media timestamps
-- QUIC varint boundary coverage
-
-Publish-plan numbering note:
-
-- `group_id` is allocated per track, not across all tracks, so interleaved audio and video fragments can both use `0, 1, 2, ...`
-- by default, `object_id` advances within a group when CMAF content is split into multiple MOQT objects for lower latency
-- `--coalesce-cmaf-chunks` forces `object_id = 0` for the current one-object-per-group fallback
-- SAP event timeline tracks are disabled by default; add `--sap` when you want catalog and metadata objects for `*_sap` tracks
-
-If you want the packaging and transport tests without the CLI target, use the secondary build tree:
-
-```bash
-cmake -S . -B build-nosmoke -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=OFF
-cmake --build build-nosmoke
-ctest --test-dir build-nosmoke --output-on-failure
-```
-
-### Picoquic loopback smoke test
-
-When you want to exercise the live QUIC path locally, enable the smoke test target:
-
-```bash
-cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON
-cmake --build build --target openmoq-publisher-picoquic-smoke-tests
-./build/openmoq-publisher-picoquic-smoke-tests
-```
-
-For transport debugging, run it with tracing enabled:
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher-picoquic-smoke-tests
-```
-
-### CLI dry-run testing
-
-Input source note:
-
-- `--input <path>` reads an MP4 from a regular file
-- `--input -` reads the MP4 byte stream from standard input, which allows `cat`, `ffmpeg`, or other producer pipelines to feed the publisher directly
-- fragmented and progressive MP4 inputs are both supported through either source type
-- SAP event timeline tracks are disabled by default; add `--sap` to include `*_sap` metadata tracks and objects in the publish plan
-
-Use `--dump-plan` to inspect the generated publish plan without touching the network:
-
-```bash
-./build/openmoq-publisher --input sample.mp4 --draft 14 --dump-plan
-```
-
-Include SAP event timeline output explicitly:
-
-```bash
-./build/openmoq-publisher --input sample.mp4 --draft 14 --sap --dump-plan
-```
-
-The difference is:
-
-- default output includes the `catalog` object plus media objects
-- `--sap` additionally creates `*_sap` metadata tracks and objects
-- this affects both `--dump-plan` output and emitted files under `--emit-dir`
-
-Use stdin when the source is already being produced by another command:
-
-```bash
-cat sample.mp4 | ./build/openmoq-publisher --input - --draft 14 --dump-plan
-```
-
-For example, you can inspect an ffmpeg-produced fragmented stream without writing an intermediate file:
-
-```bash
-ffmpeg -i input.mp4 \
-  -map 0:v -map 0:a \
-  -c:v copy \
-  -c:a copy \
-  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
-  -f mp4 - | ./build/openmoq-publisher --input - --draft 14 --dump-plan
-```
-
-Use `--emit-dir` to inspect the emitted catalog and media objects on disk:
-
-```bash
-./build/openmoq-publisher --input sample.mp4 --draft 14 --emit-dir out/
-```
-
-Emit the same plan with SAP metadata enabled:
-
-```bash
-./build/openmoq-publisher --input sample.mp4 --draft 14 --sap --emit-dir out/
-```
-
-The output directory should contain:
-
-- `catalog.json`
-- one `*_init.mp4` file per media track
-- one `*_media.mp4` file per emitted media object
-- one `*_probe.mp4` file per emitted media object for direct `ffprobe` use
-- `publish-plan.txt`
-
-When `--sap` is enabled, the output directory also contains:
-
-- one `*_sap_g*_o*.json` file per emitted SAP event timeline object
-
-The catalog format includes:
-
-- `role` with values such as `video` and `audio`
-- RFC 6381 `codec` strings such as `avc1.64000C`, `mp4a.40.2`, and HEVC values like `hvc1.1.6.L90.B0`
-- `renderGroup` and `isLive`
-- SAP event timeline tracks with `packaging: "eventtimeline"` and `eventType: "org.ietf.moq.cmsf.sap"`
-- `width` and `height` for video tracks
-- `sampleRate` and `channelCount` for audio tracks
-- base64-encoded per-track CMAF initialization segment (`ftyp` + `moov`) in `initData`
-
-HEVC-specific behavior:
-
-- compact HEVC RFC 6381 codec strings are derived from the track `hvcC` box
-- `hev1` tracks that do not carry in-band VPS, SPS, or PPS NAL units are normalized to `hvc1`
-- when in-band HEVC parameter sets are present, the publisher preserves `hev1`
-- emitted initialization segments are rewritten to match the normalized sample entry type, so catalog metadata and init segments stay aligned
-
-When `--sap` is enabled, `catalog.json` also includes:
-
-- one `*_sap` track per media track
-- `packaging: "eventtimeline"`
-- `eventType: "org.ietf.moq.cmsf.sap"`
-- `depends` pointing back to the corresponding media track
-
-### Relay interoperability test
-
-To attempt a live publish against a relay:
+Publish to a relay:
 
 ```bash
 OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
   --input sample.mp4 \
   --endpoint moqt://relay.example.com:443/moq \
-  --namespace interop \
+  --namespace media \
   --forward 0 \
   --timeout 10 \
   --paced
 ```
 
-Publish the same stream with SAP timeline tracks included:
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
-  --input sample.mp4 \
-  --endpoint moqt://relay.example.com:443/moq \
-  --namespace interop \
-  --forward 0 \
-  --timeout 10 \
-  --paced \
-  --sap
-```
-
-If you need to connect to a relay by IP while still presenting the relay hostname in TLS SNI:
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
-  --input sample.mp4 \
-  --endpoint 203.0.113.10:443 \
-  --sni relay.example.com \
-  --namespace interop \
-  --forward 0 \
-  --timeout 10
-```
-
-Use `--insecure` only when intentionally testing a relay with an untrusted or
-self-signed certificate. Public relays should be exercised with normal TLS
-verification so certificate and SNI regressions are visible.
-
-Known verified-TLS WebTransport relay examples:
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
-  --input tmp-relay-test.mp4 \
-  --transport webtransport \
-  --endpoint https://<moqx-relay-host>:4433/moq-relay \
-  --namespace live/paul1 \
-  --forward 0 \
-  --timeout 10 \
-  --paced \
-  --draft 16
-```
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
-  --input tmp-relay-test.mp4 \
-  --transport webtransport \
-  --endpoint https://<moqx-relay-host>:4433/moq-relay \
-  --namespace live/paul1 \
-  --forward 0 \
-  --timeout 10 \
-  --paced \
-  --draft 16
-```
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 ./build/openmoq-publisher \
-  --input tmp-relay-test.mp4 \
-  --transport webtransport \
-  --endpoint https://moq-relay.red5.net:4433/moq \
-  --namespace live/paul1 \
-  --forward 0 \
-  --timeout 10 \
-  --paced \
-  --draft 16
-```
-
-`moq-relay.red5.net:4433` currently accepts WebTransport on `/moq`; `/moq-relay`
-returns HTTP `404` during CONNECT. The moqx relay examples use a placeholder
-hostname because those relay hostnames are not public yet; moqx uses
-`/moq-relay`.
-
-If you want a per-object CSV trace for pacing and enqueue correlation, set `OPENMOQ_PICOQUIC_TRACE_CSV` alongside `OPENMOQ_PICOQUIC_TRACE`:
-
-```bash
-OPENMOQ_PICOQUIC_TRACE=1 \
-OPENMOQ_PICOQUIC_TRACE_CSV=/tmp/openmoq-publisher-trace.csv \
-./build/openmoq-publisher \
-  --input sample.mp4 \
-  --endpoint moqt://relay.example.com:443/moq \
-  --namespace interop \
-  --forward 0 \
-  --timeout 10 \
-  --paced
-```
-
-Behavior notes:
-
-- `--forward 0` waits for inbound `SUBSCRIBE` requests before sending matching media objects
-- with `--forward 0`, subscribers are still expected to request tracks explicitly; by default that includes subscribing to `catalog` if they need track discovery
-- `--publish-catalog` keeps `--forward 0` for media tracks but proactively publishes the `catalog` track through the normal `PUBLISH` / `PUBLISH_OK` path so downstream consumers can discover available tracks without first subscribing to `catalog`
-- `--sap` adds per-track `*_sap` event timeline tracks and metadata objects; by default those tracks are not created
-- media packaging defaults to lower-latency split MOQT objects per group when chunk/sample boundaries are available
-- `--coalesce-cmaf-chunks` disables that split and falls back to one media object per group
-- when multiple tracks are subscribed, matching objects are served in publish-plan order so time-aligned audio/video stay interleaved instead of draining one track before the next
-- `--forward 1` proactively publishes tracks and objects after namespace setup completes
-- `--timeout <seconds>` controls how long the publisher waits for inbound `SUBSCRIBE` requests; the default is 30 seconds
-- `--sni <value>` overrides the TLS SNI sent to the relay, which is useful when `--endpoint` uses a raw IP address; WebTransport still sends HTTP authority from the configured endpoint host
-- `--paced` applies pacing only to media-object sends; setup and publish control messages are sent immediately
-- `OPENMOQ_PICOQUIC_TRACE_CSV=/path/file.csv` is optional and only writes CSV output when `OPENMOQ_PICOQUIC_TRACE` is also set; rows include `pacing_before`, `pacing_after`, `enqueue`, and `served`/`sent` events for media objects
-
-### Optional picoquic smoke test
-
-There is an in-repo loopback smoke test target for the picoquic transport path, but it is disabled by default:
-
-```bash
-cmake -S . -B build -DOPENMOQ_RUN_PICOQUIC_SMOKE_TESTS=ON
-cmake --build build --target openmoq-publisher-picoquic-smoke-tests
-ctest --test-dir build --output-on-failure
-```
-
-The smoke test requires an environment that permits real UDP sockets. Keep it disabled for routine packaging or session work, and run the smoke binary directly when validating transport changes.
-
-## Usage
-
-Inspect the publish plan for an already fragmented MP4:
-
-```bash
-./build/openmoq-publisher --input sample-fragmented.mp4 --draft 14 --dump-plan
-```
-
-Inspect the same fragmented MP4 with SAP metadata enabled:
-
-```bash
-./build/openmoq-publisher --input sample-fragmented.mp4 --draft 14 --sap --dump-plan
-```
-
-Emit object payloads for a progressive MP4 after remux:
-
-```bash
-./build/openmoq-publisher --input sample-progressive.mp4 --draft 14 --emit-dir out/
-```
-
-Emit a progressive MP4 after remux with SAP metadata enabled:
-
-```bash
-./build/openmoq-publisher --input sample-progressive.mp4 --draft 14 --sap --emit-dir out/
-```
-
-Try the draft-16 compatibility profile:
-
-```bash
-./build/openmoq-publisher --input sample.mp4 --draft 16 --dump-plan
-```
-
-Transport-oriented CLI flags are also present now:
-
-```bash
-./build/openmoq-publisher \
-  --input sample.mp4 \
-  --endpoint localhost:4433 \
-  --namespace media \
-  --forward 0 \
-  --timeout 3 \
-  --paced \
-  --insecure
-```
-
-If you want subscribers or downstream tools to see SAP event timeline tracks, add `--sap`:
-
-```bash
-./build/openmoq-publisher \
-  --input sample.mp4 \
-  --endpoint localhost:4433 \
-  --namespace media \
-  --forward 0 \
-  --timeout 3 \
-  --paced \
-  --sap \
-  --insecure
-```
-
-The same CLI accepts stdin for transport publishing as well:
-
-```bash
-cat sample.mp4 | ./build/openmoq-publisher \
-  --input - \
-  --endpoint localhost:4433 \
-  --namespace media \
-  --forward 0 \
-  --timeout 3 \
-  --paced \
-  --insecure
-```
-
-Chunk/object mapping:
-
-- default behavior is lower-latency split publication, which emits multiple MOQT objects in the same group when CMAF chunk/sample boundaries are available
-- `--coalesce-cmaf-chunks` restores one media object per group
-
-SAP metadata:
-
-- by default the catalog only includes media tracks plus the top-level `catalog` object
-- `--sap` adds per-track `*_sap` event timeline entries to the catalog and emits matching metadata objects
-
-ALPN selection:
-
-- draft-14 defaults to `moq-00`
-- draft-16 defaults to `moqt-16`
-- `--alpn` overrides either default when you need to target a specific relay
-
-Catalog note:
-
-- `catalog.json` uses the CMSF-style `role` field such as `video` and `audio`
-- with `--sap`, `catalog.json` also advertises per-track SAP event timeline tracks using CMSF `eventtimeline` metadata
-- `publish-plan.txt` and `--dump-plan` still print an internal debug `kind=` label for object type (`catalog`, `metadata`, or `media`); that debug label is not part of the catalog spec
-
-## Creating Fragmented MP4 with FFmpeg
-
-The publisher’s preferred fast path is already fragmented MP4 input. You can generate that with `ffmpeg` by copying compatible AAC-LC, H.264, or HEVC streams and enabling CMAF-style fragmentation flags:
-
-```bash
-ffmpeg -i input.mp4 \
-  -map 0:v -map 0:a \
-  -map_metadata -1 \
-  -sn -dn \
-  -c:v copy \
-  -c:a copy \
-  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
-  -f mp4 fragmented.mp4
-```
-
-If the source codecs are not already compatible, re-encode instead of copying. For example (`h264` and `hevc`):
-
-```bash
-ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
-  -map 0:v:0 -map 0:a:0 \
-  -map_metadata -1 \
-  -sn -dn \
-  -c:v libx264 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
-  -c:a aac -b:a 160k -ar 48000 -ac 2 \
-  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
-  -f mp4 sunflower-frag.mp4
-
-ffmpeg -i bbb_sunflower_2160p_60fps_normal.mp4 \
-  -map 0:v:0 -map 0:a:0 \
-  -map_metadata -1 \
-  -sn -dn \
-  -c:v libx265 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
-  -c:a aac -b:a 160k -ar 48000 -ac 2 \
-  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
-  -f mp4 sunflower265-frag.mp4
-```
-
-Practical notes:
-
-- `-map 0:v -map 0:a` keeps only video and audio streams, excluding subtitle and other non-A/V tracks
-- `-map 0:v:0 -map 0:a:0` uses first audio stream if multiple exist
-- `-sn -dn` explicitly disables subtitle and data or text streams
-- `-map_metadata -1` drops container-level metadata from the output
-- `+frag_keyframe` starts a new fragment on keyframes
-- `+empty_moov` writes initialization metadata up front
-- `+default_base_moof` and `+separate_moof` produce a layout that is easier for fragmented-MP4 pipelines to consume
-- omit `+separate_moof` only if you are sure downstream tooling can parse interleaved multi-track fragments; when audio appears in the catalog but no audio media objects are sent, regenerate with `+separate_moof`
-- for HEVC, prefer streams that are already `hvc1`-compatible; if a source is tagged `hev1` but keeps VPS/SPS/PPS only in the init segment, the publisher will normalize the advertised codec and emitted init segment to `hvc1`
-- if HEVC samples include in-band parameter sets, the publisher preserves `hev1` because rewriting those samples would be incorrect
-- if you start from a progressive MP4, this project can remux it internally, but pre-fragmented input is still the simpler and more efficient path
-
-### Live fragmented MP4 stdin publishing
-
-For live encoder pipelines, the publisher can consume fragmented MP4 directly from
-standard input.
-
-This live path expects ffmpeg to emit track-separated fragments, where each
-`moof` + `mdat` pair belongs to a single media track. Use `+separate_moof` when
-generating the stream. Without `+separate_moof`, audio and video may be carried
-inside the same `moof`, which is not the intended input layout for the current
-live parser.
-
-```bash
-ffmpeg -stream_loop -1 -re -i bbb_sunflower_1080p_30fps_normal.mp4 \
-  -map 0:v:0 -map 0:a:0 \
-  -c:v libx264 -preset medium -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -bf 0 \
-  -c:a aac -b:a 160k -ar 48000 -ac 2 \
-  -movflags +frag_keyframe+empty_moov+default_base_moof+separate_moof \
-  -f mp4 - | ./build/openmoq-publisher \
-    --input - \
-    --endpoint moqt://relay.example.com:443/moq \
-    --namespace live/demo \
-    --timeout 120
-```
-
-## CI
-
-GitHub Actions is configured to build and test the project on:
-
-- `ubuntu-latest`
-- `macos-latest`
-- `windows-latest`
-
-The workflow runs the same CMake configure, build, and CTest steps on all three platforms. On Windows, OpenSSL is located automatically from the runner's pre-installed copy and passed to CMake via `OPENSSL_ROOT_DIR`.
-
-## Transport Notes
-
-The repository includes a transport abstraction and a picoquic-backed client wrapper.
-
-- if local picoquic and picotls source trees are available, CMake can compile the real picoquic transport path into this project
-- if those dependencies are not available, the project still builds and tests normally, and the transport layer falls back cleanly
-- the session layer uses a draft-aware control-message module instead of ad hoc string formatting
-- the optional loopback smoke test is the intended local validation path for real QUIC transport changes
-
-## Roadmap
-
-Current transport and packaging work is past the initial prototype stage: the
-publisher can generate publish plans, publish over the picoquic-backed raw QUIC
-and WebTransport paths, and exercise the supported MOQT draft profiles. The
-remaining work is primarily hardening and interop coverage:
-
-1. Keep draft-14, draft-16, and draft-18 message/subgroup serde tests aligned with the current relay matrix so wire placement regressions are caught in CI.
-2. Harden draft-18 request-stream lifecycle behavior, especially stream retention, close/reset behavior, and relay-specific response timing.
-3. Continue Red5 relay and player interop validation, including catalog publication, downstream subscription discovery, and Red5 Pro playback behavior.
-4. Expand CMAF packaging coverage for fragmented and progressive inputs, including Opus, AAC, H.264, HEVC, edit lists, and less common sample-table layouts.
-5. Track CMSF catalog/schema changes and keep emitted catalog metadata, init segments, SAP timeline tracks, and per-track roles aligned with the current packaging draft.
-6. Add DRM/CENC-aware packaging support: detect and preserve encrypted CMAF boxes such as `sinf`, `tenc`, `pssh`, `saiz`, `saio`, and `senc`, expose the needed catalog signaling, and validate encrypted sample forwarding without attempting decryption.
-7. Create an M2TS packaging example based on `draft-gregoire-moq-msfts-00`, using the draft's `m2ts` packaging value to carry MPEG-2 Transport Stream or M2TS source packets directly over MOQT.
-8. Keep Linux, macOS, and Windows CI/release builds green, including the psychedelic FFmpeg live-publisher example.
+On Windows, replace `./build/openmoq-publisher` with `build\Release\openmoq-publisher.exe` or the matching build configuration path.
+
+## Documentation
+
+| Topic | Link |
+| --- | --- |
+| Build and dependencies | [docs/build.md](docs/build.md) |
+| CLI quick start | [docs/quickstart.md](docs/quickstart.md) |
+| Testing | [docs/testing.md](docs/testing.md) |
+| Design overview | [docs/design.md](docs/design.md) |
+| FFmpeg input recipes | [docs/ffmpeg.md](docs/ffmpeg.md) |
+| Relay interoperability | [docs/relay-interop.md](docs/relay-interop.md) |
+| C++ Publisher API | [docs/publisher-api.md](docs/publisher-api.md) |
+| Protocol mapping | [docs/protocol-mapping.md](docs/protocol-mapping.md) |
+| WebTransport compliance | [docs/webtransport-compliance.md](docs/webtransport-compliance.md) |
+| Transport plan | [docs/transport-plan.md](docs/transport-plan.md) |
+| Project status and roadmap | [docs/status.md](docs/status.md) |
+
+Localized Publisher API guides are available in [Spanish](docs/publisher-api.es.md), [French](docs/publisher-api.fr.md), [Italian](docs/publisher-api.it.md), [Japanese](docs/publisher-api.ja.md), [Portuguese](docs/publisher-api.pt.md), and [Chinese](docs/publisher-api.zh.md).
+
+## Repository Layout
+
+- `include/openmoq/publisher`: public headers
+- `src`: library and CLI implementation
+- `tests`: CTest-based unit coverage
+- `docs`: protocol notes, integration guides, and design references
+- `examples`: example publisher integrations
+- `.github/workflows/ci.yml`: Linux, macOS, and Windows CI
+- `.github/workflows/release.yml`: release artifact builds
+
+## Current Status
+
+The publisher can generate publish plans, emit inspectable output, and publish over picoquic-backed Raw QUIC and WebTransport transports. Draft 14 is the primary target, draft 16 is maintained as a compatibility profile, and draft 18 support is implemented for version selection, setup/request framing codec paths, and request-stream response correlation while interop hardening continues.
+
+For the detailed roadmap, see [docs/status.md](docs/status.md).
