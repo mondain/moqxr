@@ -161,6 +161,38 @@ int main() {
 
     {
         PublisherConfig config;
+        config.draft_version = DraftVersion::kDraft16;
+
+        const auto state = std::make_shared<MockTransport::State>();
+        Publisher publisher(
+            config,
+            [state](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
+                if (kind != TransportKind::kWebTransport) {
+                    return nullptr;
+                }
+                return std::make_unique<MockTransport>(state);
+            });
+
+        PreparedPublish prepared;
+        prepared.plan = PublishPlan{.draft = draft_profile(DraftVersion::kDraft16)};
+
+        EndpointConfig endpoint;
+        endpoint.transport = TransportKind::kWebTransport;
+        endpoint.host = "relay.example.com";
+        endpoint.port = 443;
+        endpoint.path = "/moq";
+        endpoint.path_explicit = true;
+
+        const TransportStatus status = publisher.publish(prepared, endpoint);
+        ok &= expect(!status.ok, "expected mock connect failure to propagate for draft-16 webtransport");
+        ok &= expect(state->configured_endpoint.alpn == "h3",
+                     "expected default ALPN h3 for draft-16 webtransport");
+        ok &= expect(state->configured_endpoint.application_protocol == "\"moqt-16\"",
+                     "expected draft-16 webtransport to offer a structured WT protocol token");
+    }
+
+    {
+        PublisherConfig config;
         config.draft_version = DraftVersion::kDraft18;
 
         const auto state = std::make_shared<MockTransport::State>();
@@ -187,8 +219,8 @@ int main() {
         ok &= expect(!status.ok, "expected mock connect failure to propagate for draft-18 webtransport");
         ok &= expect(state->configured_endpoint.alpn == "h3",
                      "expected default ALPN h3 for draft-18 webtransport");
-        ok &= expect(state->configured_endpoint.application_protocol == "moqt-18",
-                     "expected draft-18 webtransport to offer bare WT protocol token");
+        ok &= expect(state->configured_endpoint.application_protocol == "\"moqt-18\"",
+                     "expected draft-18 webtransport to offer a structured WT protocol token");
     }
 
     return ok ? 0 : 1;
