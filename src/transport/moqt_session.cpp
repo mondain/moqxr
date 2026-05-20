@@ -3575,6 +3575,7 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
     } else {
         // Await-subscribe mode: wait for subscriptions, then stream
         bool fin = false;
+        const auto await_subscribe_deadline = std::chrono::steady_clock::now() + subscriber_timeout_;
 
         while (true) {
             bool is_eof;
@@ -3612,9 +3613,13 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
             // Read control messages
             std::vector<std::uint8_t> chunk;
             bool immediate_fin = false;
-            const auto read_timeout = (active_subscriptions.empty() && subscribed_tracks.empty())
-                                          ? subscriber_timeout_
-                                          : std::chrono::milliseconds(0);
+            const bool waiting_for_first_subscription =
+                active_subscriptions.empty() && subscribed_tracks.empty();
+            const auto read_timeout =
+                waiting_for_first_subscription && !uses_request_streams(draft_version)
+                    ? subscriber_timeout_
+                    : (waiting_for_first_subscription ? std::chrono::milliseconds(25)
+                                                      : std::chrono::milliseconds(0));
             const TransportStatus read_status =
                 transport_.read_stream(live_control_read_stream_id, chunk, immediate_fin, read_timeout);
 
@@ -3623,7 +3628,9 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 fin = immediate_fin;
             } else if (read_status.message == "timed out waiting for stream data" ||
                        read_status.message == "no queued read for stream") {
-                if (active_subscriptions.empty() && subscribed_tracks.empty()) {
+                if (waiting_for_first_subscription &&
+                    (!uses_request_streams(draft_version) ||
+                     std::chrono::steady_clock::now() >= await_subscribe_deadline)) {
                     std::cerr << "[moqt-session] live: no downstream SUBSCRIBE before timeout; "
                                  "idle await-subscribe publish exiting"
                               << " namespace=" << track_namespace_
