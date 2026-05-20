@@ -159,7 +159,7 @@ if (!status.ok) {
 - Raw QUIC + draft-18：`moqt-18`
 - WebTransport：`h3`
 
-对于 WebTransport，API 会将 MoQ 应用协议 offer 与 QUIC ALPN 分开发送：draft-16 offer `moqt-16`，draft-18 offer `moqt-18`，draft-14 保留旧的无子协议行为。
+对于 WebTransport，API 会通过 `WT-Available-Protocols` 将 MoQ 应用协议 offer 与 QUIC ALPN 分开发送：draft-16 offer `"moqt-16"`，draft-17 offer `"moqt-17"`，draft-18 offer `"moqt-18"`，draft-14 保留旧的无子协议行为。引号是 HTTP Structured Fields 语法的一部分；Raw QUIC ALPN 仍使用不带引号的 token。
 
 如果应用已经设置了 endpoint ALPN，并且希望保留它：
 

@@ -160,8 +160,10 @@ By default, the API applies transport-appropriate ALPN:
 - WebTransport: `h3`
 
 For WebTransport, the API sends the MoQ application protocol offer separately
-from QUIC ALPN: draft-16 offers `moqt-16`, draft-18 offers `moqt-18`, and
-draft-14 keeps the legacy no-subprotocol behavior.
+from QUIC ALPN through `WT-Available-Protocols`: draft-16 offers `"moqt-16"`,
+draft-17 offers `"moqt-17"`, draft-18 offers `"moqt-18"`, and draft-14 keeps
+the legacy no-subprotocol behavior.  The quotes are part of the HTTP
+Structured Fields syntax; Raw QUIC ALPN remains the unquoted token.
 
 If your application already set endpoint ALPN and wants to keep it:
 

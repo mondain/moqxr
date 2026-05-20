@@ -159,7 +159,7 @@ if (!status.ok) {
 - Raw QUIC + draft-18: `moqt-18`
 - WebTransport: `h3`
 
-WebTransport では、API は MoQ アプリケーションプロトコルの offer を QUIC ALPN とは別に送信します。draft-16 は `moqt-16`、draft-18 は `moqt-18` を offer し、draft-14 は従来のサブプロトコルなしの動作を維持します。
+WebTransport では、API は `WT-Available-Protocols` を使い、MoQ アプリケーションプロトコルの offer を QUIC ALPN とは別に送信します。draft-16 は `"moqt-16"`、draft-17 は `"moqt-17"`、draft-18 は `"moqt-18"` を offer し、draft-14 は従来のサブプロトコルなしの動作を維持します。引用符は HTTP Structured Fields 構文の一部です。Raw QUIC ALPN は引用符なしの token のままです。
 
 アプリケーションがすでに endpoint の ALPN を設定しており、それを維持したい場合:
 

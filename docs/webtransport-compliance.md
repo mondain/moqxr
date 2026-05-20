@@ -55,15 +55,18 @@ It is carried in:
 - `WT-Protocol`
 
 These are Structured Fields strings on the CONNECT exchange.  The
-WebTransport draft allows a server to omit `WT-Protocol`, but if it sends one
-it must choose a value from the client's offer.  MoQ Transport draft-18 still
-expects clients to include MOQT protocol identifiers in `WT-Available-Protocols`.
+`WT-Available-Protocols` header value is therefore a structured string list:
+send `"moqt-16"`, not bare `moqt-16`.  The WebTransport draft allows a server
+to omit `WT-Protocol`, but if it sends one it must choose a value from the
+client's offer.  MoQ Transport draft-18 still expects clients to include MOQT
+protocol identifiers in `WT-Available-Protocols`.
 
 Current offers in this repo:
 
 - draft 14: offer no WebTransport subprotocol for legacy compatibility
-- draft 16: offer `moqt-16` only
-- draft 18: offer `moqt-18` only
+- draft 16: offer `"moqt-16"` only in `WT-Available-Protocols`
+- draft 17: offer `"moqt-17"` only in `WT-Available-Protocols`
+- draft 18: offer `"moqt-18"` only in `WT-Available-Protocols`
 
 Red5's current picoquic/h3zero server path no longer exposes
 `WT-Available-Protocols` to the application on CONNECT accept.  Red5 therefore
@@ -134,8 +137,9 @@ Areas that should be treated as suspect until proven:
 Before changing wire behavior, verify each of these:
 
 1. CONNECT succeeded and the WebTransport protocol offer matches the intended draft:
-   draft-14 offers no WebTransport subprotocol, draft-16 offers `moqt-16`,
-   and draft-18 offers `moqt-18`.  If the relay omits `WT-Protocol`, verify
+   draft-14 offers no WebTransport subprotocol, draft-16 offers `"moqt-16"`,
+   draft-17 offers `"moqt-17"`, and draft-18 offers `"moqt-18"` as structured
+   `WT-Available-Protocols` strings.  If the relay omits `WT-Protocol`, verify
    the negotiated MoQ setup version before treating the session as draft-specific.
 2. The first client MoQ bytes are sent only on a WT application stream, not the CONNECT stream.
 3. The WT application stream gets exactly one WT preamble.

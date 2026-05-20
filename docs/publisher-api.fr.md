@@ -159,7 +159,7 @@ Par défaut, l'API applique l'ALPN adapté au transport :
 - Raw QUIC + draft-18 : `moqt-18`
 - WebTransport : `h3`
 
-Pour WebTransport, l'API envoie l'offre de protocole applicatif MoQ séparément de l'ALPN QUIC : draft-16 propose `moqt-16`, draft-18 propose `moqt-18`, et draft-14 conserve l'ancien comportement sans sous-protocole.
+Pour WebTransport, l'API envoie l'offre de protocole applicatif MoQ séparément de l'ALPN QUIC via `WT-Available-Protocols` : draft-16 propose `"moqt-16"`, draft-17 propose `"moqt-17"`, draft-18 propose `"moqt-18"`, et draft-14 conserve l'ancien comportement sans sous-protocole. Les guillemets font partie de la syntaxe HTTP Structured Fields ; l'ALPN Raw QUIC reste le jeton sans guillemets.
 
 Si votre application a déjà défini l'ALPN de l'endpoint et veut le conserver :
 

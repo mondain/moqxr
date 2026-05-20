@@ -159,7 +159,7 @@ De forma predeterminada, la API aplica el ALPN adecuado para el transporte:
 - Raw QUIC + draft-18: `moqt-18`
 - WebTransport: `h3`
 
-Para WebTransport, la API envía la oferta del protocolo de aplicación MoQ separada del ALPN de QUIC: draft-16 ofrece `moqt-16`, draft-18 ofrece `moqt-18`, y draft-14 mantiene el comportamiento heredado sin subprotocolo.
+Para WebTransport, la API envía la oferta del protocolo de aplicación MoQ separada del ALPN de QUIC mediante `WT-Available-Protocols`: draft-16 ofrece `"moqt-16"`, draft-17 ofrece `"moqt-17"`, draft-18 ofrece `"moqt-18"`, y draft-14 mantiene el comportamiento heredado sin subprotocolo. Las comillas forman parte de la sintaxis HTTP Structured Fields; el ALPN de Raw QUIC conserva el token sin comillas.
 
 Si su aplicación ya configuró el ALPN del endpoint y quiere conservarlo:
 

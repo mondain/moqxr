@@ -159,7 +159,7 @@ Per impostazione predefinita, l'API applica l'ALPN appropriato al trasporto:
 - Raw QUIC + draft-18: `moqt-18`
 - WebTransport: `h3`
 
-Per WebTransport, l'API invia l'offerta del protocollo applicativo MoQ separatamente dall'ALPN QUIC: draft-16 offre `moqt-16`, draft-18 offre `moqt-18` e draft-14 mantiene il comportamento legacy senza sottoprotocollo.
+Per WebTransport, l'API invia l'offerta del protocollo applicativo MoQ separatamente dall'ALPN QUIC tramite `WT-Available-Protocols`: draft-16 offre `"moqt-16"`, draft-17 offre `"moqt-17"`, draft-18 offre `"moqt-18"` e draft-14 mantiene il comportamento legacy senza sottoprotocollo. Le virgolette fanno parte della sintassi HTTP Structured Fields; l'ALPN Raw QUIC resta il token senza virgolette.
 
 Se la vostra applicazione ha già impostato l'ALPN dell'endpoint e vuole mantenerlo:
 
