@@ -1,6 +1,7 @@
 #pragma once
 
 #include "openmoq/publisher/cmsf_packager.h"
+#include "openmoq/publisher/live_object.h"
 #include "openmoq/publisher/transport/publisher_transport.h"
 
 #include <iosfwd>
@@ -42,6 +43,8 @@ public:
     TransportStatus publish_live(std::istream& input,
                                  openmoq::publisher::DraftVersion draft_version,
                                  bool split_cmaf_chunks);
+    TransportStatus publish_live_objects(const openmoq::publisher::LiveObjectSource& source,
+                                         openmoq::publisher::DraftVersion draft_version);
     TransportStatus close(std::uint64_t application_error_code = 0);
     PublishStats publish_stats() const;
 

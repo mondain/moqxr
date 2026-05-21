@@ -3718,6 +3718,475 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                                             namespace_message);
 }
 
+TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::LiveObjectSource& source,
+                                                  openmoq::publisher::DraftVersion draft_version) {
+    if (transport_.state() != ConnectionState::kConnected) {
+        return TransportStatus::failure("transport is not connected");
+    }
+    if (source.tracks.empty()) {
+        return TransportStatus::failure("live object source has no tracks");
+    }
+    if (!source.next_object) {
+        return TransportStatus::failure("live object source has no object reader");
+    }
+
+    TransportStatus status = ensure_setup(draft_version);
+    if (!status.ok) {
+        return status;
+    }
+    std::cout << "connection_id=" << transport_.connection_id() << '\n' << std::flush;
+
+    NamespaceMessage namespace_message{
+        .draft = draft_version,
+        .track_namespace = track_namespace_,
+        .request_id = 0,
+    };
+    if (uses_request_streams(draft_version)) {
+        status = send_request_stream_and_wait(
+            transport_, draft_version, encode_namespace_message(namespace_message), false, nullptr,
+            &namespace_stream_id_);
+        if (status.ok) {
+            namespace_stream_open_ = true;
+        }
+    } else {
+        status = write_frame(control_stream_id_, encode_namespace_message(namespace_message), false);
+        if (status.ok) {
+            status = collect_control_acknowledgements(
+                transport_, control_stream_id_, draft_version, 1, 0, pending_control_bytes_);
+        }
+    }
+    if (!status.ok) {
+        return status;
+    }
+
+    std::map<std::string, std::uint64_t> alias_by_track;
+    std::uint64_t next_alias = 0;
+    for (const auto& track : source.tracks) {
+        if (track.track_name.empty()) {
+            return TransportStatus::failure("live object source includes an empty track name");
+        }
+        if (!alias_by_track.emplace(track.track_name, next_alias).second) {
+            return TransportStatus::failure("live object source includes duplicate track name: " + track.track_name);
+        }
+        ++next_alias;
+    }
+
+    if (!uses_request_streams(draft_version) && !auto_forward_) {
+        std::uint64_t request_id = 2;
+        for (const auto& [track_name, alias] : alias_by_track) {
+            TrackMessage track_message{
+                .draft = draft_version,
+                .track_name = track_name,
+                .track_namespace = track_namespace_,
+                .request_id = request_id,
+                .track_alias = alias,
+                .largest_group_id = 0,
+                .largest_object_id = 0,
+                .content_exists = true,
+            };
+            status = transport_.write_stream(control_stream_id_, encode_track_message(track_message), false);
+            if (!status.ok) {
+                return status;
+            }
+            request_id += 2;
+        }
+    }
+
+    const std::uint64_t control_read_stream_id =
+        uses_request_streams(draft_version) ? peer_control_stream_id_ : control_stream_id_;
+    std::map<std::string, SubgroupSenderState> sender_by_track;
+    std::map<std::uint64_t, SubscribeMessage> active_subscriptions;
+    std::map<std::uint64_t, std::uint64_t> active_subscription_stream_ids;
+    std::set<std::string> subscribed_tracks;
+    std::map<std::string, std::uint64_t> subscribe_tracks_publish_request_ids;
+    std::uint64_t next_publish_request_id = 2;
+
+    auto publish_tracks_for_subscribe_tracks = [&]() -> TransportStatus {
+        if (!uses_request_streams(draft_version) || !subscribe_tracks_publish_request_ids.empty()) {
+            return TransportStatus::success();
+        }
+        for (const auto& [track_name, alias] : alias_by_track) {
+            TrackMessage track_message{
+                .draft = draft_version,
+                .track_name = track_name,
+                .track_namespace = track_namespace_,
+                .request_id = next_publish_request_id,
+                .track_alias = alias,
+                .largest_group_id = 0,
+                .largest_object_id = 0,
+                .content_exists = true,
+            };
+            PublishOk publish_ok;
+            std::uint64_t stream_id = 0;
+            TransportStatus publish_status =
+                send_request_stream_and_wait(transport_,
+                                             draft_version,
+                                             encode_track_message(track_message),
+                                             true,
+                                             &publish_ok,
+                                             &stream_id);
+            if (!publish_status.ok) {
+                return publish_status;
+            }
+            subscribe_tracks_publish_request_ids.insert_or_assign(track_name, next_publish_request_id);
+            publish_stream_id_by_request_id_.insert_or_assign(next_publish_request_id, stream_id);
+            next_publish_request_id += 2;
+        }
+        return TransportStatus::success();
+    };
+
+    auto accept_subscribe = [&](const SubscribeMessage& subscribe,
+                                std::uint64_t response_stream_id) -> TransportStatus {
+        const auto track_it = alias_by_track.find(subscribe.track_name);
+        if (track_it == alias_by_track.end()) {
+            if (uses_request_streams(draft_version)) {
+                return transport_.write_stream(response_stream_id,
+                                               encode_request_error_message(
+                                                   draft_version, subscribe.request_id, 0x2, 0, "track does not exist"),
+                                               true);
+            }
+            return transport_.write_stream(response_stream_id,
+                                           encode_subscribe_error_message(
+                                               subscribe.request_id, 0x2, "track does not exist"),
+                                           false);
+        }
+
+        TransportStatus write_status =
+            transport_.write_stream(response_stream_id,
+                                    encode_subscribe_ok_message(draft_version,
+                                                                subscribe.request_id,
+                                                                track_it->second,
+                                                                0,
+                                                                0,
+                                                                false),
+                                    false);
+        if (!write_status.ok) {
+            return write_status;
+        }
+        active_subscriptions.emplace(subscribe.request_id, subscribe);
+        active_subscription_stream_ids.insert_or_assign(subscribe.request_id, response_stream_id);
+        subscribed_tracks.insert(subscribe.track_name);
+        return TransportStatus::success();
+    };
+
+    auto process_control_messages = [&]() -> TransportStatus {
+        if (uses_request_streams(draft_version)) {
+            while (true) {
+                std::uint64_t request_stream_id = 0;
+                TransportStatus accept_status =
+                    transport_.accept_stream(StreamDirection::kBidirectional,
+                                             request_stream_id,
+                                             std::chrono::milliseconds(0));
+                if (!accept_status.ok) {
+                    if (accept_status.message == "timed out waiting for stream data") {
+                        break;
+                    }
+                    return accept_status;
+                }
+
+                std::vector<std::uint8_t> request_bytes;
+                bool request_fin = false;
+                TransportStatus read_status =
+                    transport_.read_stream(request_stream_id, request_bytes, request_fin, subscriber_timeout_);
+                if (!read_status.ok) {
+                    return read_status;
+                }
+                static_cast<void>(request_fin);
+                trace_control_message(request_bytes, draft_version);
+
+                std::size_t request_offset = 0;
+                std::uint64_t request_type = 0;
+                if (!decode_moqint(request_bytes, request_offset, draft_version, request_type)) {
+                    return protocol_violation(transport_, "failed to parse request stream type");
+                }
+                if (request_type == 0x03) {
+                    SubscribeMessage subscribe;
+                    if (!decode_subscribe_message(request_bytes, draft_version, subscribe)) {
+                        TransportStatus write_status =
+                            transport_.write_stream(request_stream_id,
+                                                    encode_request_error_message(
+                                                        draft_version, 0, 0x1, 0, "invalid SUBSCRIBE"),
+                                                    true);
+                        return write_status.ok ? protocol_violation(transport_, "received invalid SUBSCRIBE")
+                                               : write_status;
+                    }
+                    if (!namespace_matches(subscribe.track_namespace, track_namespace_)) {
+                        TransportStatus write_status =
+                            transport_.write_stream(request_stream_id,
+                                                    encode_request_error_message(
+                                                        draft_version, subscribe.request_id, 0x2, 0, "track does not exist"),
+                                                    true);
+                        return write_status.ok ? TransportStatus::failure("peer requested unsupported track namespace")
+                                               : write_status;
+                    }
+                    TransportStatus subscribe_status = accept_subscribe(subscribe, request_stream_id);
+                    if (!subscribe_status.ok) {
+                        return subscribe_status;
+                    }
+                    continue;
+                }
+                if (request_type == 0x50) {
+                    SubscribeNamespaceMessage subscribe_namespace;
+                    if (!decode_subscribe_namespace_message(request_bytes, draft_version, subscribe_namespace)) {
+                        TransportStatus write_status =
+                            transport_.write_stream(request_stream_id,
+                                                    encode_request_error_message(
+                                                        draft_version, 0, 0x1, 0, "invalid SUBSCRIBE_NAMESPACE"),
+                                                    true);
+                        return write_status.ok ? protocol_violation(transport_, "received invalid SUBSCRIBE_NAMESPACE")
+                                               : write_status;
+                    }
+                    if (!namespace_prefix_matches(subscribe_namespace.track_namespace_prefix, track_namespace_)) {
+                        TransportStatus write_status =
+                            transport_.write_stream(request_stream_id,
+                                                    encode_request_error_message(
+                                                        draft_version, subscribe_namespace.request_id, 0x2, 0,
+                                                        "unsupported namespace prefix"),
+                                                    true);
+                        return write_status.ok ? TransportStatus::failure("peer requested unsupported namespace prefix")
+                                               : write_status;
+                    }
+                    TransportStatus write_status =
+                        transport_.write_stream(request_stream_id,
+                                                encode_request_ok_message(draft_version, subscribe_namespace.request_id),
+                                                false);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    continue;
+                }
+
+                SubscribeTracksMessage subscribe_tracks;
+                if (request_type != 0x51 ||
+                    !decode_subscribe_tracks_message(request_bytes, draft_version, subscribe_tracks)) {
+                    TransportStatus write_status =
+                        transport_.write_stream(request_stream_id,
+                                                encode_request_error_message(
+                                                    draft_version, 0, 0x1, 0, "unsupported request stream"),
+                                                true);
+                    return write_status.ok ? protocol_violation(transport_, "received unsupported request stream")
+                                           : write_status;
+                }
+                if (!namespace_prefix_matches(subscribe_tracks.track_namespace_prefix, track_namespace_)) {
+                    TransportStatus write_status =
+                        transport_.write_stream(request_stream_id,
+                                                encode_request_error_message(
+                                                    draft_version, 0, 0x2, 0, "unsupported namespace prefix"),
+                                                true);
+                    return write_status.ok ? TransportStatus::failure("peer requested unsupported namespace prefix")
+                                           : write_status;
+                }
+                TransportStatus write_status =
+                    transport_.write_stream(request_stream_id,
+                                            encode_request_ok_message(draft_version, subscribe_tracks.request_id),
+                                            false);
+                if (!write_status.ok) {
+                    return write_status;
+                }
+                if (subscribe_tracks.forward == 0) {
+                    continue;
+                }
+                TransportStatus publish_status = publish_tracks_for_subscribe_tracks();
+                if (!publish_status.ok) {
+                    return publish_status;
+                }
+                for (const auto& [track_name, ignored] : alias_by_track) {
+                    static_cast<void>(ignored);
+                    subscribed_tracks.insert(track_name);
+                }
+            }
+        }
+
+        std::size_t message_size = 0;
+        while (next_control_message(pending_control_bytes_, draft_version, message_size)) {
+            const std::vector<std::uint8_t> message_bytes(
+                pending_control_bytes_.begin(),
+                pending_control_bytes_.begin() + static_cast<std::ptrdiff_t>(message_size));
+            std::size_t offset = 0;
+            std::uint64_t message_type = 0;
+            if (!decode_moqint(message_bytes, offset, draft_version, message_type)) {
+                return protocol_violation(transport_, "failed to parse control request type");
+            }
+            trace_control_message(message_bytes, draft_version);
+
+            if (uses_request_streams(draft_version) &&
+                (message_type == 0x03 || message_type == 0x06 || message_type == 0x50 ||
+                 message_type == 0x16 || message_type == 0x1d || message_type == 0x51)) {
+                return protocol_violation(transport_, "draft-18 request message received on control stream");
+            }
+            if (message_type == 0x03) {
+                SubscribeMessage subscribe;
+                if (!decode_subscribe_message(message_bytes, draft_version, subscribe)) {
+                    return protocol_violation(transport_, "received invalid SUBSCRIBE");
+                }
+                if (!namespace_matches(subscribe.track_namespace, track_namespace_)) {
+                    return TransportStatus::failure("peer requested unsupported track namespace");
+                }
+                TransportStatus subscribe_status = accept_subscribe(subscribe, control_stream_id_);
+                if (!subscribe_status.ok) {
+                    return subscribe_status;
+                }
+            } else if (message_type == 0x11) {
+                SubscribeNamespaceMessage subscribe_namespace;
+                if (decode_subscribe_namespace_message(message_bytes, draft_version, subscribe_namespace)) {
+                    if (!namespace_prefix_matches(subscribe_namespace.track_namespace_prefix, track_namespace_)) {
+                        return TransportStatus::failure("peer requested unsupported namespace prefix");
+                    }
+                    TransportStatus write_status =
+                        transport_.write_stream(control_stream_id_,
+                                                encode_subscribe_namespace_ok_message(
+                                                    draft_version, subscribe_namespace.request_id),
+                                                false);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                }
+            }
+
+            pending_control_bytes_.erase(
+                pending_control_bytes_.begin(),
+                pending_control_bytes_.begin() + static_cast<std::ptrdiff_t>(message_size));
+        }
+        return TransportStatus::success();
+    };
+
+    bool source_eof = false;
+    bool control_fin = false;
+    std::optional<std::chrono::steady_clock::time_point> object_pacing_start;
+    std::optional<std::uint64_t> object_first_media_time_us;
+    const auto await_subscribe_deadline = std::chrono::steady_clock::now() + subscriber_timeout_;
+    while (!source_eof) {
+        status = process_control_messages();
+        if (!status.ok) {
+            return status;
+        }
+
+        std::vector<std::uint8_t> chunk;
+        bool read_fin = false;
+        const bool waiting_for_first_subscription =
+            !auto_forward_ && active_subscriptions.empty() && subscribed_tracks.empty();
+        const auto read_timeout = waiting_for_first_subscription && !uses_request_streams(draft_version)
+                                      ? subscriber_timeout_
+                                      : std::chrono::milliseconds(0);
+        const TransportStatus read_status =
+            transport_.read_stream(control_read_stream_id, chunk, read_fin, read_timeout);
+        if (read_status.ok) {
+            pending_control_bytes_.insert(pending_control_bytes_.end(), chunk.begin(), chunk.end());
+            control_fin = read_fin;
+        } else if (read_status.message == "timed out waiting for stream data" ||
+                   read_status.message == "no queued read for stream") {
+            if (waiting_for_first_subscription && std::chrono::steady_clock::now() >= await_subscribe_deadline) {
+                break;
+            }
+        } else {
+            return read_status;
+        }
+
+        status = process_control_messages();
+        if (!status.ok) {
+            return status;
+        }
+        if (control_fin) {
+            break;
+        }
+
+        if (!auto_forward_ && subscribed_tracks.empty()) {
+            continue;
+        }
+
+        std::optional<openmoq::publisher::LiveObject> next = source.next_object();
+        if (!next.has_value()) {
+            source_eof = true;
+            break;
+        }
+        const auto alias_it = alias_by_track.find(next->track_name);
+        if (alias_it == alias_by_track.end()) {
+            return TransportStatus::failure("live object references unknown track: " + next->track_name);
+        }
+        if (!auto_forward_ && !subscribed_tracks.contains(next->track_name)) {
+            continue;
+        }
+
+        const openmoq::publisher::CmsfObject object{
+            .kind = openmoq::publisher::CmsfObjectKind::kMedia,
+            .track_name = next->track_name,
+            .group_id = next->group_id,
+            .subgroup_id = next->subgroup_id,
+            .object_id = next->object_id,
+            .media_time_us = next->media_time_us,
+            .media_duration_us = next->media_duration_us,
+            .payload = {},
+            .owned_payload = next->payload,
+        };
+        const std::uint64_t send_seq = next_send_seq();
+        if (paced_) {
+            if (!object_pacing_start.has_value()) {
+                object_pacing_start = std::chrono::steady_clock::now();
+                object_first_media_time_us = object.media_time_us;
+            }
+            pace_until(*object_pacing_start, *object_first_media_time_us, object, true);
+        }
+        status = sender_by_track[next->track_name].serve(
+            transport_,
+            draft_version,
+            alias_it->second,
+            send_seq,
+            object,
+            next->subgroup_contains_group_largest,
+            next->final_in_subgroup,
+            std::span<const std::uint8_t>(next->payload));
+        if (!status.ok) {
+            return status;
+        }
+        record_published_object(next->track_name,
+                                static_cast<std::uint64_t>(next->group_id),
+                                next->payload.size());
+    }
+
+    for (auto& [track_name, sender] : sender_by_track) {
+        static_cast<void>(track_name);
+        status = sender.finish_group(transport_);
+        if (!status.ok) {
+            return status;
+        }
+    }
+
+    for (const auto& [request_id, subscribe] : active_subscriptions) {
+        const auto stream_it = active_subscription_stream_ids.find(request_id);
+        const std::uint64_t response_stream_id =
+            uses_request_streams(draft_version) && stream_it != active_subscription_stream_ids.end()
+                ? stream_it->second
+                : control_stream_id_;
+        status = transport_.write_stream(response_stream_id,
+                                         encode_publish_done_message(
+                                             draft_version, request_id, sender_by_track[subscribe.track_name].stream_count()),
+                                         false);
+        if (!status.ok) {
+            return status;
+        }
+    }
+    for (const auto& [track_name, request_id] : subscribe_tracks_publish_request_ids) {
+        if (!subscribed_tracks.contains(track_name)) {
+            continue;
+        }
+        status = write_publish_done_for_request(transport_,
+                                                draft_version,
+                                                control_stream_id_,
+                                                publish_stream_id_by_request_id_,
+                                                request_id,
+                                                sender_by_track[track_name].stream_count());
+        if (!status.ok) {
+            return status;
+        }
+    }
+
+    return write_namespace_done_for_request(transport_,
+                                            draft_version,
+                                            control_stream_id_,
+                                            namespace_stream_id_,
+                                            namespace_message);
+}
+
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {
     if (namespace_stream_open_) {
         transport_.reset_stream(namespace_stream_id_, 0x0);

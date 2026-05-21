@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
             .forward = options.forward,
             .publish_catalog = options.publish_catalog,
             .include_sap = options.include_sap,
+            .include_msf_timeline = options.include_msf_timeline,
             .split_cmaf_chunks = options.split_cmaf_chunks,
             .paced = options.paced,
             .loop = options.loop,

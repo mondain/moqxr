@@ -27,10 +27,19 @@ The catalog format includes:
 - `role` with values such as `video` and `audio`
 - RFC 6381 `codec` strings such as `avc1.64000C`, `mp4a.40.2`, and HEVC values like `hvc1.1.6.L90.B0`
 - `renderGroup` and `isLive`
+- MSF media timeline tracks with `packaging: "mediatimeline"` and `role: "mediatimeline"`
 - SAP event timeline tracks with `packaging: "eventtimeline"` and `eventType: "org.ietf.moq.cmsf.sap"`
 - `width` and `height` for video tracks
 - `sampleRate` and `channelCount` for audio tracks
 - base64-encoded per-track CMAF initialization segment (`ftyp` + `moov`) in `initData`
+
+With `--msf-timeline`, `catalog.json` also includes a `timeline` metadata track with:
+
+- `packaging: "mediatimeline"`
+- `mimeType: "application/json"`
+- `depends` pointing to all media tracks
+
+The corresponding `timeline_g0_o0.json` payload is an explicit MSF media timeline array of `[mediaTimeMs, [groupId, objectId], wallclockMs]` records. VOD output uses `0` for wallclock time.
 
 With `--sap`, `catalog.json` also includes:
 

@@ -95,7 +95,10 @@ PreparedPublish Publisher::prepare_file(const std::filesystem::path& path) const
                                                                                                : CmafObjectMode::kCoalesced);
     return PreparedPublish{
         .input_bytes = parsed_mp4.bytes,
-        .plan = build_publish_plan(segmented_mp4, config_.draft_version, config_.include_sap),
+        .plan = build_publish_plan(segmented_mp4,
+                                   config_.draft_version,
+                                   config_.include_sap,
+                                   config_.include_msf_timeline),
     };
 }
 
@@ -105,7 +108,10 @@ PreparedPublish Publisher::prepare_stream(std::istream& input, std::string_view 
                                                                                                : CmafObjectMode::kCoalesced);
     return PreparedPublish{
         .input_bytes = parsed_mp4.bytes,
-        .plan = build_publish_plan(segmented_mp4, config_.draft_version, config_.include_sap),
+        .plan = build_publish_plan(segmented_mp4,
+                                   config_.draft_version,
+                                   config_.include_sap,
+                                   config_.include_msf_timeline),
     };
 }
 
@@ -233,6 +239,55 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
     return transport::TransportStatus::success();
 }
 
+transport::TransportStatus Publisher::publish_live_objects(const LiveObjectSource& source,
+                                                           const transport::EndpointConfig& endpoint,
+                                                           const transport::TlsConfig& tls,
+                                                           bool endpoint_alpn_overridden) const {
+    if (!transport_factory_) {
+        return transport::TransportStatus::failure("publisher transport factory is not configured");
+    }
+    auto active = std::make_shared<ActiveSession>();
+    active->transport = transport_factory_(endpoint.transport);
+    if (!active->transport) {
+        return transport::TransportStatus::failure("failed to create requested transport");
+    }
+
+    active->session = std::make_unique<transport::MoqtSession>(
+        *active->transport,
+        config_.track_namespace,
+        config_.forward,
+        config_.publish_catalog,
+        config_.paced,
+        config_.loop,
+        config_.subscriber_timeout);
+
+    const transport::EndpointConfig resolved_endpoint = resolve_endpoint(endpoint, endpoint_alpn_overridden);
+    set_active_session(active, resolved_endpoint, true);
+    transport::TransportStatus status = active->session->connect(resolved_endpoint, tls);
+    if (!status.ok) {
+        const std::string error = "transport connect failed: " + status.message;
+        clear_active_session(active, false, error);
+        return transport::TransportStatus::failure(error);
+    }
+
+    status = active->session->publish_live_objects(source, config_.draft_version);
+    if (!status.ok) {
+        const std::string error = "transport live object publish failed: " + status.message;
+        static_cast<void>(active->session->close(0));
+        clear_active_session(active, true, error);
+        return transport::TransportStatus::failure(error);
+    }
+    {
+        const auto live_stats = active->session->publish_stats();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stats_.bytes_published = live_stats.bytes_published;
+        stats_.objects_published = live_stats.objects_published;
+        stats_.groups_published = live_stats.groups_published;
+    }
+
+    return transport::TransportStatus::success();
+}
+
 transport::TransportStatus Publisher::disconnect(std::uint64_t application_error_code) const {
     std::shared_ptr<ActiveSession> active;
     {
@@ -267,12 +322,14 @@ PublisherStats Publisher::stats() const {
     StatsSnapshot snapshot;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     std::shared_ptr<ActiveSession> active;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         snapshot = stats_;
         split_cmaf_chunks = config_.split_cmaf_chunks;
         include_sap = config_.include_sap;
+        include_msf_timeline = config_.include_msf_timeline;
         active = active_session_;
     }
     if (active && active->session) {
@@ -292,6 +349,7 @@ PublisherStats Publisher::stats() const {
         .groups_published = snapshot.groups_published,
         .split_cmaf_chunks = split_cmaf_chunks,
         .include_sap = include_sap,
+        .include_msf_timeline = include_msf_timeline,
         .transport = snapshot.transport,
         .host = snapshot.host,
         .port = snapshot.port,
@@ -305,11 +363,13 @@ std::string Publisher::stats_json() const {
     StatsSnapshot snapshot;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         snapshot = stats_;
         split_cmaf_chunks = config_.split_cmaf_chunks;
         include_sap = config_.include_sap;
+        include_msf_timeline = config_.include_msf_timeline;
         if (active_session_ && active_session_->transport) {
             snapshot.connection_id = active_session_->transport->connection_id();
             snapshot.connected = active_session_->transport->state() == transport::ConnectionState::kConnected;
@@ -327,6 +387,7 @@ std::string Publisher::stats_json() const {
        << "\"groupsPublished\":" << snapshot.groups_published << ","
        << "\"splitCmafChunks\":" << (split_cmaf_chunks ? "true" : "false") << ","
        << "\"includeSap\":" << (include_sap ? "true" : "false") << ","
+       << "\"includeMsfTimeline\":" << (include_msf_timeline ? "true" : "false") << ","
        << "\"transport\":\""
        << (snapshot.transport == transport::TransportKind::kWebTransport ? "webtransport" : "raw_quic") << "\","
        << "\"host\":\"" << json_escape(snapshot.host) << "\","

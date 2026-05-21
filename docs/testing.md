@@ -26,6 +26,7 @@ Publish-plan numbering notes:
 - `group_id` is allocated per track, not across all tracks, so interleaved audio and video fragments can both use `0, 1, 2, ...`
 - by default, `object_id` advances within a group when CMAF content is split into multiple MOQT objects for lower latency
 - `--coalesce-cmaf-chunks` forces `object_id = 0` for the current one-object-per-group fallback
+- MSF media timeline tracks are disabled by default; add `--msf-timeline` when you want a `timeline` metadata track and object
 - SAP event timeline tracks are disabled by default; add `--sap` when you want catalog and metadata objects for `*_sap` tracks
 
 If you want the packaging and transport tests without the CLI target, use the secondary build tree:
@@ -61,6 +62,7 @@ Input source notes:
 - `--input <path>` reads an MP4 from a regular file
 - `--input -` reads the MP4 byte stream from standard input
 - fragmented and progressive MP4 inputs are both supported through either source type
+- MSF media timeline tracks are disabled by default; add `--msf-timeline` to include the `timeline` metadata track and object in the publish plan
 - SAP event timeline tracks are disabled by default; add `--sap` to include `*_sap` metadata tracks and objects in the publish plan
 
 Use `--dump-plan` to inspect the generated publish plan without touching the network:
@@ -73,6 +75,12 @@ Include SAP event timeline output explicitly:
 
 ```bash
 ./build/openmoq-publisher --input sample.mp4 --draft 14 --sap --dump-plan
+```
+
+Include MSF media timeline output explicitly:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --draft 14 --msf-timeline --dump-plan
 ```
 
 Use stdin when the source is already being produced by another command:

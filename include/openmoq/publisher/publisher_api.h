@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "openmoq/publisher/cmsf_packager.h"
+#include "openmoq/publisher/live_object.h"
 #include "openmoq/publisher/moq_draft.h"
 #include "openmoq/publisher/transport/publisher_transport.h"
 
@@ -24,6 +25,7 @@ struct PublisherConfig {
     bool forward = false;
     bool publish_catalog = false;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     bool split_cmaf_chunks = true;
     bool paced = false;
     bool loop = false;
@@ -42,6 +44,7 @@ struct PublisherStats {
     std::uint64_t groups_published = 0;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     transport::TransportKind transport = transport::TransportKind::kRawQuic;
     std::string host;
     std::uint16_t port = 0;
@@ -82,6 +85,10 @@ public:
                                             const transport::EndpointConfig& endpoint,
                                             const transport::TlsConfig& tls = {},
                                             bool endpoint_alpn_overridden = false) const;
+    transport::TransportStatus publish_live_objects(const LiveObjectSource& source,
+                                                    const transport::EndpointConfig& endpoint,
+                                                    const transport::TlsConfig& tls = {},
+                                                    bool endpoint_alpn_overridden = false) const;
     transport::TransportStatus disconnect(std::uint64_t application_error_code = 0) const;
     PublisherStats stats() const;
     [[deprecated("Use stats(); live polling is not supported by the blocking publish API.")]]

@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
 namespace openmoq::publisher {
 
@@ -127,12 +129,18 @@ std::string base64_encode(std::span<const std::uint8_t> bytes) {
     return encoded;
 }
 
-std::string track_role(std::string_view handler_type) {
-    if (handler_type == "vide") {
+std::string track_role(const TrackDescription& track) {
+    if (track.handler_type == "vide") {
         return "video";
     }
-    if (handler_type == "soun") {
+    if (track.handler_type == "soun") {
         return "audio";
+    }
+    if (track.packaging == "mediatimeline") {
+        return "mediatimeline";
+    }
+    if (track.packaging == "eventtimeline") {
+        return "eventtimeline";
     }
     return "data";
 }
@@ -162,6 +170,10 @@ std::string json_number(double value) {
 
 std::string sap_track_name(std::string_view media_track_name) {
     return std::string(media_track_name) + "_sap";
+}
+
+std::string msf_timeline_track_name() {
+    return "timeline";
 }
 
 std::uint32_t next_synthetic_track_id(const std::vector<TrackDescription>& tracks) {
@@ -207,13 +219,49 @@ std::vector<std::uint8_t> build_sap_timeline_payload(const SegmentedMp4& segment
     return std::vector<std::uint8_t>(text.begin(), text.end());
 }
 
+std::vector<std::uint8_t> build_msf_timeline_payload(const SegmentedMp4& segmented_mp4) {
+    struct TimelineKey {
+        std::uint64_t media_time_ms = 0;
+        std::size_t group_id = 0;
+        std::size_t object_id = 0;
+
+        bool operator<(const TimelineKey& other) const {
+            return std::tie(media_time_ms, group_id, object_id) <
+                   std::tie(other.media_time_ms, other.group_id, other.object_id);
+        }
+    };
+
+    std::set<TimelineKey> emitted;
+    for (const auto& fragment : segmented_mp4.fragments) {
+        emitted.insert(TimelineKey{
+            .media_time_ms = round_us_to_ms(fragment.start_time_us),
+            .group_id = fragment.group_id,
+            .object_id = fragment.object_id,
+        });
+    }
+
+    std::ostringstream payload;
+    payload << '[';
+    bool first = true;
+    for (const auto& key : emitted) {
+        if (!first) {
+            payload << ',';
+        }
+        first = false;
+        payload << '[' << key.media_time_ms << ",[" << key.group_id << ',' << key.object_id << "],0]";
+    }
+    payload << ']';
+    const std::string text = payload.str();
+    return std::vector<std::uint8_t>(text.begin(), text.end());
+}
+
 void append_catalog_track_json(std::ostringstream& catalog,
                                const TrackDescription& track,
                                const std::map<std::string, std::string>& init_data_by_track) {
     catalog << '{'
             << "\"name\":\"" << json_escape(track.track_name) << "\","
             << "\"id\":" << track.track_id << ','
-            << "\"role\":\"" << track_role(track.handler_type) << "\","
+            << "\"role\":\"" << track_role(track) << "\","
             << "\"packaging\":\"" << json_escape(track.packaging) << "\","
             << "\"renderGroup\":1,"
             << "\"isLive\":false";
@@ -420,10 +468,31 @@ std::vector<std::uint8_t> build_track_codec_init_data(std::span<const std::uint8
 
 }  // namespace
 
-PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion version, bool include_sap) {
+PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4,
+                               DraftVersion version,
+                               bool include_sap,
+                               bool include_msf_timeline) {
     std::vector<TrackDescription> tracks = segmented_mp4.tracks;
+    std::uint32_t synthetic_track_id = next_synthetic_track_id(tracks);
+    if (include_msf_timeline) {
+        std::vector<std::string> media_track_names;
+        media_track_names.reserve(segmented_mp4.tracks.size());
+        for (const auto& media_track : segmented_mp4.tracks) {
+            media_track_names.push_back(media_track.track_name);
+        }
+        tracks.push_back(TrackDescription{
+            .track_id = synthetic_track_id++,
+            .handler_type = "meta",
+            .codec = {},
+            .sample_entry_type = "mediatimeline",
+            .track_name = msf_timeline_track_name(),
+            .packaging = "mediatimeline",
+            .event_type = {},
+            .mime_type = "application/json",
+            .depends = std::move(media_track_names),
+        });
+    }
     if (include_sap) {
-        std::uint32_t synthetic_track_id = next_synthetic_track_id(tracks);
         for (const auto& media_track : segmented_mp4.tracks) {
             tracks.push_back(TrackDescription{
                 .track_id = synthetic_track_id++,
@@ -510,6 +579,17 @@ PublishPlan build_publish_plan(const SegmentedMp4& segmented_mp4, DraftVersion v
             .media_duration_us = fragment.duration_us,
             .payload = fragment.payload.span,
             .owned_payload = fragment.payload.owned_bytes,
+        });
+    }
+
+    if (include_msf_timeline) {
+        plan.objects.push_back({
+            .kind = CmsfObjectKind::kMetadata,
+            .track_name = msf_timeline_track_name(),
+            .group_id = 0,
+            .object_id = 0,
+            .payload = {},
+            .owned_payload = build_msf_timeline_payload(segmented_mp4),
         });
     }
 
