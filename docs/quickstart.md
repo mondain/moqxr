@@ -16,6 +16,12 @@ Inspect the same input with SAP event timeline metadata enabled:
 ./build/openmoq-publisher --input sample.mp4 --sap --dump-plan
 ```
 
+Inspect the same input with an MSF media timeline track enabled:
+
+```bash
+./build/openmoq-publisher --input sample.mp4 --msf-timeline --dump-plan
+```
+
 Try the draft-16 compatibility profile:
 
 ```bash
@@ -42,7 +48,7 @@ The output directory should contain:
 - one `*_probe.mp4` file per emitted media object for direct `ffprobe` use
 - `publish-plan.txt`
 
-When `--sap` is enabled, the output directory also contains one `*_sap_g*_o*.json` file per emitted SAP event timeline object.
+When `--msf-timeline` is enabled, the output directory also contains `timeline_g0_o0.json` with explicit MSF media timeline records. When `--sap` is enabled, the output directory also contains one `*_sap_g*_o*.json` file per emitted SAP event timeline object.
 
 ## Use Standard Input
 
@@ -104,6 +110,7 @@ cat sample.mp4 | ./build/openmoq-publisher \
 ## Output Notes
 
 - default output includes the `catalog` object plus media objects
+- `--msf-timeline` additionally creates a `timeline` media timeline track and metadata object
 - `--sap` additionally creates `*_sap` metadata tracks and objects
 - default packaging emits lower-latency split MOQT objects per group when chunk/sample boundaries are available
 - `--coalesce-cmaf-chunks` restores one media object per group

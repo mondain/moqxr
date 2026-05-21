@@ -27,6 +27,7 @@ config.track_namespace = "media";
 config.forward = false;
 config.publish_catalog = false;
 config.include_sap = false;
+config.include_msf_timeline = false;
 config.split_cmaf_chunks = true;
 config.paced = false;
 config.loop = false;
@@ -278,6 +279,7 @@ Current fields:
 - `groupsPublished`: total (track, group) units published in the current/last session
 - `splitCmafChunks`: current packaging mode (`true` = split chunks, `false` = coalesced chunks)
 - `includeSap`: whether SAP track/object packaging is enabled
+- `includeMsfTimeline`: whether MSF media timeline track/object packaging is enabled
 - `transport`, `host`, `port`, `path`: endpoint context for the current/last session
 - `connectionId`: last known transport connection ID
 - `lastError`: last publisher-level error, if any
@@ -304,6 +306,7 @@ Example:
   "groupsPublished": 42,
   "splitCmafChunks": true,
   "includeSap": false,
+  "includeMsfTimeline": false,
   "transport": "webtransport",
   "host": "relay.example.com",
   "port": 443,

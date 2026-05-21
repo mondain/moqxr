@@ -32,6 +32,7 @@ struct CliOptions {
     bool forward = false;
     bool publish_catalog = false;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     bool split_cmaf_chunks = true;
     bool paced = false;
     bool loop = false;

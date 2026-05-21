@@ -12,7 +12,7 @@ It turns MP4 input into CMSF-style publishable objects, builds draft-aware MOQT 
 - Remuxes progressive MP4 input into synthesized fragmented media objects.
 - Extracts track metadata and RFC 6381 codec identifiers.
 - Preserves HEVC signaling and normalizes `hev1` to `hvc1` when needed.
-- Builds publish plans with catalog, optional SAP event timeline metadata, and media objects.
+- Builds publish plans with catalog, optional MSF media timeline and SAP event timeline metadata, and media objects.
 - Emits generated objects and catalog metadata to disk for inspection.
 - Supports draft-aware MOQT framing for drafts 14, 16, and 18.
 - Publishes over Raw QUIC or WebTransport when picoquic and picotls are available.

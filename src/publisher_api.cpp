@@ -95,7 +95,10 @@ PreparedPublish Publisher::prepare_file(const std::filesystem::path& path) const
                                                                                                : CmafObjectMode::kCoalesced);
     return PreparedPublish{
         .input_bytes = parsed_mp4.bytes,
-        .plan = build_publish_plan(segmented_mp4, config_.draft_version, config_.include_sap),
+        .plan = build_publish_plan(segmented_mp4,
+                                   config_.draft_version,
+                                   config_.include_sap,
+                                   config_.include_msf_timeline),
     };
 }
 
@@ -105,7 +108,10 @@ PreparedPublish Publisher::prepare_stream(std::istream& input, std::string_view 
                                                                                                : CmafObjectMode::kCoalesced);
     return PreparedPublish{
         .input_bytes = parsed_mp4.bytes,
-        .plan = build_publish_plan(segmented_mp4, config_.draft_version, config_.include_sap),
+        .plan = build_publish_plan(segmented_mp4,
+                                   config_.draft_version,
+                                   config_.include_sap,
+                                   config_.include_msf_timeline),
     };
 }
 
@@ -316,12 +322,14 @@ PublisherStats Publisher::stats() const {
     StatsSnapshot snapshot;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     std::shared_ptr<ActiveSession> active;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         snapshot = stats_;
         split_cmaf_chunks = config_.split_cmaf_chunks;
         include_sap = config_.include_sap;
+        include_msf_timeline = config_.include_msf_timeline;
         active = active_session_;
     }
     if (active && active->session) {
@@ -341,6 +349,7 @@ PublisherStats Publisher::stats() const {
         .groups_published = snapshot.groups_published,
         .split_cmaf_chunks = split_cmaf_chunks,
         .include_sap = include_sap,
+        .include_msf_timeline = include_msf_timeline,
         .transport = snapshot.transport,
         .host = snapshot.host,
         .port = snapshot.port,
@@ -354,11 +363,13 @@ std::string Publisher::stats_json() const {
     StatsSnapshot snapshot;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         snapshot = stats_;
         split_cmaf_chunks = config_.split_cmaf_chunks;
         include_sap = config_.include_sap;
+        include_msf_timeline = config_.include_msf_timeline;
         if (active_session_ && active_session_->transport) {
             snapshot.connection_id = active_session_->transport->connection_id();
             snapshot.connected = active_session_->transport->state() == transport::ConnectionState::kConnected;
@@ -376,6 +387,7 @@ std::string Publisher::stats_json() const {
        << "\"groupsPublished\":" << snapshot.groups_published << ","
        << "\"splitCmafChunks\":" << (split_cmaf_chunks ? "true" : "false") << ","
        << "\"includeSap\":" << (include_sap ? "true" : "false") << ","
+       << "\"includeMsfTimeline\":" << (include_msf_timeline ? "true" : "false") << ","
        << "\"transport\":\""
        << (snapshot.transport == transport::TransportKind::kWebTransport ? "webtransport" : "raw_quic") << "\","
        << "\"host\":\"" << json_escape(snapshot.host) << "\","

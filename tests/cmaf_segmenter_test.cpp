@@ -455,6 +455,7 @@ int main() {
     const auto segmented = segment_for_cmaf(fragmented);
     const auto plan = build_publish_plan(segmented, DraftVersion::kDraft14);
     const auto sap_plan = build_publish_plan(segmented, DraftVersion::kDraft14, true);
+    const auto msf_timeline_plan = build_publish_plan(segmented, DraftVersion::kDraft14, false, true);
 
     ok &= expect(fragmented.top_level_boxes.size() == 4, "expected 4 top-level boxes");
     ok &= expect(fragmented.tracks.size() == 1, "expected one extracted fragmented track");
@@ -466,6 +467,12 @@ int main() {
     ok &= expect(sap_plan.objects.back().track_name == "vide_1_sap", "expected SAP timeline object for fragmented video");
     ok &= expect_contains(object_text(sap_plan.objects.back()), "\"l\":[0,0]", "expected fragmented SAP timeline location");
     ok &= expect_contains(object_text(sap_plan.objects.back()), "\"data\":[2,0]", "expected fragmented SAP type and EPT");
+    ok &= expect(msf_timeline_plan.objects.size() == 3,
+                 "expected MSF timeline-enabled plan to add one media timeline object");
+    ok &= expect(msf_timeline_plan.objects.back().track_name == "timeline",
+                 "expected MSF media timeline track name");
+    ok &= expect_contains(object_text(msf_timeline_plan.objects.back()), "[0,[0,0],0]",
+                         "expected MSF media timeline to map media time to MOQT location");
     ok &= expect(payload_size(segmented.initialization_segment) > 0, "expected fragmented init payload");
     ok &= expect(payload_size(segmented.fragments.front().payload) > 0, "expected fragmented media payload");
 
@@ -557,10 +564,13 @@ int main() {
     };
     const auto multitrack_plan = build_publish_plan(multitrack_segmented, DraftVersion::kDraft14);
     const auto multitrack_sap_plan = build_publish_plan(multitrack_segmented, DraftVersion::kDraft14, true);
+    const auto multitrack_msf_timeline_plan = build_publish_plan(multitrack_segmented, DraftVersion::kDraft14, false, true);
     const std::string catalog_text(multitrack_plan.objects.front().owned_payload.begin(),
                                    multitrack_plan.objects.front().owned_payload.end());
     const std::string sap_catalog_text(multitrack_sap_plan.objects.front().owned_payload.begin(),
                                        multitrack_sap_plan.objects.front().owned_payload.end());
+    const std::string msf_timeline_catalog_text(multitrack_msf_timeline_plan.objects.front().owned_payload.begin(),
+                                                multitrack_msf_timeline_plan.objects.front().owned_payload.end());
     const std::string video_init_data = catalog_init_data(catalog_text, "vide_1");
     const std::string audio_init_data = catalog_init_data(catalog_text, "soun_2");
     ok &= expect(!video_init_data.empty(), "expected video initData in catalog");
@@ -578,6 +588,7 @@ int main() {
     ok &= expect_contains(catalog_text, "\"isLive\":false", "expected VOD isLive flag in catalog");
     ok &= expect_not_contains(catalog_text, "\"name\":\"vide_1_sap\"", "expected video SAP track to be absent from the default catalog");
     ok &= expect_not_contains(catalog_text, "\"name\":\"soun_2_sap\"", "expected audio SAP track to be absent from the default catalog");
+    ok &= expect_not_contains(catalog_text, "\"name\":\"timeline\"", "expected MSF timeline track to be absent from the default catalog");
     ok &= expect_contains(sap_catalog_text, "\"name\":\"vide_1_sap\"", "expected video SAP timeline track in SAP-enabled catalog");
     ok &= expect_contains(sap_catalog_text, "\"name\":\"soun_2_sap\"", "expected audio SAP timeline track in SAP-enabled catalog");
     ok &= expect_contains(sap_catalog_text, "\"packaging\":\"eventtimeline\"", "expected event timeline packaging in SAP-enabled catalog");
@@ -585,9 +596,21 @@ int main() {
     ok &= expect_contains(sap_catalog_text, "\"mimeType\":\"application/json\"", "expected event timeline mime type in SAP-enabled catalog");
     ok &= expect_contains(sap_catalog_text, "\"depends\":[\"vide_1\"]", "expected video SAP timeline dependency");
     ok &= expect_contains(sap_catalog_text, "\"depends\":[\"soun_2\"]", "expected audio SAP timeline dependency");
+    ok &= expect_contains(msf_timeline_catalog_text, "\"name\":\"timeline\"", "expected MSF media timeline track in catalog");
+    ok &= expect_contains(msf_timeline_catalog_text, "\"role\":\"mediatimeline\"", "expected MSF media timeline role");
+    ok &= expect_contains(msf_timeline_catalog_text, "\"packaging\":\"mediatimeline\"", "expected MSF media timeline packaging");
+    ok &= expect_contains(msf_timeline_catalog_text, "\"mimeType\":\"application/json\"", "expected MSF media timeline mime type");
+    ok &= expect_contains(msf_timeline_catalog_text, "\"depends\":[\"vide_1\",\"soun_2\"]",
+                         "expected MSF media timeline to depend on all media tracks");
     ok &= expect(multitrack_plan.track_initializations.size() == 2, "expected per-track init payloads in plan");
     ok &= expect(multitrack_plan.objects.size() == 1, "expected only the catalog object in the default init-only plan");
     ok &= expect(multitrack_sap_plan.objects.size() == 3, "expected catalog plus per-track SAP timeline objects when SAP is enabled");
+    ok &= expect(multitrack_msf_timeline_plan.objects.size() == 2,
+                 "expected catalog plus one MSF media timeline object when MSF timeline is enabled");
+    ok &= expect(multitrack_msf_timeline_plan.objects[1].track_name == "timeline",
+                 "expected MSF media timeline object after catalog");
+    ok &= expect_contains(object_text(multitrack_msf_timeline_plan.objects[1]), "[]",
+                         "expected empty MSF media timeline for init-only plan");
     ok &= expect(multitrack_sap_plan.objects[1].track_name == "vide_1_sap", "expected video SAP object after catalog");
     ok &= expect(multitrack_sap_plan.objects[2].track_name == "soun_2_sap", "expected audio SAP object after catalog");
     ok &= expect_contains(object_text(multitrack_sap_plan.objects[1]), "[]", "expected empty SAP timeline for init-only video plan");

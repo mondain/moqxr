@@ -25,6 +25,7 @@ struct PublisherConfig {
     bool forward = false;
     bool publish_catalog = false;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     bool split_cmaf_chunks = true;
     bool paced = false;
     bool loop = false;
@@ -43,6 +44,7 @@ struct PublisherStats {
     std::uint64_t groups_published = 0;
     bool split_cmaf_chunks = true;
     bool include_sap = false;
+    bool include_msf_timeline = false;
     transport::TransportKind transport = transport::TransportKind::kRawQuic;
     std::string host;
     std::uint16_t port = 0;

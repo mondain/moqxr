@@ -45,6 +45,7 @@ int main() {
         ok &= expect(options.transport == openmoq::publisher::transport::TransportKind::kRawQuic,
                      "expected raw transport to remain the default");
         ok &= expect(!options.include_sap, "expected SAP track creation to be disabled by default");
+        ok &= expect(!options.include_msf_timeline, "expected MSF timeline track creation to be disabled by default");
     }
 
     {
@@ -112,6 +113,12 @@ int main() {
         const CliOptions options =
             parse({"openmoq-publisher", "--input", "sample.mp4", "--sap"});
         ok &= expect(options.include_sap, "expected --sap to enable SAP track creation");
+    }
+
+    {
+        const CliOptions options =
+            parse({"openmoq-publisher", "--input", "sample.mp4", "--msf-timeline"});
+        ok &= expect(options.include_msf_timeline, "expected --msf-timeline to enable MSF timeline track creation");
     }
 
     {
