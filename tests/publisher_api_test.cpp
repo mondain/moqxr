@@ -3,6 +3,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -10,6 +11,8 @@
 namespace {
 
 using openmoq::publisher::DraftVersion;
+using openmoq::publisher::LiveObjectSource;
+using openmoq::publisher::LiveTrack;
 using openmoq::publisher::PreparedPublish;
 using openmoq::publisher::PublishPlan;
 using openmoq::publisher::Publisher;
@@ -221,6 +224,38 @@ int main() {
                      "expected default ALPN h3 for draft-18 webtransport");
         ok &= expect(state->configured_endpoint.application_protocol == "\"moqt-18\"",
                      "expected draft-18 webtransport to offer a structured WT protocol token");
+    }
+
+    {
+        PublisherConfig config;
+        config.draft_version = DraftVersion::kDraft16;
+
+        const auto state = std::make_shared<MockTransport::State>();
+        Publisher publisher(
+            config,
+            [state](TransportKind kind) -> std::unique_ptr<PublisherTransport> {
+                if (kind != TransportKind::kRawQuic) {
+                    return nullptr;
+                }
+                return std::make_unique<MockTransport>(state);
+            });
+
+        LiveObjectSource source{
+            .tracks = {LiveTrack{.track_name = "events"}},
+            .next_object = []() { return std::nullopt; },
+        };
+
+        EndpointConfig endpoint;
+        endpoint.transport = TransportKind::kRawQuic;
+        endpoint.host = "relay.example.com";
+        endpoint.port = 443;
+
+        const TransportStatus status = publisher.publish_live_objects(source, endpoint);
+        ok &= expect(!status.ok, "expected live-object publish mock connect failure to propagate");
+        ok &= expect(status.message == "transport connect failed: mock connect failure",
+                     "expected live-object connect failure message to be wrapped");
+        ok &= expect(state->configured_endpoint.alpn == "moqt-16",
+                     "expected live-object publish to preserve default raw draft ALPN");
     }
 
     return ok ? 0 : 1;

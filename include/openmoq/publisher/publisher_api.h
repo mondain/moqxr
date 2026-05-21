@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "openmoq/publisher/cmsf_packager.h"
+#include "openmoq/publisher/live_object.h"
 #include "openmoq/publisher/moq_draft.h"
 #include "openmoq/publisher/transport/publisher_transport.h"
 
@@ -82,6 +83,10 @@ public:
                                             const transport::EndpointConfig& endpoint,
                                             const transport::TlsConfig& tls = {},
                                             bool endpoint_alpn_overridden = false) const;
+    transport::TransportStatus publish_live_objects(const LiveObjectSource& source,
+                                                    const transport::EndpointConfig& endpoint,
+                                                    const transport::TlsConfig& tls = {},
+                                                    bool endpoint_alpn_overridden = false) const;
     transport::TransportStatus disconnect(std::uint64_t application_error_code = 0) const;
     PublisherStats stats() const;
     [[deprecated("Use stats(); live polling is not supported by the blocking publish API.")]]

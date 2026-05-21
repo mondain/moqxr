@@ -134,7 +134,8 @@ Convenience helpers:
 
 ## 7. Live Input Publish (Incremental stdin/stream)
 
-For live pipelines (for example ffmpeg piping fragmented MP4):
+The default live path expects fragmented MP4, which matches ffmpeg/CMAF
+pipelines:
 
 ```cpp
 const auto status = publisher.publish_live(std::cin, endpoint, tls);
@@ -150,7 +151,39 @@ if (!status.ok) {
 
 `publish_live(...)` uses incremental parsing and live publish flow instead of buffering to EOF.
 
-## 8. ALPN Override Behavior
+## 8. Arbitrary Live Object Publish
+
+Applications that already produce MoQ objects directly can bypass fragmented MP4
+ingest with `publish_live_objects(...)`.
+
+```cpp
+std::vector<openmoq::publisher::LiveObject> objects = {
+    {
+        .track_name = "events",
+        .group_id = 0,
+        .object_id = 0,
+        .payload = {'h', 'e', 'l', 'l', 'o'},
+    },
+};
+std::size_t next = 0;
+
+openmoq::publisher::LiveObjectSource source;
+source.tracks = {{.track_name = "events"}};
+source.next_object = [&]() -> std::optional<openmoq::publisher::LiveObject> {
+    if (next >= objects.size()) {
+        return std::nullopt;
+    }
+    return objects[next++];
+};
+
+const auto status = publisher.publish_live_objects(source, endpoint, tls);
+```
+
+Each `LiveObject` supplies the target track, group/object IDs, optional media
+timing, and the payload bytes to send. The fragmented MP4 `publish_live(...)`
+API remains the default live publishing path.
+
+## 9. ALPN Override Behavior
 
 By default, the API applies transport-appropriate ALPN:
 
@@ -177,8 +210,9 @@ The same override flag exists on:
 - `publish_file(...)`
 - `publish_stream(...)`
 - `publish_live(...)`
+- `publish_live_objects(...)`
 
-## 9. Error Handling Pattern
+## 10. Error Handling Pattern
 
 All API publish calls return `TransportStatus`:
 
@@ -200,7 +234,7 @@ if (!status.ok) {
 }
 ```
 
-## 10. Integration Pattern for Larger Applications
+## 11. Integration Pattern for Larger Applications
 
 For service-style integration:
 
@@ -208,10 +242,11 @@ For service-style integration:
 2. On ingest, call `prepare_file(...)` or `prepare_stream(...)`.
 3. Store or inspect `PreparedPublish` metadata as needed.
 4. Publish to one or more endpoints with `publish(...)`.
-5. For continuous input, run `publish_live(...)` in a worker thread.
-6. Use `TransportStatus` messages for metrics and retry decisions.
+5. For continuous fragmented MP4 input, run `publish_live(...)` in a worker thread.
+6. For direct object producers, provide a `LiveObjectSource` and call `publish_live_objects(...)`.
+7. Use `TransportStatus` messages for metrics and retry decisions.
 
-## 11. Publish Summary (`stats`)
+## 12. Publish Summary (`stats`)
 
 The publisher API is blocking: `publish(...)`, `publish_file(...)`,
 `publish_stream(...)`, and `publish_live(...)` run the session on the calling

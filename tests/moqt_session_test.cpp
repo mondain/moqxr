@@ -22,6 +22,9 @@ using openmoq::publisher::ByteSpan;
 using openmoq::publisher::CmsfObject;
 using openmoq::publisher::CmsfObjectKind;
 using openmoq::publisher::DraftVersion;
+using openmoq::publisher::LiveObject;
+using openmoq::publisher::LiveObjectSource;
+using openmoq::publisher::LiveTrack;
 using openmoq::publisher::PublishPlan;
 using openmoq::publisher::TrackDescription;
 using openmoq::publisher::materialize_publish_plan;
@@ -2363,6 +2366,54 @@ int main() {
         ok &= expect(!live_transport.writes.empty() &&
                          message_type(live_transport.writes.back().bytes) == 0x09,
                      "expected live publish to finish with PUBLISH_NAMESPACE_DONE");
+    }
+
+    {
+        MockTransport object_live_transport;
+        object_live_transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        object_live_transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        object_live_transport.reads[0].push_back(
+            encode_subscribe_message(1, kTestTrackNamespace, "events", 0));
+        object_live_transport.reads[0].push_back({});
+
+        std::vector<LiveObject> objects = {
+            LiveObject{
+                .track_name = "events",
+                .group_id = 7,
+                .subgroup_id = 0,
+                .object_id = 3,
+                .payload = {'O', 'K'},
+            },
+        };
+        std::size_t object_index = 0;
+        LiveObjectSource source{
+            .tracks = {LiveTrack{.track_name = "events"}},
+            .next_object = [&objects, &object_index]() -> std::optional<LiveObject> {
+                if (object_index >= objects.size()) {
+                    return std::nullopt;
+                }
+                return objects[object_index++];
+            },
+        };
+
+        MoqtSession object_live_session(
+            object_live_transport, std::string(kTestTrackNamespace), false, false, false, std::chrono::seconds(1));
+        status = object_live_session.connect(endpoint, tls);
+        ok &= expect(status.ok, "expected arbitrary live-object session connect to succeed");
+        status = object_live_session.publish_live_objects(source, DraftVersion::kDraft14);
+        ok &= expect(status.ok, "expected arbitrary live-object publish to succeed");
+        ok &= expect(control_message_count(object_live_transport, 0x1d) == 1,
+                     "expected arbitrary live-object publish to preannounce its track");
+        ok &= expect(object_live_session.publish_stats().bytes_published == 2,
+                     "expected arbitrary live-object bytes to be counted");
+        ok &= expect(object_live_session.publish_stats().objects_published == 1,
+                     "expected arbitrary live-object count to be updated");
+        ok &= expect(!object_live_transport.writes.empty() &&
+                         message_type(object_live_transport.writes.back().bytes) == 0x09,
+                     "expected arbitrary live-object publish to finish with PUBLISH_NAMESPACE_DONE");
     }
 
     {

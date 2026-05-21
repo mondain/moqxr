@@ -233,6 +233,55 @@ transport::TransportStatus Publisher::publish_live(std::istream& input,
     return transport::TransportStatus::success();
 }
 
+transport::TransportStatus Publisher::publish_live_objects(const LiveObjectSource& source,
+                                                           const transport::EndpointConfig& endpoint,
+                                                           const transport::TlsConfig& tls,
+                                                           bool endpoint_alpn_overridden) const {
+    if (!transport_factory_) {
+        return transport::TransportStatus::failure("publisher transport factory is not configured");
+    }
+    auto active = std::make_shared<ActiveSession>();
+    active->transport = transport_factory_(endpoint.transport);
+    if (!active->transport) {
+        return transport::TransportStatus::failure("failed to create requested transport");
+    }
+
+    active->session = std::make_unique<transport::MoqtSession>(
+        *active->transport,
+        config_.track_namespace,
+        config_.forward,
+        config_.publish_catalog,
+        config_.paced,
+        config_.loop,
+        config_.subscriber_timeout);
+
+    const transport::EndpointConfig resolved_endpoint = resolve_endpoint(endpoint, endpoint_alpn_overridden);
+    set_active_session(active, resolved_endpoint, true);
+    transport::TransportStatus status = active->session->connect(resolved_endpoint, tls);
+    if (!status.ok) {
+        const std::string error = "transport connect failed: " + status.message;
+        clear_active_session(active, false, error);
+        return transport::TransportStatus::failure(error);
+    }
+
+    status = active->session->publish_live_objects(source, config_.draft_version);
+    if (!status.ok) {
+        const std::string error = "transport live object publish failed: " + status.message;
+        static_cast<void>(active->session->close(0));
+        clear_active_session(active, true, error);
+        return transport::TransportStatus::failure(error);
+    }
+    {
+        const auto live_stats = active->session->publish_stats();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stats_.bytes_published = live_stats.bytes_published;
+        stats_.objects_published = live_stats.objects_published;
+        stats_.groups_published = live_stats.groups_published;
+    }
+
+    return transport::TransportStatus::success();
+}
+
 transport::TransportStatus Publisher::disconnect(std::uint64_t application_error_code) const {
     std::shared_ptr<ActiveSession> active;
     {
