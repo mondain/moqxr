@@ -3771,7 +3771,7 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
         ++next_alias;
     }
 
-    if (!uses_request_streams(draft_version) && !auto_forward_) {
+    if (!uses_request_streams(draft_version)) {
         std::uint64_t request_id = 2;
         for (const auto& [track_name, alias] : alias_by_track) {
             TrackMessage track_message{
@@ -4054,6 +4054,7 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
     bool control_fin = false;
     std::optional<std::chrono::steady_clock::time_point> object_pacing_start;
     std::optional<std::uint64_t> object_first_media_time_us;
+    bool live_object_catalog_sent = !alias_by_track.contains("catalog");
     const auto await_subscribe_deadline = std::chrono::steady_clock::now() + subscriber_timeout_;
     while (!source_eof) {
         status = process_control_messages();
@@ -4102,6 +4103,40 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
         const auto alias_it = alias_by_track.find(next->track_name);
         if (alias_it == alias_by_track.end()) {
             return TransportStatus::failure("live object references unknown track: " + next->track_name);
+        }
+        if (next->track_name == "catalog") {
+            const openmoq::publisher::CmsfObject object{
+                .kind = openmoq::publisher::CmsfObjectKind::kInitialization,
+                .track_name = next->track_name,
+                .group_id = next->group_id,
+                .subgroup_id = next->subgroup_id,
+                .object_id = next->object_id,
+                .media_time_us = next->media_time_us,
+                .media_duration_us = next->media_duration_us,
+                .payload = {},
+                .owned_payload = next->payload,
+            };
+            const std::uint64_t send_seq = next_send_seq();
+            status = sender_by_track[next->track_name].serve(
+                transport_,
+                draft_version,
+                alias_it->second,
+                send_seq,
+                object,
+                next->subgroup_contains_group_largest,
+                next->final_in_subgroup,
+                std::span<const std::uint8_t>(next->payload));
+            if (!status.ok) {
+                return status;
+            }
+            record_published_object(next->track_name,
+                                    static_cast<std::uint64_t>(next->group_id),
+                                    next->payload.size());
+            live_object_catalog_sent = true;
+            continue;
+        }
+        if (auto_forward_ && !live_object_catalog_sent) {
+            continue;
         }
         if (!auto_forward_ && !subscribed_tracks.contains(next->track_name)) {
             continue;

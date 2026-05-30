@@ -660,7 +660,7 @@ TransportStatus PicoquicClient::accept_stream(StreamDirection direction,
 
     std::unique_lock<std::mutex> lock(impl_->mutex);
     const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
-        if (impl_->failed) {
+        if (impl_->failed || impl_->disconnected || impl_->close_requested) {
             return true;
         }
         for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
@@ -679,6 +679,9 @@ TransportStatus PicoquicClient::accept_stream(StreamDirection direction,
     if (impl_->failed) {
         return TransportStatus::failure(impl_->last_error.empty() ? "picoquic transport failed"
                                                                   : impl_->last_error);
+    }
+    if (impl_->close_requested || impl_->disconnected) {
+        return TransportStatus::failure("transport close requested");
     }
 
     for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
@@ -712,7 +715,8 @@ TransportStatus PicoquicClient::read_stream(std::uint64_t stream_id,
     std::unique_lock<std::mutex> lock(impl_->mutex);
     const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
         const auto it = impl_->received_streams.find(stream_id);
-        return it != impl_->received_streams.end() || impl_->failed || impl_->disconnected;
+        return it != impl_->received_streams.end() || impl_->failed || impl_->disconnected ||
+               impl_->close_requested;
     });
 
     if (!ready) {
@@ -721,6 +725,9 @@ TransportStatus PicoquicClient::read_stream(std::uint64_t stream_id,
 
     const auto it = impl_->received_streams.find(stream_id);
     if (it == impl_->received_streams.end()) {
+        if (impl_->close_requested || impl_->disconnected) {
+            return TransportStatus::failure("transport close requested");
+        }
         return TransportStatus::failure(impl_->last_error.empty() ? "stream closed before data arrived"
                                                                   : impl_->last_error);
     }

@@ -689,7 +689,7 @@ TransportStatus WebTransportClient::accept_stream(StreamDirection direction,
 
     std::unique_lock<std::mutex> lock(impl_->mutex);
     const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
-        if (impl_->failed) {
+        if (impl_->failed || impl_->disconnected || impl_->close_requested) {
             return true;
         }
         for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
@@ -705,6 +705,9 @@ TransportStatus WebTransportClient::accept_stream(StreamDirection direction,
     }
     if (impl_->failed) {
         return TransportStatus::failure(impl_->last_error.empty() ? "webtransport connection failed" : impl_->last_error);
+    }
+    if (impl_->close_requested || impl_->disconnected) {
+        return TransportStatus::failure("transport close requested");
     }
     for (const auto& [candidate_stream_id, ignored] : impl_->received_streams) {
         static_cast<void>(ignored);
@@ -735,7 +738,8 @@ TransportStatus WebTransportClient::read_stream(std::uint64_t stream_id,
 #else
     std::unique_lock<std::mutex> lock(impl_->mutex);
     const bool ready = impl_->condition.wait_for(lock, timeout, [&] {
-        return impl_->received_streams.contains(stream_id) || impl_->failed || impl_->disconnected;
+        return impl_->received_streams.contains(stream_id) || impl_->failed || impl_->disconnected ||
+               impl_->close_requested;
     });
     if (!ready) {
         return TransportStatus::failure("timed out waiting for stream data");
@@ -744,8 +748,8 @@ TransportStatus WebTransportClient::read_stream(std::uint64_t stream_id,
     if (impl_->failed) {
         return TransportStatus::failure(impl_->last_error.empty() ? "webtransport connection failed" : impl_->last_error);
     }
-    if (impl_->disconnected && !impl_->received_streams.contains(stream_id)) {
-        return TransportStatus::failure("webtransport connection closed");
+    if ((impl_->close_requested || impl_->disconnected) && !impl_->received_streams.contains(stream_id)) {
+        return TransportStatus::failure("transport close requested");
     }
 
     auto it = impl_->received_streams.find(stream_id);
