@@ -4134,6 +4134,11 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
                 next->final_in_subgroup,
                 std::span<const std::uint8_t>(next->payload));
             if (!status.ok) {
+                // A send failure that races with a concurrent close() is a
+                // benign stop, not a transport error: break to the flush.
+                if (stop_requested_.load(std::memory_order_acquire)) {
+                    break;
+                }
                 return status;
             }
             record_published_object(next->track_name,
@@ -4181,6 +4186,11 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
             next->final_in_subgroup,
             std::span<const std::uint8_t>(next->payload));
         if (!status.ok) {
+            // A send failure that races with a concurrent close() is a benign
+            // stop, not a transport error: break to the flush.
+            if (stop_requested_.load(std::memory_order_acquire)) {
+                break;
+            }
             return status;
         }
         record_published_object(next->track_name,
@@ -4191,15 +4201,35 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
         }
     }
 
+    // Bound the post-loop graceful flush. When a stop is in progress, a flush
+    // write can fail (transport torn down by a concurrent close()) or the total
+    // flush can run long; in either case return success rather than surfacing a
+    // stop-driven flush failure. The deadline is secondary insurance for a
+    // multi-write flush that is merely slow.
+    const auto flush_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const auto flush_budget_exhausted = [&]() {
+        return stop_requested_.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() >= flush_deadline;
+    };
+    const auto stopping = [&]() {
+        return stop_requested_.load(std::memory_order_acquire);
+    };
+
     for (auto& [track_name, sender] : sender_by_track) {
         static_cast<void>(track_name);
+        if (flush_budget_exhausted()) {
+            return TransportStatus::success();
+        }
         status = sender.finish_group(transport_);
         if (!status.ok) {
-            return status;
+            return stopping() ? TransportStatus::success() : status;
         }
     }
 
     for (const auto& [request_id, subscribe] : active_subscriptions) {
+        if (flush_budget_exhausted()) {
+            return TransportStatus::success();
+        }
         const auto stream_it = active_subscription_stream_ids.find(request_id);
         const std::uint64_t response_stream_id =
             uses_request_streams(draft_version) && stream_it != active_subscription_stream_ids.end()
@@ -4210,12 +4240,15 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
                                              draft_version, request_id, sender_by_track[subscribe.track_name].stream_count()),
                                          false);
         if (!status.ok) {
-            return status;
+            return stopping() ? TransportStatus::success() : status;
         }
     }
     for (const auto& [track_name, request_id] : subscribe_tracks_publish_request_ids) {
         if (!subscribed_tracks.contains(track_name)) {
             continue;
+        }
+        if (flush_budget_exhausted()) {
+            return TransportStatus::success();
         }
         status = write_publish_done_for_request(transport_,
                                                 draft_version,
@@ -4224,15 +4257,22 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
                                                 request_id,
                                                 sender_by_track[track_name].stream_count());
         if (!status.ok) {
-            return status;
+            return stopping() ? TransportStatus::success() : status;
         }
     }
 
-    return write_namespace_done_for_request(transport_,
+    if (flush_budget_exhausted()) {
+        return TransportStatus::success();
+    }
+    const auto namespace_done_status = write_namespace_done_for_request(transport_,
                                             draft_version,
                                             control_stream_id_,
                                             namespace_stream_id_,
                                             namespace_message);
+    if (!namespace_done_status.ok && stopping()) {
+        return TransportStatus::success();
+    }
+    return namespace_done_status;
 }
 
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {

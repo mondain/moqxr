@@ -180,6 +180,16 @@ struct MockTransport final : PublisherTransport {
     TransportStatus write_stream(std::uint64_t stream_id,
                                  std::span<const std::uint8_t> bytes,
                                  bool fin) override {
+        // A blocked write is released either explicitly or by transport close,
+        // mirroring how a real picoquic write unblocks when the connection is
+        // torn down.
+        while (block_writes.load() && !release_writes.load() &&
+               state_ != ConnectionState::kClosed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (state_ == ConnectionState::kClosed) {
+            return TransportStatus::failure("transport closed");
+        }
         writes.push_back({
             .stream_id = stream_id,
             .bytes = std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
@@ -250,6 +260,8 @@ struct MockTransport final : PublisherTransport {
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reads;
     std::set<std::uint64_t> accepted_streams;
     std::function<void(MockTransport&, std::uint64_t)> on_read;
+    std::atomic<bool> block_writes{false};
+    std::atomic<bool> release_writes{false};
 };
 
 std::vector<std::size_t> object_write_indices(const MockTransport& transport) {
@@ -2710,6 +2722,127 @@ int main() {
         } else {
             worker.detach();  // broken build: leak rather than hang the whole suite
         }
+    }
+
+    {
+        // Flush fallback: if post-stop flush writes block, publish_live_objects
+        // must still return promptly. close() tears down the transport, which
+        // makes the blocked write fail; the stop-swallow path returns success.
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace),
+                            /*auto_forward=*/true, /*publish_catalog=*/false,
+                            /*paced=*/false, std::chrono::seconds(1));
+        ok &= expect(session.connect(endpoint, tls).ok,
+                     "expected flush-fallback session connect to succeed");
+
+        LiveObjectSource source;
+        source.tracks = {LiveTrack{.track_name = "events"}};
+        std::atomic<int> object_calls{0};
+        source.next_object = [&object_calls]() -> std::optional<LiveObject> {
+            const int n = object_calls.fetch_add(1);
+            return LiveObject{.track_name = "events", .group_id = 1,
+                              .object_id = static_cast<std::size_t>(n),
+                              .payload = {'O', 'K'}};
+        };
+
+        std::promise<TransportStatus> result_promise;
+        auto result_future = result_promise.get_future();
+        std::thread worker([&]() {
+            result_promise.set_value(session.publish_live_objects(source, DraftVersion::kDraft14));
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        transport.block_writes.store(true);  // any flush write now blocks
+        session.close(0);                     // tears down transport -> unblocks via failure
+
+        const auto wait_status = result_future.wait_for(std::chrono::seconds(4));
+        ok &= expect(wait_status == std::future_status::ready,
+                     "expected publish_live_objects to return promptly despite blocked flush");
+        transport.release_writes.store(true);  // belt-and-suspenders unblock
+        if (wait_status == std::future_status::ready) {
+            worker.join();
+            ok &= expect(result_future.get().ok,
+                         "expected stop with blocked flush to still return success");
+        } else {
+            worker.detach();
+        }
+    }
+
+    {
+        // Graceful flush: with a healthy transport, a stop still returns success
+        // and the loop served at least one object.
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace),
+                            /*auto_forward=*/true, /*publish_catalog=*/false,
+                            /*paced=*/false, std::chrono::seconds(1));
+        ok &= expect(session.connect(endpoint, tls).ok,
+                     "expected graceful-flush session connect to succeed");
+
+        LiveObjectSource source;
+        source.tracks = {LiveTrack{.track_name = "events"}};
+        std::atomic<int> object_calls{0};
+        source.next_object = [&object_calls]() -> std::optional<LiveObject> {
+            const int n = object_calls.fetch_add(1);
+            return LiveObject{.track_name = "events", .group_id = 1,
+                              .object_id = static_cast<std::size_t>(n),
+                              .payload = {'O', 'K'}};
+        };
+
+        std::promise<TransportStatus> result_promise;
+        auto result_future = result_promise.get_future();
+        std::thread worker([&]() {
+            result_promise.set_value(session.publish_live_objects(source, DraftVersion::kDraft14));
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        session.close(0);
+        const auto wait_status = result_future.wait_for(std::chrono::seconds(3));
+        ok &= expect(wait_status == std::future_status::ready,
+                     "expected graceful-flush publish to return after close()");
+        if (wait_status == std::future_status::ready) {
+            worker.join();
+            ok &= expect(result_future.get().ok, "expected graceful-flush return success");
+            ok &= expect(object_calls.load() > 0,
+                         "expected graceful flush after serving objects");
+        } else {
+            worker.detach();
+        }
+    }
+
+    {
+        // No false positive: a transport error WITHOUT a stop request must still
+        // return failure. next_object returns an object for an unknown track,
+        // which the loop rejects with failure at runtime; close() is never called.
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace),
+                            /*auto_forward=*/true, /*publish_catalog=*/false,
+                            /*paced=*/false, std::chrono::seconds(1));
+        ok &= expect(session.connect(endpoint, tls).ok,
+                     "expected no-false-positive session connect to succeed");
+
+        LiveObjectSource source;
+        source.tracks = {LiveTrack{.track_name = "events"}};
+        source.next_object = []() -> std::optional<LiveObject> {
+            return LiveObject{.track_name = "not_a_declared_track", .group_id = 1,
+                              .object_id = 0, .payload = {'X'}};
+        };
+
+        const TransportStatus result = session.publish_live_objects(source, DraftVersion::kDraft14);
+        ok &= expect(!result.ok,
+                     "expected an unknown-track error without stop to return failure");
     }
 
     return ok ? 0 : 1;
