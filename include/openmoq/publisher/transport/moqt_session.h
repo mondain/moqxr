@@ -4,6 +4,7 @@
 #include "openmoq/publisher/live_object.h"
 #include "openmoq/publisher/transport/publisher_transport.h"
 
+#include <atomic>
 #include <iosfwd>
 #include <optional>
 #include <chrono>
@@ -76,6 +77,7 @@ private:
     std::map<std::uint64_t, std::uint64_t> publish_stream_id_by_request_id_;
     PublishStats publish_stats_{};
     std::unordered_map<std::string, std::uint64_t> last_group_by_track_;
+    std::atomic<bool> stop_requested_{false};
 };
 
 }  // namespace openmoq::publisher::transport

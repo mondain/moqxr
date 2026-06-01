@@ -4057,6 +4057,9 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
     bool live_object_catalog_sent = !alias_by_track.contains("catalog");
     const auto await_subscribe_deadline = std::chrono::steady_clock::now() + subscriber_timeout_;
     while (!source_eof) {
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            break;
+        }
         status = process_control_messages();
         if (!status.ok) {
             return status;
@@ -4081,6 +4084,10 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
             }
         } else {
             return read_status;
+        }
+
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            break;
         }
 
         status = process_control_messages();
@@ -4133,6 +4140,9 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
                                     static_cast<std::uint64_t>(next->group_id),
                                     next->payload.size());
             live_object_catalog_sent = true;
+            if (stop_requested_.load(std::memory_order_acquire)) {
+                break;
+            }
             continue;
         }
         if (auto_forward_ && !live_object_catalog_sent) {
@@ -4176,6 +4186,9 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
         record_published_object(next->track_name,
                                 static_cast<std::uint64_t>(next->group_id),
                                 next->payload.size());
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            break;
+        }
     }
 
     for (auto& [track_name, sender] : sender_by_track) {
@@ -4223,6 +4236,7 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
 }
 
 TransportStatus MoqtSession::close(std::uint64_t application_error_code) {
+    stop_requested_.store(true, std::memory_order_release);
     if (namespace_stream_open_) {
         transport_.reset_stream(namespace_stream_id_, 0x0);
         namespace_stream_id_ = 0;

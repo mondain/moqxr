@@ -4,9 +4,11 @@
 #include "openmoq/publisher/transport/moqt_session.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -14,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -2649,6 +2652,64 @@ int main() {
         ok &= expect(transport.reset_calls.size() == 1, "expected one reset_stream call");
         ok &= expect(transport.reset_calls[0].first == 42, "expected stream_id 42");
         ok &= expect(transport.reset_calls[0].second == 0, "expected error_code 0");
+    }
+
+    {
+        // Stop-hang regression: close() from another thread must make a running
+        // publish_live_objects loop return promptly. Against pre-fix code this
+        // hangs forever; the future wait_for bounds the failure.
+        // auto_forward=true drives objects without needing a subscriber. The
+        // draft-14 setup writes PUBLISH_NAMESPACE then collects 1 namespace ack,
+        // so queue server setup + namespace_ok. After that, with no further
+        // queued reads, the mock returns a benign "timed out" for stream 0, so
+        // the loop reaches next_object() every iteration and spins endlessly;
+        // only a stop (close) can end it.
+        MockTransport transport;
+        transport.reads[0].push_back(encode_server_setup_message({
+            .draft = DraftVersion::kDraft14,
+            .max_request_id = 8,
+        }));
+        transport.reads[0].push_back(encode_publish_namespace_ok_message(DraftVersion::kDraft14, 0));
+        MoqtSession session(transport, std::string(kTestTrackNamespace),
+                            /*auto_forward=*/true, /*publish_catalog=*/false,
+                            /*paced=*/false, std::chrono::seconds(1));
+
+        auto connect_status = session.connect(endpoint, tls);
+        ok &= expect(connect_status.ok, "expected stop-cancel session connect to succeed");
+
+        LiveObjectSource source;
+        source.tracks = {LiveTrack{.track_name = "events"}};
+        std::atomic<int> object_calls{0};
+        source.next_object = [&object_calls]() -> std::optional<LiveObject> {
+            // Endless objects so the loop never reaches natural EOF; only a
+            // stop (close) can end it.
+            const int n = object_calls.fetch_add(1);
+            return LiveObject{.track_name = "events", .group_id = 1,
+                              .object_id = static_cast<std::size_t>(n),
+                              .payload = {'O', 'K'}};
+        };
+
+        std::promise<TransportStatus> result_promise;
+        auto result_future = result_promise.get_future();
+        std::thread worker([&]() {
+            result_promise.set_value(session.publish_live_objects(source, DraftVersion::kDraft14));
+        });
+        // Let the loop spin a few iterations, then cancel from this thread.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        session.close(0);
+
+        const auto wait_status = result_future.wait_for(std::chrono::seconds(3));
+        ok &= expect(wait_status == std::future_status::ready,
+                     "expected publish_live_objects to return within 3s after close()");
+        if (wait_status == std::future_status::ready) {
+            worker.join();
+            ok &= expect(object_calls.load() > 0,
+                         "expected the loop to actually serve objects before stop");
+            ok &= expect(result_future.get().ok,
+                         "expected stop-initiated publish_live_objects to return success");
+        } else {
+            worker.detach();  // broken build: leak rather than hang the whole suite
+        }
     }
 
     return ok ? 0 : 1;
