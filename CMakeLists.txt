@@ -38,6 +38,12 @@ option(OPENMOQ_USE_LIBMOQ_PUBLISHER "Use libmoq as the production publish backen
 option(OPENMOQ_LIBMOQ_ENABLE_MVFST "Build libmoq's mvfst adapter for --libmoq-backend mvfst" OFF)
 set(OPENMOQ_MVFST_PREFIX "" CACHE PATH
     "Install prefix holding mvfst, fizz, folly and fmt CMake packages (OPENMOQ_LIBMOQ_ENABLE_MVFST)")
+# Same for libmoq's MsQuic adapter (raw QUIC only). Needs an installed msquic
+# CMake package or a checkout with a built library (OPENMOQ_MSQUIC_ROOT:
+# header at src/inc/msquic.h, library under build/bin/).
+option(OPENMOQ_LIBMOQ_ENABLE_MSQUIC "Build libmoq's MsQuic adapter for --libmoq-backend msquic" OFF)
+set(OPENMOQ_MSQUIC_ROOT "" CACHE PATH
+    "msquic checkout with a built library, for OPENMOQ_LIBMOQ_ENABLE_MSQUIC (empty: installed package)")
 
 # Install rules default to ON only for top-level builds; when moqxr is vendored
 # via add_subdirectory or FetchContent, the consuming project owns the install
@@ -405,6 +411,15 @@ if(_openmoq_configure_libmoq)
         list(APPEND CMAKE_PREFIX_PATH "${OPENMOQ_MVFST_PREFIX}")
         set(OPENMOQ_HAS_LIBMOQ_MVFST ON)
     endif()
+    set(OPENMOQ_HAS_LIBMOQ_MSQUIC OFF)
+    if(OPENMOQ_LIBMOQ_ENABLE_MSQUIC)
+        set(MOQ_BUILD_ADAPTER_MSQUIC ON CACHE BOOL "" FORCE)
+        set(MOQ_BUILD_MSQUIC_MANAGED ON CACHE BOOL "" FORCE)
+        if(OPENMOQ_MSQUIC_ROOT)
+            set(MOQ_MSQUIC_ROOT "${OPENMOQ_MSQUIC_ROOT}" CACHE PATH "" FORCE)
+        endif()
+        set(OPENMOQ_HAS_LIBMOQ_MSQUIC ON)
+    endif()
 
     if(_openmoq_managed_libmoq)
         FetchContent_MakeAvailable(moq5)
@@ -533,6 +548,9 @@ if(OPENMOQ_HAS_LIBMOQ AND TARGET moq::service)
     if(OPENMOQ_HAS_LIBMOQ_MVFST)
         target_compile_definitions(openmoq_publisher_lib PRIVATE OPENMOQ_HAS_LIBMOQ_MVFST=1)
     endif()
+    if(OPENMOQ_HAS_LIBMOQ_MSQUIC)
+        target_compile_definitions(openmoq_publisher_lib PRIVATE OPENMOQ_HAS_LIBMOQ_MSQUIC=1)
+    endif()
     target_link_libraries(openmoq_publisher_lib PRIVATE moq::service)
     if(OPENMOQ_USE_LIBMOQ_PUBLISHER)
         set(OPENMOQ_ENABLE_LIBMOQ_PUBLISHER ON)
@@ -548,6 +566,7 @@ endif()
 message(STATUS "OpenMOQ: libmoq available .......... ${OPENMOQ_HAS_LIBMOQ}")
 if(OPENMOQ_HAS_LIBMOQ)
     message(STATUS "OpenMOQ: libmoq mvfst backend ....... ${OPENMOQ_HAS_LIBMOQ_MVFST}")
+    message(STATUS "OpenMOQ: libmoq msquic backend ...... ${OPENMOQ_HAS_LIBMOQ_MSQUIC}")
 endif()
 if(OPENMOQ_ENABLE_LIBMOQ_PUBLISHER)
     message(STATUS "OpenMOQ: publish backend .......... libmoq (OPENMOQ_USE_LIBMOQ_PUBLISHER=ON)")

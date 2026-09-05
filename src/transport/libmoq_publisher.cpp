@@ -476,7 +476,7 @@ TransportStatus connect_and_attach(const PublisherConfig& config,
     // system bundle locations -- so a public relay with a CA-issued
     // certificate verifies without --insecure.
     std::string ca;
-    if (!tls.insecure_skip_verify) {
+    if (!tls.insecure_skip_verify && config.libmoq_backend != LibmoqBackend::kMsquic) {
         const TransportStatus resolved = tlsverify::resolve_root_certificate_file(tls, ca);
         if (!resolved.ok) {
             return resolved;
@@ -507,6 +507,32 @@ TransportStatus connect_and_attach(const PublisherConfig& config,
                     "WebTransport facade); use --transport raw or a moqt:// endpoint");
             }
             ep_cfg.backend = MOQ_TRANSPORT_BACKEND_MVFST;
+            break;
+#endif
+        case LibmoqBackend::kMsquic:
+#ifndef OPENMOQ_HAS_LIBMOQ_MSQUIC
+            return TransportStatus::failure(
+                "--libmoq-backend msquic needs a build with OPENMOQ_LIBMOQ_ENABLE_MSQUIC=ON");
+#else
+            if (endpoint.transport == TransportKind::kWebTransport) {
+                return TransportStatus::failure(
+                    "--libmoq-backend msquic is raw QUIC only (libmoq's MsQuic adapter has no "
+                    "WebTransport facade); use --transport raw or a moqt:// endpoint");
+            }
+            // The managed MsQuic facade exposes host + insecure_skip_verify only:
+            // libmoq rejects a custom CA file or an SNI override with
+            // MOQ_ERR_UNSUPPORTED at connect, so say why up front.
+            if (!tls.insecure_skip_verify && !tls.ca_path.empty()) {
+                return TransportStatus::failure(
+                    "--libmoq-backend msquic verifies against the platform trust store only; "
+                    "--ca is not supported (use --insecure for a self-signed relay)");
+            }
+            if (!endpoint.sni.empty() && endpoint.sni != endpoint.host) {
+                return TransportStatus::failure(
+                    "--libmoq-backend msquic cannot override the TLS server name (--sni must "
+                    "match the endpoint host)");
+            }
+            ep_cfg.backend = MOQ_TRANSPORT_BACKEND_MSQUIC;
             break;
 #endif
     }

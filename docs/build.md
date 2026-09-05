@@ -122,6 +122,12 @@ GitHub Actions workflows set `OPENSSL_ROOT_DIR` automatically from the runner's 
   `--libmoq-backend mvfst` can drive raw QUIC (`moqt://`) endpoints through
   Meta's QUIC stack instead of picoquic. mvfst has no WebTransport facade in
   libmoq, so the option is refused on `--transport webtransport`.
+- `-DOPENMOQ_LIBMOQ_ENABLE_MSQUIC=ON|OFF` (default `OFF`), optionally with
+  `-DOPENMOQ_MSQUIC_ROOT=/path/to/msquic` (a checkout with the library built
+  under `build/bin/`; empty uses an installed msquic CMake package): builds
+  libmoq's MsQuic adapter for `--libmoq-backend msquic`. Raw QUIC only, and
+  the managed MsQuic facade verifies against the platform trust store, so
+  `--ca` and an `--sni` override are refused on that backend.
 
 ### Publish backend (temporary migration gate)
 
