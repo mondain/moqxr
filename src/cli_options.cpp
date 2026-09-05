@@ -59,8 +59,11 @@ transport::LibmoqBackend parse_libmoq_backend(std::string_view value) {
     if (value == "mvfst") {
         return transport::LibmoqBackend::kMvfst;
     }
+    if (value == "msquic") {
+        return transport::LibmoqBackend::kMsquic;
+    }
 
-    throw std::runtime_error("unsupported --libmoq-backend value: expected auto, picoquic or mvfst");
+    throw std::runtime_error("unsupported --libmoq-backend value: expected auto, picoquic, mvfst or msquic");
 }
 
 transport::EndpointConfig parse_endpoint(std::string_view value) {
@@ -555,7 +558,7 @@ std::string build_usage(const char* argv0) {
     return build_version_banner() + "\nUsage: " + argv0 +
            " --input <mp4|-> [--live-source auto|stdin|srt|dash] [--srt-config <path>]"
            " [--dash-listen host:port] [--dash-path <prefix>] [--dash-queue-depth <count>]"
-           " [--transport raw|webtransport] [--libmoq-backend auto|picoquic|mvfst] [--draft 14|16|17|18] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
+           " [--transport raw|webtransport] [--libmoq-backend auto|picoquic|mvfst|msquic] [--draft 14|16|17|18] [--namespace <value>] [--forward 0|1] [--timeout <seconds>]"
            " [--publish-catalog] [--sap] [--msf-timeline] [--coalesce-cmaf-chunks] [--stream-per-object] [--paced] [--loop] [--preannounce-tracks] [--dump-plan] [--print-msf-urls] [--emit-dir <dir>]"
            " [--vod] [--catalog-republish-interval <seconds>] [--drm-config <path>]"
            " [--endpoint host:port|moqt://host:port/path|https://host:port/path]... [--url moqt://host/path#msf:ns--track] [--alpn value] [--sni value]"
