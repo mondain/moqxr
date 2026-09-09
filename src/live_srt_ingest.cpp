@@ -1585,26 +1585,48 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                     return;
                 }
 
-                const int connect_rc = srt_connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen));
-                freeaddrinfo(result);
-                if (connect_rc == SRT_ERROR) {
-                    std::cerr << "[SRT] Connection FAILED to " << caller.endpoint << "\n";
+                SRTSOCKET data_sock = sock;
+                if (caller.mode == "listener") {
+                    if (srt_bind(sock, result->ai_addr, static_cast<int>(result->ai_addrlen)) == SRT_ERROR ||
+                        srt_listen(sock, 1) == SRT_ERROR) {
+                        std::cerr << "[SRT] Listener FAILED on " << caller.endpoint << "\n";
+                        freeaddrinfo(result);
+                        srt_close(sock);
+                        return;
+                    }
+                    freeaddrinfo(result);
+                    std::cout << "[SRT] Listening on " << caller.endpoint
+                              << " (latency=" << caller.latency_ms << "ms)\n";
+                    const SRTSOCKET listeners[] = {sock};
+                    while (!stop_requested_.load()) {
+                        data_sock = srt_accept_bond(listeners, 1, 200);
+                        if (data_sock != SRT_INVALID_SOCK) break;
+                    }
                     srt_close(sock);
-                    return;
+                    if (data_sock == SRT_INVALID_SOCK) return;
+                    std::cout << "[SRT] Accepted connection on " << caller.endpoint << "\n";
+                } else {
+                    const int connect_rc = srt_connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen));
+                    freeaddrinfo(result);
+                    if (connect_rc == SRT_ERROR) {
+                        std::cerr << "[SRT] Connection FAILED to " << caller.endpoint << "\n";
+                        srt_close(sock);
+                        return;
+                    }
+                    std::cout << "[SRT] Connected to " << caller.endpoint
+                              << " (latency=" << caller.latency_ms << "ms)\n";
                 }
-                std::cout << "[SRT] Connected to " << caller.endpoint
-                          << " (latency=" << caller.latency_ms << "ms)\n";
 
                 TsPesDemuxer demuxer(caller);
                 std::array<std::uint8_t, 1316> recv_buf{};
                 bool video_codec_private_captured = false;
                 bool audio_codec_private_captured = false;
                 while (!stop_requested_.load()) {
-                    const int received = srt_recv(sock, reinterpret_cast<char*>(recv_buf.data()), static_cast<int>(recv_buf.size()));
+                    const int received = srt_recv(data_sock, reinterpret_cast<char*>(recv_buf.data()), static_cast<int>(recv_buf.size()));
                     if (received <= 0) {
                         // On any recv failure, check socket state to distinguish
                         // a transient timeout from a dead connection.
-                        const SRT_SOCKSTATUS sock_state = srt_getsockstate(sock);
+                        const SRT_SOCKSTATUS sock_state = srt_getsockstate(data_sock);
                         if (sock_state == SRTS_BROKEN || sock_state == SRTS_CLOSED ||
                             sock_state == SRTS_NONEXIST) {
                             std::cerr << "[SRT] Connection lost to " << caller.endpoint << "\n";
@@ -1761,7 +1783,7 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                     std::cerr << "[SRT] Worker exited without discovering video codec_private for "
                               << caller.id << "\n";
                 }
-                srt_close(sock);
+                srt_close(data_sock);
             } catch (...) {
             }
         });

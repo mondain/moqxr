@@ -354,6 +354,10 @@ This is true CMAF "per-sample" fragmentation — the finest granularity possible
 
 ---
 
+## SRT caller and listener modes
+
+Each configured source selects its socket role with `srt.mode`. In `caller` mode the publisher connects to the configured host and port. In `listener` mode it binds and listens on that address, accepts one SRT connection, and passes the accepted socket into the same MPEG-TS demux and CMAF fragment pipeline. Multiple configuration entries can therefore expose independent listener ports; each entry accepts one source connection.
+
 ## Comparison: SRT Path vs. Stdin fMP4 Path
 
 Aspect | SRT Path | Stdin (fragmented MP4) Path
