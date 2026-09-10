@@ -124,6 +124,8 @@ struct PublisherStats {
 struct LiveSrtCaller {
     std::string id;
     std::string endpoint;
+    // Listener binds endpoint and waits for the SRT peer; caller connects to it.
+    bool listener = false;
     bool fragment_on_keyframe = true;
     bool empty_moov = true;
     bool default_base_moof = true;

@@ -717,6 +717,27 @@ std::string format_request_id_keys(const std::set<std::uint64_t>& values) {
     return out.str();
 }
 
+// Answers a request type this publisher does not implement with
+// REQUEST_ERROR NOT_SUPPORTED and leaves the session up.
+TransportStatus reject_unsupported_request(PublisherTransport& transport,
+                                           std::uint64_t request_stream_id,
+                                           std::span<const std::uint8_t> message_bytes,
+                                           openmoq::publisher::DraftVersion draft) {
+    std::size_t offset = 0;
+    std::uint64_t request_type = 0;
+    std::uint64_t request_id = 0;
+    if (!decode_moqint(message_bytes, offset, draft, request_type) ||
+        !decode_moqint(message_bytes, offset, draft, request_id)) {
+        request_id = 0;
+    }
+    std::cerr << "[moqt-session] rejecting unsupported request type="
+              << control_message_type_name(request_type, draft) << " (0x" << std::hex << request_type
+              << std::dec << ") request_id=" << request_id << " stream=" << request_stream_id << "\n";
+    return transport.write_stream(request_stream_id,
+                                  encode_request_error_message(draft, request_id, 0x3, 0, "unsupported request"),
+                                  true);
+}
+
 void trace_control_message(std::span<const std::uint8_t> message_bytes, openmoq::publisher::DraftVersion draft) {
     if (!trace_enabled()) {
         return;
@@ -4170,12 +4191,11 @@ TransportStatus serve_subscriptions(PublisherTransport& transport,
 
                 if (request_type != 0x51 || !decode_subscribe_tracks_message(message_bytes, draft, subscribe_tracks)) {
                     const TransportStatus write_status =
-                        transport.write_stream(request_stream_id,
-                                               encode_request_error_message(
-                                                   draft, 0, 0x1, 0, "unsupported request stream"),
-                                               true);
-                    return write_status.ok ? protocol_violation(transport, "received unsupported request stream")
-                                           : write_status;
+                        reject_unsupported_request(transport, request_stream_id, message_bytes, draft);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    continue;
                 }
                 const TransportStatus request_id_status =
                     peer_request_ids.validate(transport,
@@ -6563,6 +6583,7 @@ TransportStatus MoqtSession::publish_live(const LiveIngestOptions& ingest,
         openmoq::publisher::LiveSrtCallerRuntimeConfig config;
         config.id = caller.id;
         config.endpoint = caller.endpoint;
+        config.listener = caller.listener;
         config.fragment_on_keyframe = caller.fragment_on_keyframe;
         config.empty_moov = caller.empty_moov;
         config.default_base_moof = caller.default_base_moof;
@@ -7039,10 +7060,12 @@ TransportStatus MoqtSession::publish_live(const LiveIngestOptions& ingest,
                 if (request_type != 0x03 ||
                     !decode_subscribe_message(
                         request_bytes, draft_version, subscribe)) {
-                    return {protocol_violation(
-                                transport_,
-                                "received unsupported request stream"),
-                            0};
+                    const TransportStatus write_status =
+                        reject_unsupported_request(transport_, request_stream_id, request_bytes, draft_version);
+                    if (!write_status.ok) {
+                        return {write_status, 0};
+                    }
+                    continue;
                 }
                 const TransportStatus request_id_status =
                     peer_request_ids.validate(
@@ -8368,14 +8391,12 @@ TransportStatus MoqtSession::publish_live(std::istream& input,
                 SubscribeTracksMessage subscribe_tracks;
                 if (request_type != 0x51 ||
                     !decode_subscribe_tracks_message(request_bytes, draft_version, subscribe_tracks)) {
-                    TransportStatus write_status =
-                        transport_.write_stream(request_stream_id,
-                                                encode_request_error_message(
-                                                    draft_version, 0, 0x1, 0, "unsupported request stream"),
-                                                true);
-                    return {write_status.ok ? protocol_violation(transport_, "received unsupported request stream")
-                                            : write_status,
-                            0};
+                    const TransportStatus write_status =
+                        reject_unsupported_request(transport_, request_stream_id, request_bytes, draft_version);
+                    if (!write_status.ok) {
+                        return {write_status, 0};
+                    }
+                    continue;
                 }
                 const TransportStatus request_id_status =
                     peer_request_ids.validate(transport_,
@@ -9371,13 +9392,12 @@ TransportStatus MoqtSession::publish_live_objects(const openmoq::publisher::Live
                 SubscribeTracksMessage subscribe_tracks;
                 if (request_type != 0x51 ||
                     !decode_subscribe_tracks_message(request_bytes, draft_version, subscribe_tracks)) {
-                    TransportStatus write_status =
-                        transport_.write_stream(request_stream_id,
-                                                encode_request_error_message(
-                                                    draft_version, 0, 0x1, 0, "unsupported request stream"),
-                                                true);
-                    return write_status.ok ? protocol_violation(transport_, "received unsupported request stream")
-                                           : write_status;
+                    const TransportStatus write_status =
+                        reject_unsupported_request(transport_, request_stream_id, request_bytes, draft_version);
+                    if (!write_status.ok) {
+                        return write_status;
+                    }
+                    continue;
                 }
                 const TransportStatus request_id_status =
                     peer_request_ids.validate(transport_,

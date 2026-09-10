@@ -442,6 +442,9 @@ struct CallerTrackState {
     // Shared PTS origin (90 kHz) for A/V timeline alignment.
     // Set once from the first sample received (video or audio).
     std::optional<std::uint64_t> base_pts90k;
+    // Applied to source PTS so a reconnected peer continues the emitted timeline.
+    std::int64_t pts_offset_us = 0;
+    bool rebase_pending = false;
 };
 
 VideoCodec detect_video_codec_from_stream_type(std::uint8_t stream_type) {
@@ -1362,7 +1365,17 @@ MediaFragment build_fragment_from_sample(const LiveSrtCallerRuntimeConfig& confi
         return MediaFragment{};
     }
 
-    const std::uint64_t pts_us = to_us_from_90k(sample.pts90k);
+    std::uint64_t pts_us = to_us_from_90k(sample.pts90k);
+    if (state.rebase_pending) {
+        std::uint64_t resume_us = 0;
+        for (const auto& [name, last] : state.last_pts_by_track) {
+            resume_us = (std::max)(resume_us, last + state.last_duration_us_by_track[name]);
+        }
+        state.pts_offset_us = static_cast<std::int64_t>(resume_us) - static_cast<std::int64_t>(pts_us);
+        state.rebase_pending = false;
+    }
+    const std::int64_t shifted_us = static_cast<std::int64_t>(pts_us) + state.pts_offset_us;
+    pts_us = shifted_us > 0 ? static_cast<std::uint64_t>(shifted_us) : 0;
     const std::uint64_t last_pts = state.last_pts_by_track[track_name];
     std::uint64_t duration_us = 0;
     if (last_pts != 0 && pts_us > last_pts) {
@@ -1526,6 +1539,8 @@ transport::TransportStatus LiveSrtIngestManager::start() {
         std::mutex mutex;
         std::condition_variable cv;
         std::size_t discovered = 0;
+        std::size_t connected = 0;
+        std::size_t failed = 0;
         std::vector<bool> ready;
         std::vector<bool> video_private_ready;
         std::vector<bool> audio_private_ready;
@@ -1563,8 +1578,21 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                 state.video_timescale = video_track.timescale == 0 ? 90000 : video_track.timescale;
                 state.audio_timescale = audio_track.timescale == 0 ? 48000 : audio_track.timescale;
 
+                // Unblocks the discovery gate when a listener cannot produce a peer.
+                const auto mark_listener_failed = [&]() {
+                    if (!caller.listener) {
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(discovery->mutex);
+                        ++discovery->failed;
+                    }
+                    discovery->cv.notify_all();
+                };
+
                 SRTSOCKET sock = srt_create_socket();
                 if (sock == SRT_INVALID_SOCK) {
+                    mark_listener_failed();
                     return;
                 }
 
@@ -1582,20 +1610,77 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                 struct addrinfo* result = nullptr;
                 if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0 || result == nullptr) {
                     srt_close(sock);
+                    mark_listener_failed();
                     return;
                 }
 
-                const int connect_rc = srt_connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen));
-                freeaddrinfo(result);
-                if (connect_rc == SRT_ERROR) {
-                    std::cerr << "[SRT] Connection FAILED to " << caller.endpoint << "\n";
-                    srt_close(sock);
-                    return;
-                }
-                std::cout << "[SRT] Connected to " << caller.endpoint
-                          << " (latency=" << caller.latency_ms << "ms)\n";
+                SRTSOCKET listen_sock = SRT_INVALID_SOCK;
+                int listen_eid = -1;
+                // Waits for a pending connection in 200ms slices so stop_requested_ is honored.
+                const auto accept_peer = [&]() -> SRTSOCKET {
+                    while (!stop_requested_.load()) {
+                        SRTSOCKET ready = SRT_INVALID_SOCK;
+                        int ready_count = 1;
+                        if (srt_epoll_wait(listen_eid, &ready, &ready_count, nullptr, nullptr, 200,
+                                           nullptr, nullptr, nullptr, nullptr) <= 0) {
+                            continue;
+                        }
+                        sockaddr_storage peer_addr{};
+                        int peer_len = sizeof(peer_addr);
+                        const SRTSOCKET peer = srt_accept(listen_sock, reinterpret_cast<sockaddr*>(&peer_addr), &peer_len);
+                        if (peer == SRT_INVALID_SOCK) {
+                            std::cerr << "[SRT] Accept FAILED on " << caller.endpoint << ": "
+                                      << srt_getlasterror_str() << "\n";
+                            return SRT_INVALID_SOCK;
+                        }
+                        srt_setsockopt(peer, 0, SRTO_RCVTIMEO, &rcv_timeout_ms, sizeof(rcv_timeout_ms));
+                        std::cout << "[SRT] Peer connected on " << caller.endpoint << "\n";
+                        return peer;
+                    }
+                    return SRT_INVALID_SOCK;
+                };
 
-                TsPesDemuxer demuxer(caller);
+                if (caller.listener) {
+                    const int bind_rc = srt_bind(sock, result->ai_addr, static_cast<int>(result->ai_addrlen));
+                    freeaddrinfo(result);
+                    if (bind_rc == SRT_ERROR || srt_listen(sock, 1) == SRT_ERROR) {
+                        std::cerr << "[SRT] Listen FAILED on " << caller.endpoint << ": "
+                                  << srt_getlasterror_str() << "\n";
+                        srt_close(sock);
+                        mark_listener_failed();
+                        return;
+                    }
+                    std::cout << "[SRT] Listening on " << caller.endpoint
+                              << " (latency=" << caller.latency_ms << "ms), waiting for peer\n";
+                    listen_sock = sock;
+                    listen_eid = srt_epoll_create();
+                    const int accept_events = SRT_EPOLL_ACCEPT | SRT_EPOLL_ERR;
+                    srt_epoll_add_usock(listen_eid, listen_sock, &accept_events);
+                    sock = accept_peer();
+                    if (sock == SRT_INVALID_SOCK) {
+                        srt_epoll_release(listen_eid);
+                        srt_close(listen_sock);
+                        mark_listener_failed();
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(discovery->mutex);
+                        ++discovery->connected;
+                    }
+                    discovery->cv.notify_all();
+                } else {
+                    const int connect_rc = srt_connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen));
+                    freeaddrinfo(result);
+                    if (connect_rc == SRT_ERROR) {
+                        std::cerr << "[SRT] Connection FAILED to " << caller.endpoint << "\n";
+                        srt_close(sock);
+                        return;
+                    }
+                    std::cout << "[SRT] Connected to " << caller.endpoint
+                              << " (latency=" << caller.latency_ms << "ms)\n";
+                }
+
+                std::optional<TsPesDemuxer> demuxer(std::in_place, caller);
                 std::array<std::uint8_t, 1316> recv_buf{};
                 bool video_codec_private_captured = false;
                 bool audio_codec_private_captured = false;
@@ -1608,12 +1693,27 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                         if (sock_state == SRTS_BROKEN || sock_state == SRTS_CLOSED ||
                             sock_state == SRTS_NONEXIST) {
                             std::cerr << "[SRT] Connection lost to " << caller.endpoint << "\n";
-                            break;
+                            if (!caller.listener || stop_requested_.load()) {
+                                break;
+                            }
+                            // Listener stays armed so the peer can reconnect on the same tracks.
+                            srt_close(sock);
+                            std::cout << "[SRT] Waiting for peer on " << caller.endpoint << "\n";
+                            sock = accept_peer();
+                            if (sock == SRT_INVALID_SOCK) {
+                                break;
+                            }
+                            demuxer.emplace(caller);
+                            demuxer->set_audio_sample_rate(state.audio_timescale);
+                            state.rebase_pending = true;
+                            state.first_video_keyframe_seen = false;
+                            ++state.group_id;
+                            continue;
                         }
                         // Timeout or transient error — loop back to check stop flag.
                         continue;
                     }
-                    demuxer.feed(recv_buf.data(), static_cast<std::size_t>(received),
+                    demuxer->feed(recv_buf.data(), static_cast<std::size_t>(received),
                                 [&](EsSample&& sample) {
                                     if (sample.is_video && state.video_codec == VideoCodec::kUnknown) {
                                         state.video_codec = detect_video_codec_from_stream_type(sample.stream_type);
@@ -1716,7 +1816,7 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                                                 std::span<const std::uint8_t>(sample.adts_header.data(), sample.adts_header_len));
                                             if (adts_rate > 0) {
                                                 state.audio_timescale = adts_rate;
-                                                demuxer.set_audio_sample_rate(adts_rate);
+                                                demuxer->set_audio_sample_rate(adts_rate);
                                             }
                                             std::lock_guard<std::mutex> lock(discovery->mutex);
                                             if (!discovery->phase_done.load(std::memory_order_relaxed)) {
@@ -1746,7 +1846,7 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                                     sink_(std::move(fragment));
                                 });
                     // After feed: if PMT parsed and no audio PID found, mark audio discovery done early
-                    if (!audio_codec_private_captured && demuxer.pmt_parsed() && !demuxer.has_audio() &&
+                    if (!audio_codec_private_captured && demuxer->pmt_parsed() && !demuxer->has_audio() &&
                         !discovery->phase_done.load(std::memory_order_acquire)) {
                         audio_codec_private_captured = true;
                         std::lock_guard<std::mutex> lock(discovery->mutex);
@@ -1761,7 +1861,13 @@ transport::TransportStatus LiveSrtIngestManager::start() {
                     std::cerr << "[SRT] Worker exited without discovering video codec_private for "
                               << caller.id << "\n";
                 }
-                srt_close(sock);
+                if (sock != SRT_INVALID_SOCK) {
+                    srt_close(sock);
+                }
+                if (listen_sock != SRT_INVALID_SOCK) {
+                    srt_epoll_release(listen_eid);
+                    srt_close(listen_sock);
+                }
             } catch (...) {
             }
         });
@@ -1769,6 +1875,14 @@ transport::TransportStatus LiveSrtIngestManager::start() {
 
     {
         std::unique_lock<std::mutex> lock(discovery->mutex);
+        // Listeners have no peer until one calls in; start the discovery window
+        // only once every listener has accepted.
+        const std::size_t listener_count = static_cast<std::size_t>(
+            std::count_if(callers_.begin(), callers_.end(),
+                          [](const LiveSrtCallerRuntimeConfig& c) { return c.listener; }));
+        while (discovery->connected + discovery->failed < listener_count && !stop_requested_.load()) {
+            discovery->cv.wait_for(lock, std::chrono::milliseconds(200));
+        }
         discovery->cv.wait_for(lock,
                               std::chrono::seconds(5),
                               [&]() {

@@ -27,6 +27,7 @@ using NowFunction = std::function<std::chrono::steady_clock::time_point()>;
 struct LiveSrtCallerOptions {
     std::string id;
     std::string endpoint;
+    bool listener = false;
     bool fragment_on_keyframe = true;
     bool empty_moov = true;
     bool default_base_moof = true;
